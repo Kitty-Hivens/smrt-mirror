@@ -1642,17 +1642,16 @@ async fn store_edited_config(
     // never hand-manages libraries and the build can derive required-ness.
     // Best-effort: a Modrinth outage must not block saving a config, so a fill
     // error is logged and the raw config is saved.
-    if fill {
-        if let Err(e) = crate::authoring::depfill::fill_dependencies(
+    if fill
+        && let Err(e) = crate::authoring::depfill::fill_dependencies(
             &mut cfg,
             &state.registry,
             &state.modrinth,
             &state.storage,
         )
         .await
-        {
-            tracing::warn!(pack_id = %pack_id, error = %e, "dependency auto-fill failed; saving config as-is");
-        }
+    {
+        tracing::warn!(pack_id = %pack_id, error = %e, "dependency auto-fill failed; saving config as-is");
     }
     state.storage.save_pack_config(pack_id, &cfg).await?;
     // Remember that this person worked, so the next commit names them without
