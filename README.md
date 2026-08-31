@@ -38,17 +38,20 @@ What it does today:
 
 ## Building
 
-Requires Rust 1.85+ (edition 2024) and Node for the panel.
+Requires Rust 1.85+ (edition 2024), and Node with pnpm for the panel.
+
+The panel is built first: the release binary embeds `web/dist`, so building
+cargo first would bake whatever was there before (or nothing).
 
 ```
+cd web && pnpm install --frozen-lockfile && pnpm build && cd ..
 cargo build --release --bin smrt --bin smrt-pack
-cd web && npm ci && npm run build
 ```
 
 ## Running locally
 
 ```
-SMRT_ADMIN_TOKEN=$(openssl rand -base64 32) cargo run
+SMRT_ADMIN_TOKEN=$(openssl rand -base64 32) cargo run --bin smrt
 curl http://127.0.0.1:9000/v1/health
 ```
 

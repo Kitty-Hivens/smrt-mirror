@@ -160,9 +160,10 @@ Three things the whole `/v1` surface does, worth wiring into a client once:
   built whole; a streamed response, and anything past 8 MiB, is answered
   untagged rather than hashed on every request, so treat a missing `ETag` as
   "cannot revalidate this one" rather than as an error.
-- **Paging.** Listings that grow without bound -- `/v1/cache/inventory`, plus
-  the gated `/v1/registry/mods` and `/v1/audit` -- accept `?limit=<n>`
-  (capped at 500).
+- **Paging.** Listings that grow without bound accept `?limit=<n>` (capped at
+  500): `/v1/cache/inventory`, a pack's discussions and one discussion's
+  comments, and the gated `/v1/registry/mods`, `/v1/audit`, a pack's commit log
+  and your own notifications.
   Without it they answer whole, as they always have. With it, the response
   carries `Link: <...>; rel="next"` when there is more; follow that URL
   verbatim -- it repeats your filters and carries an opaque cursor. The body
@@ -238,10 +239,12 @@ Not needed by a launcher, listed for completeness: GitHub OAuth session
 (`/v1/authoring/...`, `/v1/registry/...`; bearer `SMRT_ADMIN_TOKEN` or an
 allowlisted OAuth session), and a debug rung above admin for compat-affecting
 registry writes. Job endpoints (`/v1/jobs/{id}`, `/v1/jobs/{id}/events` --
-SSE) track builds; finished jobs keep answering the status endpoint from
-persisted snapshots across restarts (a job running at a restart reads failed,
-with an explicit interrupted line), while the live SSE tail is
-memory-only.
+SSE) track builds; both are gated on the pack the job is about, at the same
+`view` level as reading that pack, because a build log names the pack, its mods
+and whatever the pre-publish check refused. Finished jobs keep answering the
+status endpoint from persisted snapshots across restarts (a job running at a
+restart reads failed, with an explicit interrupted line), while the live SSE
+tail is memory-only.
 
 A pack's history is paged the same way as the listings above:
 `GET /v1/authoring/packs/{id}/commits?limit=` answers a hundred commits by
@@ -250,10 +253,12 @@ served -- the walk continues at that commit's parent.
 
 `GET /v1/events` (SSE, any signed-in caller) is the mirror-wide equivalent:
 what changed, as it changes, so a view listens instead of asking again on a
-timer. Three event names -- `registry` (the mod index moved: a harvest ran, a
+timer. Four event names -- `registry` (the mod index moved: a harvest ran, a
 jar was named, two mods merged), `pack` (a build published, a pack deleted or
-changed visibility) and `moderation` (the upload queue moved, operators only).
-Each carries a small JSON body saying which, and is a nudge rather than the
-data: refetch the one view that cares, and that read is the conditional GET
-above, usually answered `304`. In-process, so events are live-only -- a
-reconnecting client reads the world as it is and listens from there.
+changed visibility, a discussion moved), `catalog` (the curated surfaces around
+the packs: the server list, the featured selection) and `moderation` (the upload
+queue moved, operators only). Each carries a small JSON body saying which, and
+is a nudge rather than the data: refetch the one view that cares, and that read
+is the conditional GET above, usually answered `304`. In-process, so events are
+live-only -- a reconnecting client reads the world as it is and listens from
+there.

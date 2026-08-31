@@ -45,10 +45,15 @@ Shared by all three:
 ```
 /var/lib/smrt/
   registry.db                    # the mod-identity registry (SQLite, WAL)
+  accounts.db                    # accounts, sessions, grants, threads, audit (SQLite)
   removed.txt                    # takedown list: sha1s that must never serve again
   jobs/<id>.json                 # job snapshots (status + log; newest 200 kept)
   featured.json                  # editorial: featured packs/servers
   servers/<id>.json              # curated server metadata
+  meta/<name>.json               # cached upstream lists (Minecraft + loader versions)
+  icons/<xx>/<sha1>.<ext>        # extracted mod icons, and the negative marker
+  icons/modrinth/...             # proxied project icons, cached by project id
+  uploads/<sha1>.jar             # member uploads awaiting moderation (staged, not served)
   cache/<xx>/<sha1>.jar          # content-addressed jar cache (xx = first two hex)
   packs/<PackId>/
     summary.json                 # the catalog card (built)
@@ -172,8 +177,23 @@ regardless.
 - **The client invariant.** A client-side mod is never `required` in a built
   manifest. The build refuses to produce one (see
   [concepts.md](concepts.md)).
-- **Self-contained serving.** The panel, the docs page, icons, avatars --
-  everything a browser loads comes from the mirror's own origin. Third-party
-  fetches happen server-side where they are cacheable and attributable.
+- **Self-contained serving.** Everything the mirror itself puts on a page comes
+  from the mirror's own origin: the panel, the docs page, mod icons, GitHub
+  avatars. Where the source is somebody else's, the fetch happens server-side,
+  where it is cacheable and attributable and the reader's address never leaves
+  the mirror.
+
+  With one gap, stated because it is a gap and not a design: a pack card's
+  `icon_url`, `banner_url` and `gallery_urls`, and any image inside
+  `description_md`, are authored strings that the panel renders as they are.
+  Operator packs point them at the pack's own `static/` tree, which keeps the
+  invariant; a community pack's author can point them anywhere, and then every
+  visitor to the public catalog fetches that host directly and tells it who
+  they are. Nothing about it is enforced today -- no validation on the write,
+  no proxy on the read, and no CSP on the panel that would refuse a foreign
+  image. Closing it means either rejecting off-mirror URLs (which takes away
+  something authors currently do) or proxying them (which makes the mirror a
+  fetcher of arbitrary URLs, with the SSRF surface that implies), and neither
+  has been decided.
 - **Takedown-safe.** `removed.txt` blocks a sha1 from serving and from
   re-ingestion, even if the bytes are still on disk.

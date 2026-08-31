@@ -21,15 +21,23 @@ examples/      # dev probes (parse_bench, evidence_dump, meta_probe)
 
 ## Gates
 
-Everything below must pass before a change is done; CI enforces the same set
-and `main` auto-deploys, so a red gate is a broken deploy:
+Everything below must pass before a change is done. This is the set CI runs,
+verbatim, and `main` auto-deploys, so a red gate is a broken deploy:
 
 ```
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-TS_RS_EXPORT_DIR=web/src/lib cargo test
-cd web && npm run build            # and: npx svelte-check --threshold error
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+TS_RS_EXPORT_DIR=web/src/lib cargo test --all-features
+cd web
+pnpm install --frozen-lockfile
+pnpm check      # svelte-check
+pnpm checks     # the panel's own logic suite (scripts/panel-checks.mjs)
+pnpm build
 ```
+
+pnpm, not npm: the lockfile is `web/pnpm-lock.yaml` and there is no
+`package-lock.json` for npm to honour, so an `npm install` here resolves a
+different tree than the one CI builds.
 
 ## Versioning
 
@@ -48,7 +56,7 @@ version.
 
 Wire structs derive `ts_rs::TS`; `cargo test` (with `TS_RS_EXPORT_DIR`)
 regenerates `web/src/lib/bindings/*.ts`. The bindings are committed --
-a wire change that breaks the panel fails `svelte-check`/`npm run build`
+a wire change that breaks the panel fails `pnpm check` / `pnpm build`
 instead of failing at runtime. Add `#[derive(TS)]` + `#[ts(export, ...)]` to
 any new wire type, and `utoipa::ToSchema` if it appears in a documented
 response.

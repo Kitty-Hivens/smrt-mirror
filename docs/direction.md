@@ -43,18 +43,28 @@ already does a little of it and is the proof it is possible here.
 
 ## What matters first, in order
 
-1. Data. Silent config loss on concurrent edits (#52). Builds that die when
-   Modrinth is down (#57).
-2. Flow traps. Adding a mod blind, with no sight of what it pulls (#53). The
-   editor you cannot leave with the back button (#54).
-3. Friction and comprehension. Forms with no field names (#55). No mod search.
-   No loading states. Jargon in the user's face.
+The order stands; the top of it has since been built, and this list is kept as
+the reading that produced the work rather than as a to-do.
+
+1. Data. Silent config loss on concurrent edits (#52) -- done: a config carries
+   an `ETag` and a save states the revision it edited. Builds that die when
+   Modrinth is down (#57) -- done: the registry answers for a pin the harvest
+   has read, and the build says which mods it fell back on.
+2. Flow traps. Adding a mod blind, with no sight of what it pulls (#53) -- done:
+   the dependency preview runs the real fill on a copy before the save. The
+   editor you cannot leave with the back button (#54) -- done: the open editor
+   is a location.
+3. Friction and comprehension. Forms with no field names (#55). Loading states.
+   Jargon in the user's face. Still the live class.
 4. Cosmetics. Transliterations, wrong labels, tooltips in the wrong language. The
    cheapest class and the least of the evils.
 
-The largest single gap is search. A pack cannot be assembled without the Modrinth
-website open alongside, because the mirror only lets you add a mod whose exact
-name you already know. It is still unfiled.
+Search was the largest single gap and is closed: one search over both places a
+mod can come from (`/v1/search/mods`), each hit saying whether the mirror holds
+the bytes and how it sits with the pack's loader. A pack no longer needs the
+Modrinth website open alongside to be assembled. What is left of the complaint
+is discovery rather than lookup -- browsing what the mirror holds without
+knowing what to ask for.
 
 ## The shape it is heading toward
 

@@ -33,11 +33,33 @@ Two operational consequences of a deploy:
   the next start its persisted snapshot is marked failed with an
   "interrupted by service restart" line, so pollers learn the truth. Finished
   job ids keep answering from `jobs/<id>.json` snapshots across restarts
-  (newest 200 kept). Still: do not start long server-side jobs while a deploy
-  is in flight.
+  (newest 200 kept). Reading one is gated on the pack it is about, at the same
+  level as reading that pack: a build log names the pack, its mods and whatever
+  the pre-publish check refused. Still: do not start long server-side jobs while
+  a deploy is in flight.
 - **migrations run at service start** (`registry_meta.schema_version`
   gates them). A failed migration keeps the old schema and refuses further
   steps; fix forward.
+
+### What a request may cost in memory
+
+Every write route that takes a file buffers the whole body in RAM before the
+handler runs, so the body ceiling is a memory ceiling and is sized per route:
+
+- **8 GiB** -- `POST .../bootstrap` and `POST .../validate`, the two routes that
+  take a whole Minecraft instance archive in one request. Bootstrap copies the
+  buffered body once more before unpacking, so a request near the limit holds
+  twice this for its lifetime. Both are the ceiling nginx is raised to match
+  (`client_max_body_size`); the smaller of the two wins, so raising one alone
+  just moves the wall.
+- **512 MiB** -- anything carrying one file: a cache jar, a pack static asset,
+  a member's upload.
+- **8 MiB** -- build requests and document sync, which are only ever JSON or a
+  CRDT update.
+
+The archive routes are the ones to keep in mind when sizing the box: a
+concurrent pair of bootstraps is tens of gigabytes of resident memory, and
+nothing throttles them beyond the admin gate on bootstrap.
 
 Back up `registry.db` before risky curation:
 
@@ -83,6 +105,13 @@ CLI equivalents: `smrt-pack bootstrap | validate | depfill | build
 --channel ... | enrich-mcmod | infer-requires | upload-static |
 reconstruct-config`. The CLI writes the config directly and builds the working
 state, so a script commits nothing and is refused nothing.
+
+Bootstrap seeds a pack; it does not re-seed one. Over the API it refuses a pack
+that already has a config (`409`), because it writes a whole config from what it
+finds in the archive and would otherwise replace every curated decision in the
+existing one. To rebuild a pack from a fresh archive, delete it first or
+bootstrap under another id. The CLI's `bootstrap` writes to a file you name and
+is yours to point wherever you like.
 
 ### Who may reach a pack
 
@@ -223,8 +252,14 @@ the pack id, owner, tier, visibility and `fork_of` stay the target's, and a
 proposal that could move them would be a rename away from a takeover.
 `POST .../threads/{id}/close` says no; the proposer hitting the same endpoint
 withdraws instead. Settled proposals keep their row -- "we said no in
-March" is what somebody looks for in April -- and settling is a one-time write,
-so two reviewers pressing at once cannot both decide it.
+March" is what somebody looks for in April.
+
+Two reviewers pressing merge at once get one decision and one commit. What
+makes that true is the pack lock and a re-read of the thread inside it, not the
+one-time settling write on its own: the settle is the last thing a merge does,
+so a merge that trusted it alone had already written the config and the commit
+by the time it learned the decision was made. The loser is refused before
+writing anything.
 
 ### History
 
