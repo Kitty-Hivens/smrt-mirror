@@ -60,10 +60,20 @@
     }
   }
   loadAll();
-  // this view is the whole mirror at a glance -- the catalog, the registry and
-  // the cache -- so either kind of change makes it stale
+
+  // This view is the whole mirror at a glance -- the catalog, the registry and
+  // the cache -- so any of those changing makes it stale. Settled rather than
+  // reloaded on each event: one read here is seven requests, three of which
+  // answer whole collections (every mod the registry knows, every jar in the
+  // cache, and the diff between them), and a harvest landing or a burst of
+  // publishes fires several events in a row. A short quiet window turns a burst
+  // into one refresh; a single event still lands in well under a second.
+  let settle: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
-    if (mirror.packs + mirror.registry + mirror.catalog > 0) loadAll();
+    if (mirror.packs + mirror.registry + mirror.catalog === 0) return;
+    clearTimeout(settle);
+    settle = setTimeout(() => void loadAll(), 400);
+    return () => clearTimeout(settle);
   });
 
   // The list behind the editor is stale the moment editing ends, and editing now
