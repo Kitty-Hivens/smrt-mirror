@@ -561,7 +561,7 @@ async fn run_build(
             "Modrinth unreachable; resolved these from the registry"
         );
     }
-    let summary = authoring::make_pack_summary(&cfg, &manifest.pack_version);
+    let summary = authoring::make_pack_summary(&cfg, &manifest.pack_version, mirror_base);
 
     let store = Storage::new(storage.to_path_buf());
     store

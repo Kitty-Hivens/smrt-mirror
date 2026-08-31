@@ -311,9 +311,11 @@ export const en = {
   'pe.needConfigFirst': 'Create or bootstrap a config first (Config tab).',
 
   'pe.card.title': 'Pack card',
-  'pe.card.icon': 'Icon URL',
-  'pe.card.banner': 'Banner URL',
-  'pe.card.gallery': 'Gallery (one URL per line)',
+  'pe.card.hint':
+    'Drop an icon or banner on the Branding tab and it fills in here on its own. A path like _pack/icon.png is the pack\u2019s own file, served by this mirror; a full https:// address is somebody else\u2019s, and everyone who opens the catalogue fetches it from them.',
+  'pe.card.icon': 'Icon',
+  'pe.card.banner': 'Banner',
+  'pe.card.gallery': 'Gallery (one per line)',
   'pe.card.description': 'Description (Markdown)',
 
   'cachePick.search': 'Search by name or sha1...',
@@ -379,6 +381,8 @@ export const en = {
   'be.dropAs': 'Drop as',
   'be.icon': 'Icon',
   'be.banner': 'Banner',
+  'be.iconSet': 'Icon uploaded, and the pack card now points at it.',
+  'be.bannerSet': 'Banner uploaded, and the pack card now points at it.',
   'be.asset': 'Asset',
   'be.dropIcon': 'Drop an image for the pack icon',
   'be.dropBanner': 'Drop an image for the pack banner',

@@ -502,7 +502,7 @@ async fn run_build(
             fell_back.join(", ")
         ));
     }
-    let summary = make_pack_summary(&cfg, &manifest.pack_version);
+    let summary = make_pack_summary(&cfg, &manifest.pack_version, &config.mirror_base);
 
     if req.dry_run {
         job.line(format!(

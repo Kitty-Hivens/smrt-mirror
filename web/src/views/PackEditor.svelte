@@ -44,7 +44,14 @@
   import PackPreview from './PackPreview.svelte';
   import DropZone from './ui/DropZone.svelte';
   import Field from './ui/Field.svelte';
-  import { filenameError, javaError, relPathError, requiredError, say, urlError } from '../lib/validate';
+  import {
+    cardImageError,
+    filenameError,
+    javaError,
+    relPathError,
+    requiredError,
+    say,
+  } from '../lib/validate';
   import Section from './ui/Section.svelte';
   import Select from './ui/Select.svelte';
   import TabStrip from './ui/TabStrip.svelte';
@@ -879,6 +886,23 @@
     }
   }
 
+  /// An icon or banner was just uploaded into the pack's own static tree: put
+  /// its path on the card, which is the half that makes it visible.
+  ///
+  /// The two used to be unconnected, on the same tab. Uploading a picture left
+  /// the card's field empty, and filling it in meant knowing the file is served
+  /// at `/v1/packs/<pack_id>/static/<path>` -- with the id percent-encoded for a
+  /// community pack, which is `u/<uid>/<name>`. Nothing said so anywhere, so the
+  /// one-action path was to paste a link to somebody else's CDN, and the pack's
+  /// own picture sat unused in its own tree. The build resolves this path
+  /// against the mirror, so what a launcher reads is a URL either way.
+  function setCardImage(target: 'icon' | 'banner', relPath: string) {
+    if (!cfg) return;
+    if (target === 'icon') cfg.pack_meta.icon_url = relPath;
+    else cfg.pack_meta.banner_url = relPath;
+    toasts.push({ kind: 'ok', text: t(target === 'icon' ? 'be.iconSet' : 'be.bannerSet') });
+  }
+
   // ── mods ──
   function blankSource(type: SourceDecl['type']): SourceDecl {
     if (type === 'modrinth') return { type, project_id: '', version_id: '' };
@@ -1569,11 +1593,12 @@
 
         <Section title={t('pe.card.title')}>
           <div class="card">
-            <Field label={t('pe.card.icon')} wide error={say(urlError(cfg.pack_meta.icon_url ?? ''))}>
-              <input class="mono" bind:value={cfg.pack_meta.icon_url} placeholder="https://.../icon.png" />
+            <p class="cardhint muted">{t('pe.card.hint')}</p>
+            <Field label={t('pe.card.icon')} wide error={say(cardImageError(cfg.pack_meta.icon_url ?? ''))}>
+              <input class="mono" bind:value={cfg.pack_meta.icon_url} placeholder="_pack/icon.png" />
             </Field>
-            <Field label={t('pe.card.banner')} wide error={say(urlError(cfg.pack_meta.banner_url ?? ''))}>
-              <input class="mono" bind:value={cfg.pack_meta.banner_url} placeholder="https://.../banner.png" />
+            <Field label={t('pe.card.banner')} wide error={say(cardImageError(cfg.pack_meta.banner_url ?? ''))}>
+              <input class="mono" bind:value={cfg.pack_meta.banner_url} placeholder="_pack/banner.png" />
             </Field>
             <Field label={t('pe.card.gallery')} wide><textarea class="mono" rows="3" bind:value={cardGalleryStr}></textarea></Field>
             <Field label={t('pe.card.description')} wide><textarea class="mono" rows="5" bind:value={cfg.pack_meta.description_md}></textarea></Field>
@@ -1581,7 +1606,7 @@
         </Section>
       {/if}
     {:else if tab === 'branding'}
-      <BrandingEditor {packId} />
+      <BrandingEditor {packId} onBranding={setCardImage} />
       {#if cfg}
         <div class="dzone">
           <div class="dztitle mono">{t('pe.dangerZone')}</div>
@@ -1867,10 +1892,15 @@
        the duration token is zeroed there, like everything else */
     animation: row-in var(--dur-enter) var(--ease-out) backwards;
   }
-  .javahint {
+  .javahint,
+  .cardhint {
     grid-column: 1 / -1;
     font-size: var(--fs-sm);
     margin: -4px 0 0;
+  }
+  .cardhint {
+    margin: 0 0 var(--space-2);
+    line-height: 1.5;
   }
   .card textarea {
     resize: vertical;

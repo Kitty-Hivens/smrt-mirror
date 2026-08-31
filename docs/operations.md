@@ -113,6 +113,27 @@ existing one. To rebuild a pack from a fresh archive, delete it first or
 bootstrap under another id. The CLI's `bootstrap` writes to a file you name and
 is yours to point wherever you like.
 
+### The pack card
+
+What the catalogue shows: an icon, a banner, gallery shots and a CommonMark
+description, stored on the config as `pack_meta` and carried onto the built
+`summary.json`.
+
+The pictures belong to the pack. Drop one on the editor's Branding tab -- it is
+cropped and written into the pack's own static tree as `_pack/icon.png` -- and
+the card's field fills in with that path. The build resolves it against
+`SMRT_MIRROR_BASE`, so what a launcher or the public catalogue reads is always a
+URL it can fetch, and the config keeps a path that survives the mirror changing
+domain.
+
+A field may also hold a full `http(s)://` address, which travels to the card
+unchanged. It is worth knowing what that means before using it: an image is not
+a link. Nobody clicks it -- every browser that opens the catalogue fetches it
+automatically, so the host it points at learns the address of everyone who
+looked at the pack. A pack's own file costs nothing and leaks nothing; someone
+else's CDN is a third party on a public page. Nothing enforces this either way
+(see the note in [architecture.md](architecture.md)).
+
 ### Who may reach a pack
 
 Access is a grant on one pack, not a rung on the mirror (ADR 0006). Three

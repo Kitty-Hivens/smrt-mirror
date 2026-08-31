@@ -11,6 +11,7 @@ use crate::domain::{
 use crate::registry::Registry;
 use crate::registry::classify::Classification;
 use anyhow::{Result, bail};
+use percent_encoding::utf8_percent_encode;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -386,7 +387,12 @@ fn content_fingerprint(
 /// Derive the `PackSummary` (the Browse-list / PackDetail card payload) from
 /// the config + the resolved `pack_version`, carrying the config's pack-card
 /// metadata (icon / banner / gallery / description) onto the summary.
-pub fn make_pack_summary(cfg: &PackConfig, pack_version: &str) -> PackSummary {
+///
+/// The card's three image references are resolved here (see [`pack_asset_url`]),
+/// so what a client reads is always a URL it can fetch, whatever the config
+/// stored.
+pub fn make_pack_summary(cfg: &PackConfig, pack_version: &str, mirror_base: &str) -> PackSummary {
+    let resolve = |v: &str| pack_asset_url(mirror_base, &cfg.pack_id, v);
     PackSummary {
         pack_id: cfg.pack_id.clone(),
         display_name: cfg.display_name.clone(),
@@ -395,9 +401,14 @@ pub fn make_pack_summary(cfg: &PackConfig, pack_version: &str) -> PackSummary {
         latest_pack_version: pack_version.to_string(),
         tags: cfg.tags.clone(),
         featured: cfg.featured,
-        icon_url: cfg.pack_meta.icon_url.clone(),
-        banner_url: cfg.pack_meta.banner_url.clone(),
-        gallery_urls: cfg.pack_meta.gallery_urls.clone(),
+        icon_url: cfg.pack_meta.icon_url.as_deref().map(&resolve),
+        banner_url: cfg.pack_meta.banner_url.as_deref().map(&resolve),
+        gallery_urls: cfg
+            .pack_meta
+            .gallery_urls
+            .iter()
+            .map(|v| resolve(v))
+            .collect(),
         description_md: cfg.pack_meta.description_md.clone(),
         owner: cfg.owner,
         tier: cfg.tier,
@@ -408,6 +419,49 @@ pub fn make_pack_summary(cfg: &PackConfig, pack_version: &str) -> PackSummary {
         latest_channel: None,
     }
 }
+
+/// What a pack-card image reference becomes on the built summary.
+///
+/// A value naming `http`, `https` or a protocol-relative host is a URL somebody
+/// wrote, and travels as it is. Anything else is a path inside this pack's own
+/// static tree -- which is where the panel's branding upload puts an icon, so
+/// the stored config says `_pack/icon.png` and nobody has to spell out an
+/// origin, or percent-encode a community pack's `u/<uid>/<name>` id, to make a
+/// card work.
+///
+/// Two things follow. A config stays portable: a mirror that changes domain,
+/// or a pack copied to another mirror, keeps serving its own pictures with
+/// nothing rewritten -- the same reason a `smrt_cache` source stores a hash and
+/// not a URL. And consumers see no difference at all, because what a launcher
+/// or the catalog reads is this, already resolved, on `summary.json`.
+fn pack_asset_url(mirror_base: &str, pack_id: &str, value: &str) -> String {
+    let v = value.trim();
+    let absolute = v.starts_with("//")
+        || v.len() >= 7 && v[..7].eq_ignore_ascii_case("http://")
+        || v.len() >= 8 && v[..8].eq_ignore_ascii_case("https://");
+    if v.is_empty() || absolute {
+        return value.to_string();
+    }
+    // A pack id is `[A-Za-z0-9._-]` plus the `u/<uid>/` namespace, and a static
+    // path may carry spaces, parens and brackets -- both go through the same
+    // encoder, with `/` kept as the separator only inside the path.
+    let enc = |s: &str| utf8_percent_encode(s, PATH_SEGMENT).to_string();
+    let pack = enc(pack_id);
+    let rel = v.split('/').map(enc).collect::<Vec<_>>().join("/");
+    format!(
+        "{}/v1/packs/{pack}/static/{rel}",
+        mirror_base.trim_end_matches('/')
+    )
+}
+
+/// Everything that is not unreserved in a URL path segment. Deliberately broad:
+/// over-encoding still decodes back to the same bytes, under-encoding changes
+/// the path.
+const PATH_SEGMENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
 
 pub(crate) fn now_rfc3339() -> String {
     use time::OffsetDateTime;
@@ -907,6 +961,88 @@ mod tests {
             display: None,
             slug: None,
         }
+    }
+
+    // The card's pictures are the pack's own by default. A stored `_pack/icon.png`
+    // is what the branding upload produced, and the build is where it becomes a
+    // URL -- so nobody types an origin, and nobody percent-encodes a community
+    // pack's own id to make a card work.
+    #[test]
+    fn a_pack_relative_card_image_resolves_against_the_mirror() {
+        assert_eq!(
+            pack_asset_url("https://smrt.example", "Industrial", "_pack/icon.png"),
+            "https://smrt.example/v1/packs/Industrial/static/_pack/icon.png"
+        );
+        // a community id carries slashes, which belong to the pack id and not to
+        // the path, so they are encoded rather than left to split the URL
+        assert_eq!(
+            pack_asset_url("https://smrt.example/", "u/42/MyPack", "_pack/banner.png"),
+            "https://smrt.example/v1/packs/u%2F42%2FMyPack/static/_pack/banner.png"
+        );
+        // real filenames carry spaces and brackets; the separator survives, the
+        // rest is encoded
+        assert_eq!(
+            pack_asset_url("https://smrt.example", "P", "_pack/shots/a shot (1).png"),
+            "https://smrt.example/v1/packs/P/static/_pack/shots/a%20shot%20%281%29.png"
+        );
+    }
+
+    // A URL somebody wrote is theirs, and every card authored before this stored
+    // one. Nothing rewrites them.
+    #[test]
+    fn a_written_url_travels_as_it_is() {
+        for url in [
+            "https://smrt.hivens.dev/v1/packs/Industrial/static/_nexira/icon.png",
+            "http://example.com/i.png",
+            "HTTPS://Example.com/i.png",
+            "//cdn.example/i.png",
+            "",
+        ] {
+            assert_eq!(pack_asset_url("https://smrt.example", "P", url), url);
+        }
+    }
+
+    #[test]
+    fn the_summary_carries_the_resolved_card() {
+        use crate::domain::pack::{default_owner, default_tier, default_visibility};
+        let cfg = PackConfig {
+            pack_id: "u/42/MyPack".into(),
+            display_name: "Mine".into(),
+            tagline: String::new(),
+            minecraft_version: "1.21.1".into(),
+            loader: forge(),
+            java_major: 21,
+            version: None,
+            tags: vec![],
+            featured: false,
+            mods: vec![],
+            assets: vec![],
+            auth: None,
+            pack_meta: crate::domain::PackMeta {
+                icon_url: Some("_pack/icon.png".into()),
+                banner_url: Some("https://cdn.example/b.png".into()),
+                gallery_urls: vec!["_pack/one.png".into()],
+                description_md: None,
+            },
+            owner: default_owner(),
+            tier: default_tier(),
+            visibility: default_visibility(),
+            fork_of: None,
+        };
+        let s = make_pack_summary(&cfg, "0.1.0", "https://smrt.example");
+        assert_eq!(
+            s.icon_url.as_deref(),
+            Some("https://smrt.example/v1/packs/u%2F42%2FMyPack/static/_pack/icon.png")
+        );
+        assert_eq!(
+            s.banner_url.as_deref(),
+            Some("https://cdn.example/b.png"),
+            "a written URL is left alone"
+        );
+        assert_eq!(
+            s.gallery_urls,
+            vec!["https://smrt.example/v1/packs/u%2F42%2FMyPack/static/_pack/one.png".to_string()]
+        );
     }
 
     #[test]

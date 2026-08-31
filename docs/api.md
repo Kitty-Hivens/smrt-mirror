@@ -202,7 +202,13 @@ edges, and which public packs ship it. `/v1/files/{sha1}` is the Modrinth
   CDN. Refreshed monthly; 404 when the project has no icon, or has one in a kind
   the mirror does not serve back.
 - `/v1/users/{uid}/avatar` -- GitHub avatars proxied through the mirror, so a
-  page never hands viewer IPs to a third party.
+  page never hands viewer IPs to a third party. Held for a day, like the project
+  icons above.
+- A pack summary's `icon_url` / `banner_url` / `gallery_urls` are always
+  absolute URLs, whatever the pack's config stored: a card image is usually a
+  path inside the pack's own static tree, and the build resolves it against the
+  mirror's base. Most point back at this mirror; a curator may write a URL of
+  their own, so treat them as arbitrary and do not assume the origin.
 
 ## Servers, featured, community
 

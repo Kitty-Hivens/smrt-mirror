@@ -472,7 +472,11 @@ mod tests {
             .unwrap();
         state
             .storage
-            .save_pack_summary(&crate::authoring::make_pack_summary(&cfg, "0.1.0"))
+            .save_pack_summary(&crate::authoring::make_pack_summary(
+                &cfg,
+                "0.1.0",
+                "http://localhost",
+            ))
             .await
             .unwrap();
         // an official pack, so its keepers are the mirror's operators
@@ -594,7 +598,11 @@ mod tests {
             .unwrap();
         state
             .storage
-            .save_pack_summary(&crate::authoring::make_pack_summary(&cfg, "0.1.0"))
+            .save_pack_summary(&crate::authoring::make_pack_summary(
+                &cfg,
+                "0.1.0",
+                "http://localhost",
+            ))
             .await
             .unwrap();
         let reporter = state.accounts.sign_in_github(42, "reporter", None).unwrap();
@@ -660,7 +668,11 @@ mod tests {
             .unwrap();
         state
             .storage
-            .save_pack_summary(&crate::authoring::make_pack_summary(&cfg, "0.1.0"))
+            .save_pack_summary(&crate::authoring::make_pack_summary(
+                &cfg,
+                "0.1.0",
+                "http://localhost",
+            ))
             .await
             .unwrap();
         let mine = sample_pack("u/42/Mine", crate::domain::Visibility::Draft);
@@ -807,7 +819,11 @@ mod tests {
             .unwrap();
         state
             .storage
-            .save_pack_summary(&crate::authoring::make_pack_summary(&cfg, "0.1.0"))
+            .save_pack_summary(&crate::authoring::make_pack_summary(
+                &cfg,
+                "0.1.0",
+                "http://localhost",
+            ))
             .await
             .unwrap();
         let loud = state.accounts.sign_in_github(42, "loud", None).unwrap();
@@ -932,7 +948,11 @@ mod tests {
             state.storage.save_pack_config(id, &cfg).await.unwrap();
             state
                 .storage
-                .save_pack_summary(&crate::authoring::make_pack_summary(&cfg, "0.1.0"))
+                .save_pack_summary(&crate::authoring::make_pack_summary(
+                    &cfg,
+                    "0.1.0",
+                    "http://localhost",
+                ))
                 .await
                 .unwrap();
         }
@@ -993,7 +1013,11 @@ mod tests {
             .unwrap();
         state
             .storage
-            .save_pack_summary(&crate::authoring::make_pack_summary(&cfg, "0.1.0"))
+            .save_pack_summary(&crate::authoring::make_pack_summary(
+                &cfg,
+                "0.1.0",
+                "http://localhost",
+            ))
             .await
             .unwrap();
         let sid = state.accounts.sign_in_github(42, "helper", None).unwrap();
@@ -1162,7 +1186,11 @@ mod tests {
             state.storage.save_pack_config(id, &cfg).await.unwrap();
             state
                 .storage
-                .save_pack_summary(&crate::authoring::make_pack_summary(&cfg, "0.1.0"))
+                .save_pack_summary(&crate::authoring::make_pack_summary(
+                    &cfg,
+                    "0.1.0",
+                    "http://localhost",
+                ))
                 .await
                 .unwrap();
         }
