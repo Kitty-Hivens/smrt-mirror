@@ -612,6 +612,16 @@ async fn run_bootstrap(
         cfg.mods.len(),
         cfg.assets.len()
     ));
+    // The handler refused a pack that already had a config; this is the same
+    // question asked again with the lock held, which is what makes the answer
+    // hold for the write that follows it. Unpacking the archive takes as long
+    // as an archive takes, and a config can arrive in that time.
+    let _guard = storage.lock_pack_config(&pack_id).await;
+    if storage.load_pack_config(&pack_id).await.is_ok() {
+        return Err(format!(
+            "{pack_id} acquired a config while this archive was being read; nothing was written"
+        ));
+    }
     storage
         .save_pack_config(&pack_id, &cfg)
         .await

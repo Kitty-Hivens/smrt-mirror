@@ -245,12 +245,27 @@ struct BootstrapParams {
     java_major: Option<u32>,
 }
 
+/// Seed a pack from an instance archive.
+///
+/// Creating only. Bootstrap writes a whole authoring config from what it finds
+/// in the archive, so running it over a pack that already has one would replace
+/// every curated decision in it with whatever the archive happens to contain --
+/// silently, and from a job the caller does not have to watch. `duplicate_pack`
+/// refuses the same collision for the same reason, and the panel only offers
+/// this form for a pack with no config, so nothing that exists is being taken
+/// away: what changes is that the API says no rather than doing it.
 async fn bootstrap_pack(
     State(state): State<AppState>,
     Path(pack_id): Path<String>,
     Query(p): Query<BootstrapParams>,
     body: Bytes,
-) -> Json<JobRef> {
+) -> Result<Json<JobRef>, ApiError> {
+    if state.storage.load_pack_config(&pack_id).await.is_ok() {
+        return Err(ApiError::Conflict(format!(
+            "pack {pack_id:?} already has a config; bootstrap seeds a new pack, it does not \
+             replace one -- delete it first, or bootstrap under another id"
+        )));
+    }
     let nonempty = |s: Option<String>| s.filter(|v| !v.is_empty());
     let args = BootstrapArgs {
         pack_id: pack_id.clone(),
@@ -267,11 +282,11 @@ async fn bootstrap_pack(
     let job = state
         .jobs
         .spawn_bootstrap(pack_id, args, body.to_vec(), state.storage.clone());
-    Json(JobRef {
+    Ok(Json(JobRef {
         job_id: job.id.clone(),
         kind: job.kind,
         pack_id: job.pack_id.clone(),
-    })
+    }))
 }
 
 #[derive(Serialize)]

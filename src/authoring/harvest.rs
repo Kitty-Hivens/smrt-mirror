@@ -17,7 +17,9 @@
 use super::archive::read_zip_entry;
 use super::bytecode;
 use super::classfile::parse_class;
-use super::curator::{JarFacts, McModInfo, clean_mc_version, mcmod_modids, parse_mcmod_info};
+use super::curator::{
+    JarFacts, McModInfo, clean_mc_version, mcmod_hard_deps, mcmod_modids, parse_mcmod_info,
+};
 use super::mixinscan;
 use super::modmeta;
 use super::modrinth::{Modrinth, Project};
@@ -201,25 +203,6 @@ pub struct HarvestReport {
 /// the loader-enforced declaration when a dual-metadata jar carries both.
 const MANIFEST_DEP_RANK: i64 = 55;
 
-// mcmod.info dependency lists routinely name the platform, not a real mod.
-// Compared lowercased, so the loader is dropped however a jar spells it.
-const PSEUDO_DEPS: &[&str] = &[
-    "forge",
-    "minecraftforge",
-    "mod_minecraftforge",
-    "forgemodloader",
-    "fml",
-    "cpw.mods.fml",
-    "mcp",
-    "minecraft",
-    "mod_mcversion",
-    "neoforge",
-    "fabric",
-    "fabricloader",
-    "cleanroom",
-    "quilt",
-];
-
 /// Mods that expose an *optional* integration API -- item viewers and probe/
 /// tooltip mods. A jar references one of these from a plugin class (`@JeiPlugin`
 /// and the like) that the host loads only when present, so a *bytecode-inferred*
@@ -279,69 +262,6 @@ fn channel_from_version_type(vt: &str) -> Option<String> {
         "release" | "beta" | "alpha" => Some(vt.to_string()),
         _ => None,
     }
-}
-
-/// Split and clean a jar's declared dependency list into plausible modids. Real
-/// mcmod.info files vary wildly: a Forge dependency string
-/// (`required-after:jei@[4.16,)`), a comma- or semicolon-joined list kept in one
-/// entry (`forge,codechickenlib,cofhcore`), a human-readable phrase
-/// (`ic2 experimental or ic2 classic`), or the platform itself. Split on the
-/// separators, drop the Forge ordering prefix and the version window, drop the
-/// platform, and keep only what reads as a modid -- so a bogus token never becomes
-/// a relation the resolver then reports missing (#10). Order-preserving, deduped.
-/// The hard-dependency modids a jar's `mcmod.info` declares. `requiredMods` is the
-/// hard-require list; when the author filled it, it is authoritative and a modid
-/// only in `dependencies` is a load-order hint, not a hard dep (WorldEditCUI
-/// requires only forge, listing `worldedit` in `dependencies` alone). When
-/// `requiredMods` is empty the author did not distinguish, so `dependencies` is the
-/// best hard-dep signal there is. Cleaned through [`filter_deps`] either way.
-fn mcmod_hard_deps(info: &McModInfo) -> Vec<String> {
-    let hard = if info.required_mods.is_empty() {
-        &info.dependencies
-    } else {
-        &info.required_mods
-    };
-    filter_deps(hard)
-}
-
-fn filter_deps(deps: &[String]) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    for raw in deps {
-        for token in raw.split([',', ';']) {
-            let Some(modid) = clean_dep_token(token) else {
-                continue;
-            };
-            if PSEUDO_DEPS.contains(&modid.to_lowercase().as_str()) {
-                continue;
-            }
-            if seen.insert(modid.clone()) {
-                out.push(modid);
-            }
-        }
-    }
-    out
-}
-
-/// One dependency token -> its bare modid, or None when it is not one. Drops a
-/// Forge ordering prefix (`required-after:`, `after:`, ...) and the `@[range]`
-/// window, then keeps the token only if what remains reads as a modid
-/// (`[A-Za-z0-9_.-]+`) -- a phrase with spaces is a human-readable note, not a
-/// modid, and cannot be resolved, so it is dropped rather than stored as junk.
-fn clean_dep_token(token: &str) -> Option<String> {
-    // a Forge dependency string is `<ordering>:<modid>`; the modid is the last
-    // colon-segment (a real modid has no colons)
-    let t = token.trim().rsplit(':').next().unwrap_or("").trim();
-    // drop the version window
-    let t = t.split('@').next().unwrap_or("").trim();
-    if t.is_empty()
-        || !t
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
-    {
-        return None;
-    }
-    Some(t.to_string())
 }
 
 fn ae(e: crate::http::ApiError) -> anyhow::Error {
@@ -1899,69 +1819,6 @@ mod tests {
             Ok(())
         })
         .unwrap();
-    }
-
-    #[test]
-    fn mcmod_hard_deps_trusts_required_mods_when_present() {
-        // WorldEditCUI hard-requires only forge; worldedit is a load-order hint in
-        // `dependencies`, so it must not become a hard dependency (a false missing).
-        let cui = parse_mcmod_info(
-            br#"[{"modid":"worldeditcuife2","requiredMods":["forge@[14,)"],"dependencies":["forge@[14,)","worldedit"]}]"#,
-        )
-        .unwrap();
-        assert_eq!(
-            mcmod_hard_deps(&cui),
-            Vec::<String>::new(),
-            "worldedit is load-order-only, not a hard dependency"
-        );
-        // GravitationSuite leaves requiredMods empty, so its `dependencies` ic2 is
-        // the only hard-dep signal and stays hard.
-        let gs = parse_mcmod_info(br#"[{"modid":"gravisuite","dependencies":["ic2"]}]"#).unwrap();
-        assert_eq!(
-            mcmod_hard_deps(&gs),
-            vec!["ic2".to_string()],
-            "no requiredMods -> dependencies is the hard signal"
-        );
-    }
-
-    #[test]
-    fn filter_deps_drops_platform_pseudo_deps() {
-        let got = filter_deps(&[
-            "appleskin".into(),
-            "Forge".into(),
-            "minecraft".into(),
-            "  ".into(),
-            "jei".into(),
-        ]);
-        assert_eq!(got, vec!["appleskin".to_string(), "jei".to_string()]);
-    }
-
-    #[test]
-    fn filter_deps_splits_cleans_and_drops_junk() {
-        let got = filter_deps(&[
-            // comma-joined list, platform first -> loader dropped, rest split out
-            "forge,codechickenlib,cofhcore,thermalfoundation".into(),
-            // Forge dependency string: ordering prefix + version window stripped
-            "required-after:jei@[4.16,)".into(),
-            // the loader by another spelling, with a range
-            "MinecraftForge@[14.21.0.2373,)".into(),
-            "mod_MinecraftForge".into(),
-            // human-readable phrases are not modids -> dropped; `chisel` survives
-            "ic2 experimental or ic2 classic, chisel".into(),
-            "Applied Energistics 2".into(),
-            // duplicate collapses
-            "codechickenlib".into(),
-        ]);
-        assert_eq!(
-            got,
-            vec![
-                "codechickenlib".to_string(),
-                "cofhcore".to_string(),
-                "thermalfoundation".to_string(),
-                "jei".to_string(),
-                "chisel".to_string(),
-            ]
-        );
     }
 
     // scan() learned a Modrinth re-upload's forge modid by fetching its jar (IC2,
