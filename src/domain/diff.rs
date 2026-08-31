@@ -121,21 +121,29 @@ pub fn diff_manifests(from: &PackManifest, to: &PackManifest) -> PackDiff {
                 filename: m.filename.clone(),
                 version: None,
             }),
-            Some(old) if old.sha1 != m.sha1 => mods_updated.push(DiffUpdate {
-                filename: m.filename.clone(),
-                version_from: None,
-                version_to: None,
-                sha1_from: old.sha1.clone(),
-                sha1_to: m.sha1.clone(),
-            }),
-            Some(old) if old.default_enabled != m.default_enabled => {
-                mods_toggled.push(DiffToggle {
-                    filename: m.filename.clone(),
-                    default_enabled_from: old.default_enabled,
-                    default_enabled_to: m.default_enabled,
-                })
+            // Both, independently: a re-pin and a flipped install default are
+            // two different things to tell somebody, and a mod that did both
+            // used to report only the re-pin -- so an update dialog said
+            // "updated" and never mentioned the mod had also stopped being
+            // installed by default.
+            Some(old) => {
+                if old.sha1 != m.sha1 {
+                    mods_updated.push(DiffUpdate {
+                        filename: m.filename.clone(),
+                        version_from: None,
+                        version_to: None,
+                        sha1_from: old.sha1.clone(),
+                        sha1_to: m.sha1.clone(),
+                    });
+                }
+                if old.default_enabled != m.default_enabled {
+                    mods_toggled.push(DiffToggle {
+                        filename: m.filename.clone(),
+                        default_enabled_from: old.default_enabled,
+                        default_enabled_to: m.default_enabled,
+                    });
+                }
             }
-            Some(_) => {}
         }
     }
     let mods_removed = from
@@ -327,6 +335,29 @@ mod tests {
         assert!(!d.mods_toggled[0].default_enabled_to);
         // identical assets on both sides -> empty buckets
         assert!(d.assets_added.is_empty() && d.assets_removed.is_empty());
+    }
+
+    // A re-pin and a flipped install default are two different things to tell
+    // somebody. A mod that did both used to report only the re-pin, so the
+    // update dialog said "updated" and never mentioned it had stopped being
+    // installed by default.
+    #[test]
+    fn a_mod_that_was_repinned_and_toggled_reports_both() {
+        let a = manifest(
+            "0.1.2",
+            "21.1.186",
+            vec![entry("sodium.jar", "s1", Some("AANobbMI"), true)],
+        );
+        let b = manifest(
+            "0.1.3",
+            "21.1.186",
+            vec![entry("sodium.jar", "s2", Some("AANobbMI"), false)],
+        );
+        let d = diff_manifests(&a, &b);
+        assert_eq!(d.mods_updated.len(), 1, "the re-pin");
+        assert_eq!(d.mods_toggled.len(), 1, "and the toggle");
+        assert!(!d.mods_toggled[0].default_enabled_to);
+        assert!(d.mods_added.is_empty() && d.mods_removed.is_empty());
     }
 
     #[test]

@@ -239,9 +239,12 @@ impl JobRegistry {
         });
         let mut map = self.jobs.lock().unwrap();
         map.insert(id, job.clone());
-        // Bound memory, but never evict a job a client may still be tailing:
-        // drop the oldest FINISHED job. Ids are zero-padded (ms + counter) so
-        // lexical min is the oldest.
+        // Drop the oldest FINISHED job once the map is over the mark. Never a
+        // running one: a client may still be tailing it, and its log is the only
+        // copy until it finishes. So the bound is on finished jobs, not on the
+        // map -- fifty builds running at once would hold fifty, and each is
+        // holding a build's worth of work anyway. Ids are zero-padded
+        // (ms + counter), so lexical min is the oldest.
         if map.len() > 50 {
             let victim = map
                 .values()

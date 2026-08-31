@@ -708,6 +708,7 @@ async fn delete_server(
 
 async fn put_cache_jar(
     State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
     Path((prefix, filename)): Path<(String, String)>,
     body: Bytes,
 ) -> Result<(StatusCode, Json<PutCacheResponse>), ApiError> {
@@ -719,6 +720,16 @@ async fn put_cache_jar(
     }
     state.storage.save_cache_jar(sha1, &body).await?;
     state.harvest.poke(); // new artifact -> refresh the registry
+    // Putting a jar into the shared cache is at least as accountable as taking
+    // one out, and the three that take one out are all audited.
+    audit(
+        &state,
+        &identity,
+        "cache.put",
+        Some(sha1),
+        Some(&format!("{} bytes", body.len())),
+    )
+    .await;
     Ok((
         StatusCode::CREATED,
         Json(PutCacheResponse {
