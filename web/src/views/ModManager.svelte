@@ -65,7 +65,15 @@
   let upMsg = $state('');
 
 
+  // Which listing is the current one. Typing narrows the query while a walk
+  // into the index may be in flight, and the two write the same list: without
+  // this the older read's page could be appended to -- or land on top of -- the
+  // newer query's results, leaving rows on screen that do not match what was
+  // typed. The commit page guards its two readings the same way.
+  let generation = 0;
+
   async function load() {
+    const mine = ++generation;
     loading = true;
     try {
       const page = await api.registryMods(
@@ -74,18 +82,21 @@
         mcF.trim() || undefined,
         PAGE,
       );
+      if (mine !== generation) return;
       mods = page.rows;
       more = page.next;
       // the needs-identity bucket and the takedown list are operator-only reads
       if (canOperate) {
         const [u, rm] = await Promise.all([api.unassigned(), api.removed()]);
+        if (mine !== generation) return;
         unassigned = u;
         removed = rm.removed;
       }
     } catch (e) {
+      if (mine !== generation) return;
       notifyFail(e);
     } finally {
-      loading = false;
+      if (mine === generation) loading = false;
     }
   }
 
@@ -116,15 +127,20 @@
   // top, because a rename or a merge changes what the pages already read said.
   async function loadMore() {
     if (!more || loading) return;
+    const mine = ++generation;
     loading = true;
     try {
       const page = await api.registryModsPage(more);
+      // a narrower query started while this page was in flight: its rows are
+      // the answer now, and appending to them would mix two listings
+      if (mine !== generation) return;
       mods = [...mods, ...page.rows];
       more = page.next;
     } catch (e) {
+      if (mine !== generation) return;
       notifyFail(e);
     } finally {
-      loading = false;
+      if (mine === generation) loading = false;
     }
   }
 

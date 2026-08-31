@@ -1,8 +1,9 @@
 <script lang="ts">
   import { api, ApiError } from '../lib/api';
   import { countUp } from '../lib/motion.svelte';
-  import { notifyFail } from '../lib/toasts.svelte';
+  import { notifyFail, toasts } from '../lib/toasts.svelte';
   import { dialogs } from '../lib/dialogs.svelte';
+  import { idError, say } from '../lib/validate';
   import { href, plainClick, route } from '../lib/route.svelte';
   import { mirror } from '../lib/mirror.svelte';
   import { t } from '../lib/i18n.svelte';
@@ -202,11 +203,26 @@
   );
   const cacheUnit = $derived(cacheBytes >= 1e9 ? 'GB' : cacheBytes >= 1e6 ? 'MB' : 'KB');
 
+  // Opened into the packs section rather than wherever the button was pressed.
+  // The editor is a location (#54), and only `/packs/<id>` and `/mypacks/<id>`
+  // are locations the router can read back -- pressed from the overview this
+  // used to mint `/overview/<id>`, which opens the editor and then cannot
+  // reopen it on a reload or from a shared link.
+  //
+  // The id is checked here for the same reason the editor's own field checks
+  // it: a name the mirror will refuse should be refused before somebody fills
+  // an editor with work behind it.
   async function newPack() {
     const id = (
       await dialogs.prompt(t('packs.newPrompt'), { title: t('packs.new') })
     )?.trim();
-    if (id) route.openPack(id);
+    if (!id) return;
+    const bad = say(idError(id));
+    if (bad) {
+      toasts.push({ kind: 'error', text: bad });
+      return;
+    }
+    route.openPackIn('packs', id);
   }
 </script>
 
