@@ -17,6 +17,7 @@
   import type {
     CommitLogEntry,
     DeclaredAsset,
+    DeclaredMod,
     JobStatus,
     PackConfig,
     PackEvent,
@@ -889,13 +890,23 @@
   // stray click on the dropdown lost a project id with no undo and an autosave
   // 700ms behind it. Each row remembers what it had per type, so switching back
   // restores it.
-  const priorSource = new Map<number, Partial<Record<SourceDecl['type'], SourceDecl>>>();
+  //
+  // Keyed by the row rather than by its position: the list re-sorts itself
+  // whenever a mod is added or removed, and removing one shifts every row after
+  // it down. A position-keyed memory therefore handed a row whatever the mod
+  // that used to sit at that index had been pinned to -- restoring another
+  // mod's project id into this one, which is worse than not remembering at all.
+  // A weak map also lets a removed row's memory go with it.
+  const priorSource = new WeakMap<
+    DeclaredMod,
+    Partial<Record<SourceDecl['type'], SourceDecl>>
+  >();
 
   function changeSourceType(i: number, type: SourceDecl['type']) {
     const row = cfg!.mods[i];
-    const kept = priorSource.get(i) ?? {};
+    const kept = priorSource.get(row) ?? {};
     kept[row.source.type] = $state.snapshot(row.source) as SourceDecl;
-    priorSource.set(i, kept);
+    priorSource.set(row, kept);
     row.source = kept[type] ?? blankSource(type);
   }
 

@@ -165,17 +165,23 @@
   const featPackCount = $derived(packs.filter((p) => p.featured).length);
   const featServerCount = $derived(servers.filter((s) => s.featured).length);
 
-  // recent builds: built packs, newest first by the date baked into the version
-  // slug (SNAPSHOT-<ver>-<YYYY.MM.DD>). No separate build log to read.
+  // Recent builds: built packs, newest first by when the build was actually
+  // made. That is `latest_built_at`, which the mirror derives from the
+  // manifest's own timestamp -- this used to dig a YYYY.MM.DD out of the
+  // version string, which no version has carried since numbering became
+  // `<base>.<counter>`, so every entry scored the empty string and the list was
+  // in whatever order the catalog happened to arrive in. A pack whose manifest
+  // cannot be read has no date and sorts last rather than first.
   const recentBuilds = $derived(
     packs
       .filter((p) => p.latest_pack_version)
       .map((p) => ({
         pack: p.display_name,
         ver: p.latest_pack_version,
-        date: p.latest_pack_version.match(/(\d{4}\.\d{2}\.\d{2})/)?.[1] ?? '',
+        at: p.latest_built_at ?? '',
+        date: p.latest_built_at?.slice(0, 10) ?? '',
       }))
-      .sort((a, b) => b.date.localeCompare(a.date)),
+      .sort((a, b) => b.at.localeCompare(a.at)),
   );
   const cacheNum = $derived(
     cacheBytes >= 1e9

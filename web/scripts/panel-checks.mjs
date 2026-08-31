@@ -20,6 +20,7 @@ import { advertisesModList } from '../src/lib/handshake.ts';
 import { assetPath, isPackFile, ASSET_PREFIX } from '../src/lib/packassets.ts';
 import { nextPageUrl } from '../src/lib/pagelink.ts';
 import { suggest, tally } from '../src/lib/changes.ts';
+import { renderMarkdown, safeUrl } from '../src/lib/markdown.ts';
 
 let failures = 0;
 const check = (name, cond, detail = '') => {
@@ -322,6 +323,41 @@ check('the offered list holds what old packs need', [8, 11, 16, 17, 21].every((v
   check('the tally counts each operation',
     JSON.stringify(tally([row('add', 'a.jar'), row('add', 'b.jar'), row('remove', 'c.jar')])) ===
       JSON.stringify({ add: 2, remove: 1, change: 0 }));
+}
+
+// ── the description renderer ────────────────────────────────────────────────
+//
+// It renders text somebody else wrote -- a community pack's description -- into
+// a page other people read, so what it must never do is emit markup or a link
+// its author did not write.
+{
+  const md = (s) => renderMarkdown(s);
+
+  check('raw html is text, not markup',
+    md('<img src=x onerror=alert(1)>').includes('&lt;img') &&
+    !md('<img src=x onerror=alert(1)>').includes('<img'));
+  check('a script url is not a link target',
+    md('[x](javascript:alert(1))').includes('href="#"'),
+    md('[x](javascript:alert(1))'));
+  check('quotes cannot escape an attribute',
+    !md('[x](https://a" onmouseover="alert(1))').includes('onmouseover="alert'),
+    md('[x](https://a" onmouseover="alert(1))'));
+  check('safeUrl refuses the schemes that execute',
+    safeUrl('javascript:alert(1)') === '#' && safeUrl('data:text/html,x') === '#' &&
+    safeUrl('https://ok/') === 'https://ok/');
+
+  // The renderer parks each finished link, image and code span behind a
+  // placeholder while it escapes the prose around them, then puts them back.
+  // When that placeholder was printable, prose containing one was substituted
+  // for somebody else's span -- so a description reading `@@MD0@@` rendered a
+  // second copy of the first link in it.
+  const forged = md('@@MD0@@ and [y](https://ok/)');
+  check('a placeholder written in the prose stays prose',
+    forged.includes('@@MD0@@') && (forged.match(/<a /g) ?? []).length === 1,
+    forged);
+  check('and the spans it protects still come back',
+    md('`code` and [y](https://ok/) and ![i](https://ok/i.png)').includes('<code>code</code>'),
+    md('`code` and [y](https://ok/)'));
 }
 
 console.log(failures ? `\n${failures} failed` : '\nall good');
