@@ -12,6 +12,7 @@ use sha1::{Digest, Sha1};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Per-process temp-file sequence so concurrent writers to the same target use
@@ -46,7 +47,7 @@ pub(super) async fn resolve_mod(
     mirror_base: &str,
     modrinth: &Modrinth,
     cache: &ModrinthCache,
-    registry: &Registry,
+    registry: &Arc<Registry>,
     fell_back: &mut Vec<String>,
 ) -> Result<ModEntry> {
     // filename lands in the manifest and the launcher writes mods/<filename>.
@@ -92,7 +93,8 @@ pub(super) async fn resolve_mod(
                     let known = {
                         let vid = version_id.clone();
                         registry
-                            .with_conn(|c| queries::modrinth_file_by_version_id(c, &vid))
+                            .read(move |c| queries::modrinth_file_by_version_id(c, &vid))
+                            .await
                             .unwrap_or(None)
                     };
                     let Some((sha1, size)) = known else {
@@ -385,7 +387,7 @@ mod tests {
         use crate::registry::upsert;
         const NOW: &str = "2026-07-28T00:00:00Z";
         let dir = tempfile::tempdir().unwrap();
-        let r = Registry::open_in_memory().unwrap();
+        let r = Arc::new(Registry::open_in_memory().unwrap());
         r.with_conn_mut(|c| {
             let id = upsert::upsert_mod_by_alias(c, &[("modid", "jei")], NOW)?;
             upsert::upsert_mod_version(

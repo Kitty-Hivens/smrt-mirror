@@ -13,9 +13,11 @@
 
 use super::modrinth::Modrinth;
 use crate::registry::{Registry, queries};
+use crate::storage::Storage;
 use anyhow::Result;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use ts_rs::TS;
 
 /// How a mod sits with the pack's loader. Deliberately not a boolean: the
@@ -105,39 +107,55 @@ pub struct PackContext<'a> {
 pub async fn search_mods(
     q: &str,
     pack: &PackContext<'_>,
-    // sha1s the mirror actually holds, from the cache inventory: the registry
-    // knows an artifact exists, not whether its bytes are here.
-    cached: &HashSet<String>,
+    // Where the bytes would be: the registry knows an artifact exists, storage
+    // knows whether the mirror holds it. Asked about the hits rather than for
+    // its whole listing -- a search answers thirty rows, and reading every
+    // directory in the cache to flag them is a cost that grows with the mirror
+    // while the answer does not.
+    storage: &Storage,
     limit: usize,
-    registry: &Registry,
+    registry: &Arc<Registry>,
     modrinth: &Modrinth,
 ) -> Result<Vec<ModHit>> {
-    let chain = match pack.loader {
-        Some(l) => {
-            let l = l.to_string();
-            registry.with_conn(|c| queries::loader_chain(c, &l))?
-        }
-        None => Default::default(),
+    // Everything the registry has to say, in one hop off the runtime: the
+    // loader family, the bridge table, the matching mods, and -- scoped to just
+    // those mods -- which artifacts exist for them. Four reads that used to run
+    // on the caller's worker, on a path a curator triggers with every search
+    // box keystroke.
+    let (chain, bridges, registry_hits, sha1s) = {
+        let (q, mc, loader) = (
+            q.to_string(),
+            pack.mc.map(str::to_string),
+            pack.loader.map(str::to_string),
+        );
+        registry
+            .read(move |c| {
+                let chain = match &loader {
+                    Some(l) => queries::loader_chain(c, l)?,
+                    None => Default::default(),
+                };
+                let bridges = queries::loader_bridges(c)?;
+                // Not filtered by loader: the fit is computed below, and a
+                // foreign-loader hit is still worth showing as foreign.
+                let hits = queries::list_mods(c, Some(&q), None, mc.as_deref(), None, None)?;
+                let ids: Vec<i64> = hits.iter().map(|m| m.mod_id).collect();
+                let sha1s = queries::sha1s_for_mods(c, &ids)?;
+                Ok((chain, bridges, hits, sha1s))
+            })
+            .await?
     };
 
+    let cached: HashSet<String> = storage
+        .cached_among(sha1s.values().flatten().cloned())
+        .await;
+
     // Every known bridge, and the subset of them this pack already ships.
-    let bridges = registry.with_conn(queries::loader_bridges)?;
     let carried_by_pack: HashSet<String> = bridges
         .iter()
         .filter(|(project, _)| pack.present_projects.contains(*project))
         .map(|(_, loader)| loader.to_lowercase())
         .collect();
     let carried_by_any: HashSet<String> = bridges.values().map(|l| l.to_lowercase()).collect();
-
-    // What the mirror holds. Not filtered by loader: the fit is computed below,
-    // and a foreign-loader hit is still worth showing as foreign.
-    let (registry_hits, sha1s) = {
-        let (q, mc) = (q.to_string(), pack.mc.map(str::to_string));
-        let hits = registry
-            .with_conn(|c| queries::list_mods(c, Some(&q), None, mc.as_deref(), None, None))?;
-        let sha1s = registry.with_conn(queries::sha1s_by_mod)?;
-        (hits, sha1s)
-    };
 
     // Modrinth is best-effort: an outage narrows the answer to what the mirror
     // knows rather than failing the search, which is the same posture the build

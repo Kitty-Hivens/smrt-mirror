@@ -505,7 +505,7 @@ async fn run_build(
     enrich_from_mcmod_info(&mut cfg, storage)?;
     infer_requires_from_mcmod_info(&mut cfg, storage)?;
     // side/policy classification through the registry decision layer
-    let registry = Registry::open(storage.join("registry.db"))?;
+    let registry = Arc::new(Registry::open(storage.join("registry.db"))?);
     let classifications = registry.with_conn(|c| authoring::resolve::classify_pack(c, &cfg))?;
 
     // The same gate the service applies (#108). This writes into the same
@@ -580,16 +580,10 @@ async fn run_build(
 async fn run_depfill(config_path: &Path, out_path: &Path, storage: &Path) -> Result<()> {
     let mut cfg: PackConfig = read_json(config_path)?;
     let store = Storage::new(storage.to_path_buf());
-    let cached: std::collections::HashSet<String> = store
-        .list_cache_inventory()
-        .await
-        .map(|inv| inv.into_iter().map(|e| e.sha1).collect())
-        .unwrap_or_default();
-    let registry = Registry::open(storage.join("registry.db"))?;
+    let registry = Arc::new(Registry::open(storage.join("registry.db"))?);
     let modrinth = Modrinth::new()?;
     let added =
-        smrt::authoring::depfill::fill_dependencies(&mut cfg, &registry, &modrinth, &cached)
-            .await?;
+        smrt::authoring::depfill::fill_dependencies(&mut cfg, &registry, &modrinth, &store).await?;
     write_pack_config(&cfg, out_path)?;
     info!(added, out = %out_path.display(), "dependency fill complete");
     Ok(())

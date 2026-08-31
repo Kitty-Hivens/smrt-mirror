@@ -5,7 +5,7 @@
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use super::model::ModrinthProjectName;
 use super::{authored, migrations, queries, upsert};
@@ -45,9 +45,33 @@ impl Registry {
     }
 
     /// Run a read against the connection. Call inside `spawn_blocking`.
+    ///
+    /// From an `async fn`, call [`read`](Self::read) instead -- it is this with
+    /// the hop the rule above asks for.
     pub fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         let guard = self.conn.lock().expect("registry mutex poisoned");
         f(&guard)
+    }
+
+    /// Run a read off the async runtime -- the door for an `async fn`.
+    ///
+    /// The rule at the top of this module is not decoration. The connection
+    /// sits behind a plain mutex that the harvest holds for the whole of its
+    /// write transaction, so a read called straight from async code does not
+    /// merely do file I/O on a runtime worker: it can park that worker until
+    /// the harvest is done. A mirror has as many workers as cores, and the
+    /// paths that read the registry from async code -- saving a config,
+    /// previewing dependencies, searching for a mod -- are the ones a person
+    /// triggers repeatedly while typing.
+    pub async fn read<T, F>(self: &Arc<Self>, f: F) -> Result<T>
+    where
+        F: FnOnce(&Connection) -> Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let me = self.clone();
+        tokio::task::spawn_blocking(move || me.with_conn(f))
+            .await
+            .context("registry read task")?
     }
 
     /// Run a write/transaction needing `&mut Connection`. Call inside

@@ -13,6 +13,7 @@ use crate::registry::classify::Classification;
 use anyhow::{Result, bail};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 use tracing::info;
 
 /// Resolve every source in a `PackConfig` and assemble the wire manifest.
@@ -47,7 +48,7 @@ pub async fn build_manifest(
     changelog_i18n: Option<std::collections::BTreeMap<String, String>>,
     mirror_base: &str,
     classifications: &HashMap<String, Classification>,
-    registry: &Registry,
+    registry: &Arc<Registry>,
     modrinth: &Modrinth,
 ) -> Result<Built> {
     let pack_version = match pack_version {
@@ -536,7 +537,7 @@ mod tests {
             fork_of: None,
         };
 
-        let registry = Registry::open_in_memory().unwrap();
+        let registry = Arc::new(Registry::open_in_memory().unwrap());
         let modrinth = Modrinth::new().unwrap();
         let err = build_manifest(
             &cfg,

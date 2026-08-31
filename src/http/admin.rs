@@ -877,13 +877,6 @@ async fn search_mods_combined(
         }
         None => Default::default(),
     };
-    let cached: std::collections::HashSet<String> = state
-        .storage
-        .list_cache_inventory()
-        .await
-        .map(|inv| inv.into_iter().map(|e| e.sha1).collect())
-        .unwrap_or_default();
-
     let ctx = crate::authoring::PackContext {
         mc: q.mc.as_deref(),
         loader: q.loader.as_deref(),
@@ -892,7 +885,7 @@ async fn search_mods_combined(
     let hits = crate::authoring::search_mods(
         &q.q,
         &ctx,
-        &cached,
+        &state.storage,
         q.limit.unwrap_or(30).clamp(1, 100),
         &state.registry,
         &state.modrinth,
@@ -986,16 +979,14 @@ async fn preview_dependencies(
     Json(cfg): Json<PackConfig>,
 ) -> Result<Json<Vec<crate::authoring::depfill::PulledPreview>>, ApiError> {
     super::auth::authorize(&state, &identity, &pack_id, PackLevel::View).await?;
-    let cached: std::collections::HashSet<String> = state
-        .storage
-        .list_cache_inventory()
-        .await
-        .map(|inv| inv.into_iter().map(|e| e.sha1).collect())
-        .unwrap_or_default();
-    let pulled =
-        crate::authoring::depfill::preview_fill(&cfg, &state.registry, &state.modrinth, &cached)
-            .await
-            .map_err(ApiError::Internal)?;
+    let pulled = crate::authoring::depfill::preview_fill(
+        &cfg,
+        &state.registry,
+        &state.modrinth,
+        &state.storage,
+    )
+    .await
+    .map_err(ApiError::Internal)?;
     Ok(Json(pulled))
 }
 
@@ -1652,17 +1643,11 @@ async fn store_edited_config(
     // Best-effort: a Modrinth outage must not block saving a config, so a fill
     // error is logged and the raw config is saved.
     if fill {
-        let cached: std::collections::HashSet<String> = state
-            .storage
-            .list_cache_inventory()
-            .await
-            .map(|inv| inv.into_iter().map(|e| e.sha1).collect())
-            .unwrap_or_default();
         if let Err(e) = crate::authoring::depfill::fill_dependencies(
             &mut cfg,
             &state.registry,
             &state.modrinth,
-            &cached,
+            &state.storage,
         )
         .await
         {
