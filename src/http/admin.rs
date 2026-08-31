@@ -157,9 +157,12 @@ fn authoring_router(state: AppState) -> Router {
             "/v1/authoring/packs/{pack_id}/duplicate",
             post(duplicate_pack),
         )
+        // An instance archive in one body -- the only route on this router that
+        // carries one, so the gigabyte ceiling stops here instead of applying to
+        // every authoring write behind the same session gate.
         .route(
             "/v1/authoring/packs/{pack_id}/validate",
-            post(validate_pack),
+            post(validate_pack).layer(DefaultBodyLimit::max(super::MAX_ARCHIVE_BODY)),
         )
         .route(
             "/v1/authoring/packs/{pack_id}/dependency-preview",
@@ -345,6 +348,7 @@ async fn approve_upload(
         .await
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("upload task: {e}")))??
         .ok_or(ApiError::NotFound)?;
+    already_decided(&upload)?;
     state.storage.promote_upload(&upload.sha1).await?;
     let acc = state.accounts.clone();
     let decided_by = identity.uid;
@@ -371,6 +375,22 @@ struct RejectBody {
     note: Option<String>,
 }
 
+/// An upload only gets decided once. Deciding a decided one again is not a
+/// second opinion: rejecting an approved upload would mark it rejected while
+/// its jar stayed in the shared cache -- promoted, referenced by whatever pack
+/// pulled it, and now recorded as refused. The two moderation buttons live on a
+/// queue two operators can be looking at, so this is a race worth naming rather
+/// than a hypothetical.
+fn already_decided(upload: &UploadRow) -> Result<(), ApiError> {
+    if upload.status == "pending" {
+        return Ok(());
+    }
+    Err(ApiError::Conflict(format!(
+        "that upload was already {} -- reload the queue",
+        upload.status
+    )))
+}
+
 /// Reject a staged upload: drop its staged jar and mark it rejected, with an
 /// optional moderator note the uploader sees.
 async fn reject_upload(
@@ -384,6 +404,7 @@ async fn reject_upload(
         .await
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("upload task: {e}")))??
         .ok_or(ApiError::NotFound)?;
+    already_decided(&upload)?;
     state.storage.discard_upload(&upload.sha1).await?;
     let acc = state.accounts.clone();
     let note = body.note.clone();
@@ -2132,10 +2153,19 @@ async fn duplicate_pack(
 
 /// Every pack summary, unfiltered -- the operator's view, including drafts,
 /// unlisted, and community packs that the public `/v1/packs` listing hides.
+///
+/// Carries when each pack last built, like the two public listings: this is the
+/// only listing the panel's own catalog reads, and without it a view that wants
+/// to order packs by recency has nothing to order by but the version string,
+/// which is a counter rather than a date.
 async fn list_all_pack_summaries(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<PackSummary>>, ApiError> {
-    Ok(Json(state.storage.list_pack_summaries().await?))
+    let mut summaries = state.storage.list_pack_summaries().await?;
+    for summary in &mut summaries {
+        super::public::enrich_latest_build(&state, summary).await;
+    }
+    Ok(Json(summaries))
 }
 
 #[derive(serde::Deserialize)]
@@ -2367,7 +2397,9 @@ async fn my_level(
 struct BlockReq {
     #[serde(alias = "uid")]
     github_uid: i64,
-    /// The keepers' note to themselves; never served to the person blocked.
+    /// Why. Written for the person it names: they are shown it when a write of
+    /// theirs is refused, and on their own page. A door that shuts with no word
+    /// through it is one they can only argue with.
     #[serde(default)]
     reason: Option<String>,
 }
@@ -2890,6 +2922,16 @@ async fn merge_proposal(
 ) -> Result<Json<crate::accounts::Thread>, ApiError> {
     let t = load_thread(&state, id).await?;
     super::auth::authorize(&state, &identity, &t.pack_id, PackLevel::Edit).await?;
+
+    // Taking a proposal writes a config, a commit, and the decision itself, and
+    // those three are one act. The thread is re-read inside the pack lock
+    // because the status read before it decides nothing: two reviewers pressing
+    // merge both pass it, the second waits here, and -- without this -- goes on
+    // to write a second merge commit of an already-merged proposal before
+    // `settle_thread` finally tells it the decision was made. The pack gets one
+    // decision and one commit; the loser is refused before writing anything.
+    let _guard = state.storage.lock_pack_config(&t.pack_id).await;
+    let t = load_thread(&state, id).await?;
     if t.status != "open" {
         return Err(ApiError::Conflict(format!(
             "this proposal is already {}",
@@ -2903,8 +2945,6 @@ async fn merge_proposal(
         .storage
         .load_commit_config(source_pack, source_commit)
         .await?;
-
-    let _guard = state.storage.lock_pack_config(&t.pack_id).await;
     let current = state.storage.load_pack_config(&t.pack_id).await?;
     let merged = current.with_authored_from(&offered);
     if let Some(dup) = merged.duplicate_declaration() {

@@ -6,7 +6,7 @@
 
 use crate::accounts::{Accounts, Identity};
 use crate::authoring::{
-    self, BootstrapArgs, HarvestScheduler, build_manifest, enrich_from_mcmod_info, gate,
+    self, BootstrapArgs, HarvestScheduler, Modrinth, build_manifest, enrich_from_mcmod_info, gate,
     infer_requires_from_mcmod_info, make_pack_summary,
 };
 use crate::config::Config;
@@ -83,6 +83,10 @@ pub struct BuildDeps {
     pub config: Arc<Config>,
     pub registry: Arc<Registry>,
     pub accounts: Arc<Accounts>,
+    /// The mirror's one upstream client. Shared rather than built per build: it
+    /// pools connections and remembers the project lookups it has already made,
+    /// and both are thrown away by a client that lives for one build.
+    pub modrinth: Arc<Modrinth>,
     /// The harvester to wait on (and poke afterwards), where one is running.
     pub harvest: Option<Arc<HarvestScheduler>>,
     /// Where a publish is announced, so a catalog stops being stale the moment
@@ -259,6 +263,7 @@ impl JobRegistry {
             config,
             registry,
             accounts,
+            modrinth,
             harvest,
             events,
         } = deps;
@@ -289,7 +294,11 @@ impl JobRegistry {
                         .line("harvest still busy after 5 minutes; building against current state");
                 }
             }
-            match run_build(&handle, &storage, &config, &registry, &accounts, req).await {
+            match run_build(
+                &handle, &storage, &config, &registry, &accounts, &modrinth, req,
+            )
+            .await
+            {
                 Ok(()) => {
                     handle.finish(Status::Done);
                     // a published build added a build + its mods to harvest -- a
@@ -341,12 +350,14 @@ impl JobRegistry {
 /// transiently (config.json stays the source on disk), resolve sources, check
 /// what the build would publish, and publish the manifest + summary + latest
 /// pointer. Logs each step to the job.
+#[allow(clippy::too_many_arguments)]
 async fn run_build(
     job: &Job,
     storage: &Storage,
     config: &Config,
     registry: &Arc<Registry>,
     accounts: &Arc<Accounts>,
+    modrinth: &Arc<Modrinth>,
     req: BuildRequest,
 ) -> Result<(), String> {
     let pack_id = job.pack_id.clone();
@@ -372,11 +383,22 @@ async fn run_build(
 
     // Enrichment passes run on a transient copy of the config: fill display
     // metadata from each cache jar's mcmod.info, then infer the requires graph.
+    //
+    // Off the pool: both open and unzip every cache jar the pack names, which is
+    // hundreds of blocking file reads on a large pack. Run inline they would
+    // hold a runtime worker for the whole pass, and a mirror serving jars has
+    // few of those.
     job.line("running enrichment passes (enrich-mcmod / infer-requires)");
-    enrich_from_mcmod_info(&mut cfg, storage.root())
-        .map_err(|e| format!("enrich-mcmod failed: {e:#}"))?;
-    infer_requires_from_mcmod_info(&mut cfg, storage.root())
-        .map_err(|e| format!("infer-requires failed: {e:#}"))?;
+    let root = storage.root().to_path_buf();
+    cfg = tokio::task::spawn_blocking(move || {
+        enrich_from_mcmod_info(&mut cfg, &root)
+            .map_err(|e| format!("enrich-mcmod failed: {e:#}"))?;
+        infer_requires_from_mcmod_info(&mut cfg, &root)
+            .map_err(|e| format!("infer-requires failed: {e:#}"))?;
+        Ok::<_, String>(cfg)
+    })
+    .await
+    .map_err(|e| format!("enrichment task: {e}"))??;
 
     // The registry pass, in one hop off the pool: the side/policy classification
     // the required-ness seeds and side invariants ride on, and the dependency
@@ -405,16 +427,9 @@ async fn run_build(
     // whose pin has fallen behind a mod's floor does not start, and until this
     // ran nothing said so before a player's crash log.
     job.line("checking the pinned loader build against what the mods declare");
-    match crate::authoring::Modrinth::new() {
-        Ok(modrinth) => {
-            crate::authoring::loader_windows(&cfg, storage.root(), registry, &Arc::new(modrinth))
-                .await
-                .apply(&mut report);
-        }
-        Err(e) => job.line(format!(
-            "no http client for the loader-window check ({e:#}); the pinned build stays unchecked"
-        )),
-    }
+    crate::authoring::loader_windows(&cfg, storage.root(), registry, modrinth)
+        .await
+        .apply(&mut report);
 
     // The gate (#108). Two findings mean the pack cannot start and stop a
     // publish; the rest are recorded onto the build. A dry run runs the same
@@ -460,6 +475,7 @@ async fn run_build(
         &config.mirror_base,
         &classifications,
         registry,
+        modrinth,
     )
     .await
     .map_err(|e| format!("resolve failed: {e:#}"))?;
@@ -697,6 +713,7 @@ mod tests {
             config,
             registry: registry.unwrap_or_else(|| Arc::new(Registry::open_in_memory().unwrap())),
             accounts: accounts(),
+            modrinth: Arc::new(crate::authoring::Modrinth::new().unwrap()),
             harvest: None,
             events: Arc::new(MirrorEvents::default()),
         }

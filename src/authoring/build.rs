@@ -48,6 +48,7 @@ pub async fn build_manifest(
     mirror_base: &str,
     classifications: &HashMap<String, Classification>,
     registry: &Registry,
+    modrinth: &Modrinth,
 ) -> Result<Built> {
     let pack_version = match pack_version {
         Some(v) => {
@@ -64,7 +65,9 @@ pub async fn build_manifest(
         "building manifest"
     );
 
-    let modrinth = Modrinth::new()?;
+    // The caller's client, not a fresh one: it pools connections and remembers
+    // the icon lookups it has already made, and a per-build client would throw
+    // both away on every build.
     let modrinth_cache = ModrinthCache::default();
 
     // Every source is resolved before anything is reported. Stopping at the
@@ -82,7 +85,7 @@ pub async fn build_manifest(
             m,
             storage,
             mirror_base,
-            &modrinth,
+            modrinth,
             &modrinth_cache,
             registry,
             &mut fell_back,
@@ -101,7 +104,7 @@ pub async fn build_manifest(
             &cfg.pack_id,
             storage,
             mirror_base,
-            &modrinth,
+            modrinth,
             &modrinth_cache,
         )
         .await
@@ -179,6 +182,16 @@ pub async fn build_manifest(
 /// co-toggle in the launcher via the requires tree), with the low-confidence
 /// declared-edge override as the one exception and a build error as the
 /// backstop for an inconsistent classification.
+///
+/// `required` and `default_enabled` are settled together at the end, because
+/// the graph can lock a mod the curator had opted out of: an enabled mod hard-
+/// requires it, so the pack does not start without it, and the opt-out was
+/// about the default install set rather than about that edge. Shipping the pair
+/// `required = true, default_enabled = false` would say two opposite things to
+/// the launcher, which installs a required entry unconditionally and reads
+/// `default_enabled` only for optional ones -- and the content fingerprint
+/// hashes both, so the contradiction would also make two identical packs
+/// fingerprint differently.
 fn derive_required(
     mods: &mut [ModEntry],
     classifications: &HashMap<String, Classification>,
@@ -298,6 +311,12 @@ fn derive_required(
 
     for (i, m) in mods.iter_mut().enumerate() {
         m.required = required.contains(&i);
+        // Locked by the graph over an opt-out: the launcher installs it either
+        // way, so the entry says so rather than carrying a toggle state nothing
+        // reads.
+        if m.required {
+            m.default_enabled = true;
+        }
         // The advisory presence class, collapsing side + policy + the graph
         // outcome for the launcher UI. Unclassified stays absent -- an old-style
         // entry -- and a stale value from a previous build never lingers.
@@ -518,6 +537,7 @@ mod tests {
         };
 
         let registry = Registry::open_in_memory().unwrap();
+        let modrinth = Modrinth::new().unwrap();
         let err = build_manifest(
             &cfg,
             dir.path(),
@@ -528,6 +548,7 @@ mod tests {
             "https://mirror.example",
             &HashMap::new(),
             &registry,
+            &modrinth,
         )
         .await
         .expect_err("neither jar exists");
@@ -826,6 +847,26 @@ mod tests {
             presence,
             Some(PresenceClass::Required),
             "a required survivor reads required, not client"
+        );
+    }
+
+    // A mod the curator opted out of, pulled back in by a hard edge from an
+    // enabled mod, ships as a plain required entry. The pair `required = true,
+    // default_enabled = false` says two opposite things to the launcher, which
+    // installs a required entry regardless of the flag -- and the fingerprint
+    // hashes both, so the contradiction would make identical packs differ.
+    #[test]
+    fn a_graph_locked_opt_out_does_not_ship_required_and_disabled() {
+        let mut mods = vec![
+            entry("addon.jar", true, &["lib.jar"]),
+            entry("lib.jar", false, &[]),
+        ];
+        derive_required(&mut mods, &HashMap::new()).unwrap();
+        let lib = &mods[1];
+        assert!(lib.required, "an enabled mod cannot start without it");
+        assert!(
+            lib.default_enabled,
+            "and a required entry is never also opted out"
         );
     }
 

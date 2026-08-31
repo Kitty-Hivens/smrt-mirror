@@ -26,15 +26,23 @@ pub fn router(state: AppState) -> Router {
     build_router(state.clone()).merge(bootstrap_router(state))
 }
 
-/// Build + job polling: any signed-in member may reach it, but `build_pack`
-/// gates on pack ownership so a member builds only their own community pack.
-/// Job status/events poll by an unguessable job id, so they need only a session.
+/// Build + job polling: any signed-in member may reach it, and every handler
+/// then gates on the pack the request is about -- `build_pack` at `Edit`, the
+/// two job reads at `View`.
+///
+/// A job id is not a capability and must never be treated as one. It is minted
+/// as a zero-padded millisecond plus a process-wide counter (see
+/// [`crate::jobs::JobRegistry::create`], where that shape is load-bearing for
+/// snapshot pruning), so it is enumerable by anyone who has watched one of
+/// their own builds. A build log names the pack, its mods and whatever the
+/// pre-publish check refused -- draft packs included -- so reading one is a
+/// read of that pack and is gated like any other.
 fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/v1/authoring/packs/{pack_id}/build", post(build_pack))
         .route("/v1/jobs/{job_id}", get(job_status))
         .route("/v1/jobs/{job_id}/events", get(job_events))
-        .layer(DefaultBodyLimit::max(crate::http::MAX_UPLOAD_BODY))
+        .layer(DefaultBodyLimit::max(crate::http::MAX_JSON_BODY))
         .layer(from_fn_with_state(
             state.clone(),
             super::auth::require_session,
@@ -43,14 +51,15 @@ fn build_router(state: AppState) -> Router {
 }
 
 /// Bootstrap-from-archive seeds an official pack from an instance archive -- operator
-/// content authoring, admin only.
+/// content authoring, admin only. One of the two routes that take a whole
+/// archive in one body, hence the archive ceiling rather than the upload one.
 fn bootstrap_router(state: AppState) -> Router {
     Router::new()
         .route(
             "/v1/authoring/packs/{pack_id}/bootstrap",
             post(bootstrap_pack),
         )
-        .layer(DefaultBodyLimit::max(crate::http::MAX_UPLOAD_BODY))
+        .layer(DefaultBodyLimit::max(crate::http::MAX_ARCHIVE_BODY))
         .layer(from_fn_with_state(state.clone(), super::auth::require_auth))
         .with_state(state)
 }
@@ -127,6 +136,7 @@ async fn build_pack(
             config: state.config.clone(),
             registry: state.registry.clone(),
             accounts: state.accounts.clone(),
+            modrinth: state.modrinth.clone(),
             harvest: Some(state.harvest.clone()),
             events: state.events.clone(),
         },
@@ -282,11 +292,14 @@ struct JobStatusResp {
     result: Option<DryRun>,
 }
 
+/// A job's log and outcome, for whoever may read the pack it is about.
 async fn job_status(
     State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
     Path(job_id): Path<String>,
 ) -> Result<Json<JobStatusResp>, ApiError> {
     if let Some(job) = state.jobs.get(&job_id) {
+        super::auth::authorize(&state, &identity, &job.pack_id, PackLevel::View).await?;
         let (log, status) = job.since(0);
         return Ok(Json(JobStatusResp {
             job_id: job.id.clone(),
@@ -306,6 +319,7 @@ async fn job_status(
         .load_job_snapshot(&job_id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    super::auth::authorize(&state, &identity, &snap.pack_id, PackLevel::View).await?;
     Ok(Json(JobStatusResp {
         job_id: snap.job_id,
         kind: snap.kind,
@@ -319,11 +333,14 @@ async fn job_status(
     }))
 }
 
+/// The same log as it is written, for whoever may read the pack it is about.
 async fn job_events(
     State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
     Path(job_id): Path<String>,
 ) -> Result<Response, ApiError> {
     let job = state.jobs.get(&job_id).ok_or(ApiError::NotFound)?;
+    super::auth::authorize(&state, &identity, &job.pack_id, PackLevel::View).await?;
     let stream = async_stream::stream! {
         let mut sent = 0usize;
         loop {

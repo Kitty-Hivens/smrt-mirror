@@ -169,13 +169,23 @@ jobs:
             systemctl restart smrt
             sleep 2
             systemctl status smrt --no-pager -l | head -20
-            # Health probe: the binary should come up and answer the
-            # /v1/health endpoint within a couple of seconds. Fail
-            # the deploy if it doesn't so a broken commit doesn't
-            # silently leave the service in a flapping state.
+            # Health probe: the binary should come up and answer /v1/health
+            # within a couple of seconds. Fail the deploy if it doesn't, so a
+            # broken commit doesn't silently leave the service flapping.
+            #
+            # Aimed at the service's own listener, not at port 80. The proxy in
+            # front answers :80 with a redirect to https, and `curl -f` treats a
+            # 3xx as success -- so a probe through the proxy passed whether or
+            # not the service was running at all. The body is checked for the
+            # same reason: only the handler produces it, so no redirect, error
+            # page or stray listener can satisfy this.
+            addr="$(systemctl show smrt -p Environment --value \
+                    | tr ' ' '\n' | sed -n 's/^SMRT_BIND_ADDR=//p' | tail -n1 || true)"
+            addr="${addr:-127.0.0.1:9000}"
             for i in 1 2 3 4 5; do
-              if curl -fsS --max-time 3 http://127.0.0.1/v1/health > /dev/null; then
-                echo "health probe OK on try $i"
+              if body="$(curl -fsS --max-time 3 "http://${addr}/v1/health")" \
+                 && printf '%s' "$body" | grep -q '"status":"ok"'; then
+                echo "health probe OK on try $i: $body"
                 exit 0
               fi
               echo "health probe failed on try $i, retrying..."

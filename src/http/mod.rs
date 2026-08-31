@@ -22,17 +22,33 @@ use crate::state::AppState;
 use axum::Router;
 use tower_http::compression::{CompressionLayer, DefaultPredicate, Predicate};
 
-/// Ceiling on a single request body, shared by every write path that takes a
-/// whole file (cache jars, pack static assets, member uploads, the bootstrap
-/// archive). One home rather than a copy per router.
+/// Ceiling on a request body that carries one file: a cache jar, a pack static
+/// asset, a member's upload. Comfortably above any real mod jar (the largest
+/// on a mirror are tens of megabytes), and the same number as the per-entry cap
+/// the archive reader applies to a single file unpacked out of a zip.
 ///
-/// It is a memory ceiling, not just a size gate: these handlers extract `Bytes`,
-/// so axum buffers the entire body in RAM before the handler runs, and the
-/// bootstrap path copies it once more. A request near this limit holds that much
-/// (bootstrap: twice that) for its lifetime. Sized for a whole instance archive
-/// uploaded in one shot; nginx in front is raised to match (see the deploy
-/// config), since the smaller of the two wins.
-pub(crate) const MAX_UPLOAD_BODY: usize = 8 * 1024 * 1024 * 1024;
+/// Every one of these ceilings is a memory ceiling, not just a size gate: the
+/// handlers extract `Bytes`, so axum buffers the whole body in RAM before the
+/// handler runs. A concurrent burst holds that much per request, which is why
+/// the routes are sized by what they actually carry rather than all sharing the
+/// largest number any of them needs.
+pub(crate) const MAX_UPLOAD_BODY: usize = 512 * 1024 * 1024;
+
+/// Ceiling for the two routes that take a whole Minecraft instance archive in
+/// one body -- `bootstrap` and `validate`. Nothing else needs gigabytes, and
+/// nginx in front is raised to match this one (see the deploy config), since
+/// the smaller of the two wins.
+///
+/// The bootstrap path copies the buffered body once more before unpacking it,
+/// so a request near this limit holds twice this much for its lifetime. That is
+/// the cost of accepting an archive in one shot; it is bounded here and stated
+/// in `docs/operations.md` rather than discovered under load.
+pub(crate) const MAX_ARCHIVE_BODY: usize = 8 * 1024 * 1024 * 1024;
+
+/// Ceiling for a body that is only ever JSON or a CRDT update -- build
+/// requests, document sync. Generous for both; it exists so a route that can
+/// never carry a file does not inherit a file-sized ceiling.
+pub(crate) const MAX_JSON_BODY: usize = 8 * 1024 * 1024;
 
 /// Best-effort audit write shared by the admin and registry write paths: record
 /// who did what. A failure is logged, never raised -- the audited action already
@@ -1056,6 +1072,163 @@ mod tests {
             )
             .await,
             StatusCode::CONFLICT
+        );
+    }
+
+    // A build log names the pack it is about, the mods in it, and whatever the
+    // pre-publish check refused -- on a draft nobody else may see. The job id is
+    // a millisecond and a counter, so anyone who has watched one of their own
+    // builds can enumerate other people's; the gate has to be the pack, not the
+    // id.
+    #[tokio::test]
+    async fn a_build_log_is_only_as_readable_as_the_pack_it_is_about() {
+        use axum::http::StatusCode;
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        state
+            .storage
+            .save_pack_config(
+                "Create",
+                &sample_pack("Create", crate::domain::Visibility::Draft),
+            )
+            .await
+            .unwrap();
+        let operator = state
+            .accounts
+            .sign_in_github(1, "operator", Some(crate::accounts::Role::Admin))
+            .unwrap();
+        let stranger = state.accounts.sign_in_github(42, "stranger", None).unwrap();
+        let app = router(state.clone());
+
+        let (status, started) = write(
+            &app,
+            "POST",
+            "/v1/authoring/packs/Create/build?dry_run=true",
+            Some(&operator),
+            Some("{}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{started}");
+        let job_id = serde_json::from_str::<serde_json::Value>(&started)
+            .unwrap()
+            .get("job_id")
+            .and_then(|v| v.as_str())
+            .expect("a job id")
+            .to_string();
+
+        for path in [
+            format!("/v1/jobs/{job_id}"),
+            format!("/v1/jobs/{job_id}/events"),
+        ] {
+            assert_eq!(
+                read(&app, &path, Some(&stranger)).await.0,
+                StatusCode::FORBIDDEN,
+                "a member who cannot read the pack cannot read its build: {path}"
+            );
+        }
+        assert_eq!(
+            read(&app, &format!("/v1/jobs/{job_id}"), Some(&operator))
+                .await
+                .0,
+            StatusCode::OK,
+            "whoever keeps the pack still reads it"
+        );
+
+        // and being let into the pack is what lets them read it -- the same
+        // answer the rest of the authoring surface gives
+        state
+            .accounts
+            .grant_pack_access("Create", 42, PackLevel::View, 1)
+            .unwrap();
+        assert_eq!(
+            read(&app, &format!("/v1/jobs/{job_id}"), Some(&stranger))
+                .await
+                .0,
+            StatusCode::OK
+        );
+    }
+
+    // Two reviewers pressing merge at the same moment. The decision is one
+    // decision: the pack takes one merge commit, and the reviewer who lost is
+    // refused before writing anything rather than after writing a second commit
+    // of the same proposal.
+    #[tokio::test]
+    async fn one_proposal_merges_once_however_many_press_it() {
+        use axum::http::StatusCode;
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        for id in ["Create", "u/42/Fork"] {
+            let cfg = sample_pack(id, crate::domain::Visibility::Published);
+            state.storage.save_pack_config(id, &cfg).await.unwrap();
+            state
+                .storage
+                .save_pack_summary(&crate::authoring::make_pack_summary(&cfg, "0.1.0"))
+                .await
+                .unwrap();
+        }
+        let proposer = state.accounts.sign_in_github(42, "proposer", None).unwrap();
+        let one = state
+            .accounts
+            .sign_in_github(1, "keeper-one", Some(crate::accounts::Role::Admin))
+            .unwrap();
+        let two = state
+            .accounts
+            .sign_in_github(2, "keeper-two", Some(crate::accounts::Role::Admin))
+            .unwrap();
+        let app = router(state.clone());
+
+        // the fork has something to offer
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                "/v1/authoring/packs/u%2F42%2FFork/commits",
+                Some(&proposer),
+                Some(r#"{"message":"a change worth offering"}"#)
+            )
+            .await,
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                "/v1/authoring/packs/Create/proposals",
+                Some(&proposer),
+                Some(r#"{"source_pack":"u/42/Fork","title":"take mine"}"#)
+            )
+            .await,
+            StatusCode::CREATED
+        );
+
+        let before = state.storage.commit_log("Create", None, 100).await.unwrap();
+        let merge = |sid: String| {
+            let app = app.clone();
+            async move {
+                write(
+                    &app,
+                    "POST",
+                    "/v1/authoring/threads/1/merge",
+                    Some(&sid),
+                    Some("{}"),
+                )
+                .await
+            }
+        };
+        let (a, b) = tokio::join!(merge(one), merge(two));
+
+        let mut codes = [a.0, b.0];
+        codes.sort_by_key(|c| c.as_u16());
+        assert_eq!(
+            codes,
+            [StatusCode::OK, StatusCode::CONFLICT],
+            "one takes it, the other is told it was taken: {a:?} {b:?}"
+        );
+        let after = state.storage.commit_log("Create", None, 100).await.unwrap();
+        assert_eq!(
+            after.len(),
+            before.len() + 1,
+            "one decision leaves one commit behind, not two"
         );
     }
 

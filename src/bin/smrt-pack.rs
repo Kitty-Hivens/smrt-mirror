@@ -536,6 +536,7 @@ async fn run_build(
         );
     }
 
+    let modrinth = Modrinth::new()?;
     let built = authoring::build_manifest(
         &cfg,
         storage,
@@ -548,6 +549,7 @@ async fn run_build(
         mirror_base,
         &classifications,
         &registry,
+        &modrinth,
     )
     .await?;
     let mut manifest = built.manifest;
@@ -646,39 +648,30 @@ async fn run_upload_static(
         .build()
         .context("building reqwest client")?;
 
-    let mut uploaded = 0usize;
+    // The whole tree is walked before anything is sent. The walk is ordinary
+    // synchronous directory reading and the uploads are ordinary awaits, so
+    // neither has to pretend to be the other -- and the order is stable, which
+    // makes the failure report readable against a rerun.
+    let mut files: Vec<(String, PathBuf)> = Vec::new();
     let mut skipped = 0usize;
-    let mut failed: Vec<(String, String)> = Vec::new();
+    collect_files_for_upload(dir, dir, skip, &mut files, &mut skipped)?;
+    files.sort();
 
-    walk_files_for_upload(
-        dir,
-        dir,
-        skip,
-        &mut |rel_path, abs_path| {
-            // Path::join with leading separator on Linux silently drops
-            // the prefix; explicit format keeps the URL well-formed.
-            let url = static_upload_url(mirror_base, pack_id, &rel_path);
-            info!(rel = %rel_path, "uploading");
-            let body =
-                fs::read(abs_path).with_context(|| format!("reading {}", abs_path.display()))?;
-            let resp = futures_block_on(async {
-                client.put(&url).bearer_auth(&token).body(body).send().await
-            });
-            match resp {
-                Ok(r) if r.status().is_success() => {
-                    uploaded += 1;
-                }
-                Ok(r) => {
-                    failed.push((rel_path.clone(), format!("HTTP {}", r.status())));
-                }
-                Err(e) => {
-                    failed.push((rel_path.clone(), e.to_string()));
-                }
-            }
-            Ok(())
-        },
-        &mut skipped,
-    )?;
+    let mut uploaded = 0usize;
+    let mut failed: Vec<(String, String)> = Vec::new();
+    for (rel_path, abs_path) in files {
+        // Path::join with leading separator on Linux silently drops the prefix;
+        // explicit format keeps the URL well-formed.
+        let url = static_upload_url(mirror_base, pack_id, &rel_path);
+        info!(rel = %rel_path, "uploading");
+        let body =
+            fs::read(&abs_path).with_context(|| format!("reading {}", abs_path.display()))?;
+        match client.put(&url).bearer_auth(&token).body(body).send().await {
+            Ok(r) if r.status().is_success() => uploaded += 1,
+            Ok(r) => failed.push((rel_path, format!("HTTP {}", r.status()))),
+            Err(e) => failed.push((rel_path, e.to_string())),
+        }
+    }
 
     if !failed.is_empty() {
         warn!(
@@ -703,11 +696,13 @@ async fn run_upload_static(
     Ok(())
 }
 
-fn walk_files_for_upload(
+/// Every regular file under `here`, as `(path relative to root, absolute
+/// path)`, minus whatever `skip` names.
+fn collect_files_for_upload(
     root: &Path,
     here: &Path,
     skip: &[String],
-    upload: &mut dyn FnMut(String, &Path) -> Result<()>,
+    out: &mut Vec<(String, PathBuf)>,
     skipped: &mut usize,
 ) -> Result<()> {
     let entries = fs::read_dir(here).with_context(|| format!("read_dir {}", here.display()))?;
@@ -716,7 +711,7 @@ fn walk_files_for_upload(
         let path = entry.path();
         let metadata = entry.metadata()?;
         if metadata.is_dir() {
-            walk_files_for_upload(root, &path, skip, upload, skipped)?;
+            collect_files_for_upload(root, &path, skip, out, skipped)?;
             continue;
         }
         if !metadata.is_file() {
@@ -733,7 +728,7 @@ fn walk_files_for_upload(
             *skipped += 1;
             continue;
         }
-        upload(rel_str, &path)?;
+        out.push((rel_str, path));
     }
     Ok(())
 }
@@ -767,15 +762,6 @@ fn static_upload_url(base: &str, pack_id: &str, rel_path: &str) -> String {
         .collect::<Vec<_>>()
         .join("/");
     format!("{base}/v1/authoring/packs/{pack_enc}/static/{rel_enc}")
-}
-
-/// Bridge sync callback world into async reqwest. The upload walk is
-/// already linear (one PUT at a time -- mirror upload bandwidth is
-/// the bottleneck, parallelism gains are marginal and concurrency
-/// makes failure reports harder to read), so wrapping each call in
-/// a runtime block_on is fine for this tool's profile.
-fn futures_block_on<F: std::future::Future>(f: F) -> F::Output {
-    tokio::runtime::Handle::current().block_on(f)
 }
 
 // ── misc ───────────────────────────────────────────────────────────────────

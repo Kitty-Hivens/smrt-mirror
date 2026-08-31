@@ -220,7 +220,7 @@ pub(crate) async fn list_packs(
 /// manifest's header. Read-time derivation, so the values can never drift from
 /// the manifest they describe; a pack without a readable build simply keeps
 /// both fields absent.
-async fn enrich_latest_build(state: &AppState, summary: &mut PackSummary) {
+pub(super) async fn enrich_latest_build(state: &AppState, summary: &mut PackSummary) {
     if let Ok(Some(info)) = state.storage.latest_build_info(&summary.pack_id).await {
         summary.latest_built_at = Some(info.date_published);
         summary.latest_channel = Some(info.version_type);
