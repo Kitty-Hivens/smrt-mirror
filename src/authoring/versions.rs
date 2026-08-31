@@ -73,6 +73,63 @@ pub(super) fn is_fresh(fetched_unix: u64) -> bool {
     fetched_unix <= now && now - fetched_unix < MAX_AGE_SECS
 }
 
+/// Which lists are being refreshed right now.
+static REFRESHING: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
+    std::sync::Mutex::new(None);
+
+/// The right to refresh `list`, or `None` because somebody already holds it.
+///
+/// A stale list is answered from the file and refreshed behind the answer, so
+/// without this every ask arriving during a refresh starts another one: a
+/// handful of editors opening together is a handful of fetches of the same
+/// list, each writing the same file, and the loader lists are a few hundred
+/// kilobytes apiece. The first ask through does the work; the rest are answered
+/// from the copy they were going to be answered from anyway.
+pub(super) fn refresh_ticket(list: &str) -> Option<RefreshTicket> {
+    let mut held = REFRESHING.lock().ok()?;
+    let set = held.get_or_insert_with(Default::default);
+    set.insert(list.to_string())
+        .then(|| RefreshTicket(list.to_string()))
+}
+
+/// Held for the duration of one refresh; releases on drop, so a refresh that
+/// panics or returns early does not wedge the list forever.
+pub(super) struct RefreshTicket(String);
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::refresh_ticket;
+
+    // Ten editors opening at once must not be ten fetches of one list.
+    #[test]
+    fn one_refresh_at_a_time_per_list() {
+        let first = refresh_ticket("a-list").expect("the first ask does the work");
+        assert!(
+            refresh_ticket("a-list").is_none(),
+            "the rest are answered from the copy they already have"
+        );
+        assert!(
+            refresh_ticket("another-list").is_some(),
+            "a different list is not blocked by this one"
+        );
+        drop(first);
+        assert!(
+            refresh_ticket("a-list").is_some(),
+            "and the next stale read refreshes again once this one is done"
+        );
+    }
+}
+
+impl Drop for RefreshTicket {
+    fn drop(&mut self) {
+        if let Ok(mut held) = REFRESHING.lock()
+            && let Some(set) = held.as_mut()
+        {
+            set.remove(&self.0);
+        }
+    }
+}
+
 /// The Minecraft versions, from the cache when it is fresh and from upstream
 /// when it is not.
 ///
@@ -92,12 +149,15 @@ pub async fn minecraft_versions(
         // else's service for a list that moves a few times a month: the old one
         // goes back now, and the refresh runs behind it. If upstream is down the
         // only casualty is that the next ask is also served from this file.
-        let (storage, modrinth) = (storage.clone(), modrinth.clone());
-        tokio::spawn(async move {
-            if let Err(e) = refresh(&storage, &modrinth).await {
-                tracing::warn!(error = %format!("{e:#}"), "refreshing the Minecraft version list failed");
-            }
-        });
+        if let Some(ticket) = refresh_ticket(MINECRAFT_LIST) {
+            let (storage, modrinth) = (storage.clone(), modrinth.clone());
+            tokio::spawn(async move {
+                let _ticket = ticket;
+                if let Err(e) = refresh(&storage, &modrinth).await {
+                    tracing::warn!(error = %format!("{e:#}"), "refreshing the Minecraft version list failed");
+                }
+            });
+        }
         // Said to be old, because it is. The flag used to mean "upstream was
         // unreachable"; measured against the window it means the same thing to
         // whoever reads it -- this is not current -- and it is true in the case

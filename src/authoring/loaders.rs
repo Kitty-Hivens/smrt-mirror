@@ -102,12 +102,15 @@ pub async fn loader_versions(
         // Served now, refreshed behind. Forge's metadata is 210 kB, and having
         // whoever opens the editor first after six hours pay for that download
         // is an economy taken out of someone else's afternoon.
-        let (storage, modrinth, loader) = (storage.clone(), modrinth.clone(), loader.clone());
-        tokio::spawn(async move {
-            if let Err(e) = refresh(&storage, &modrinth, &loader).await {
-                tracing::warn!(loader, error = %format!("{e:#}"), "refreshing the loader build list failed");
-            }
-        });
+        if let Some(ticket) = super::versions::refresh_ticket(&key) {
+            let (storage, modrinth, loader) = (storage.clone(), modrinth.clone(), loader.clone());
+            tokio::spawn(async move {
+                let _ticket = ticket;
+                if let Err(e) = refresh(&storage, &modrinth, &loader).await {
+                    tracing::warn!(loader, error = %format!("{e:#}"), "refreshing the loader build list failed");
+                }
+            });
+        }
         return Ok(LoaderVersions {
             stale: true,
             ..list

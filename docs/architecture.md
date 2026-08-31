@@ -53,6 +53,7 @@ Shared by all three:
   meta/<name>.json               # cached upstream lists (Minecraft + loader versions)
   icons/<xx>/<sha1>.<ext>        # extracted mod icons, and the negative marker
   icons/modrinth/...             # proxied project icons, cached by project id
+  icons/avatars/<uid>.<ext>      # proxied GitHub avatars, cached by uid
   uploads/<sha1>.jar             # member uploads awaiting moderation (staged, not served)
   cache/<xx>/<sha1>.jar          # content-addressed jar cache (xx = first two hex)
   packs/<PackId>/
