@@ -1,8 +1,10 @@
-// Tiny reactive i18n. A module-level $state holds the active locale; `t()` reads
+// Tiny reactive i18n. A module-level $state holds the active locale, `t()` reads
 // it, so any component calling `t(...)` in its markup re-renders on a switch.
-// Hand-rolled rather than a dependency: two locales, flat keys, no plurals yet.
+// Hand-rolled rather than a dependency: two locales and flat keys. Counted
+// strings carry their forms and are selected through `Intl.PluralRules`.
 
 import { en, type Dict } from './locales/en';
+import { resolve } from './message';
 import { ru } from './locales/ru';
 
 export type Locale = 'ru' | 'en';
@@ -52,12 +54,22 @@ export const i18n = {
 
 export type MsgKey = keyof Dict;
 
+/// The three counted nouns of a change set, ready to drop into a sentence that
+/// mentions all three. A sentence can only be counted on one number, so the
+/// counting happens here and the sentence takes finished words.
+export function changeWords(c: { add: number; remove: number; change: number }): {
+  add: string;
+  remove: string;
+  change: string;
+} {
+  return {
+    add: t('chg.nArrivals', { n: c.add }),
+    remove: t('chg.nDepartures', { n: c.remove }),
+    change: t('chg.nChanges', { n: c.change }),
+  };
+}
+
 export function t(key: MsgKey, params?: Record<string, string | number>): string {
-  let s: string = dicts[current][key] ?? en[key] ?? key;
-  if (params) {
-    for (const [k, v] of Object.entries(params)) {
-      s = s.replaceAll(`{${k}}`, String(v));
-    }
-  }
-  return s;
+  const entry = dicts[current][key] ?? en[key];
+  return entry === undefined ? key : resolve(entry, current, params);
 }

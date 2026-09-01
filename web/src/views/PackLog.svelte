@@ -8,7 +8,7 @@
   // button, where the same sentence serves both acts.
   import { api } from '../lib/api';
   import { notifyFail, toasts } from '../lib/toasts.svelte';
-  import { t } from '../lib/i18n.svelte';
+  import { changeWords, t } from '../lib/i18n.svelte';
   import { dialogs } from '../lib/dialogs.svelte';
   import { route, href, plainClick } from '../lib/route.svelte';
   import { tally } from '../lib/changes';
@@ -55,7 +55,7 @@
         const diff = await api.commitDiff(packId, entry.id, 'live');
         const c = tally(diff.changes);
         summary = diff.changes.length
-          ? t('hist.restoreEffect', { add: c.add, remove: c.remove, change: c.change })
+          ? t('hist.restoreEffect', changeWords(c))
           : t('hist.restoreNoop');
       } catch {
         // an unreadable diff must not block the act; the question still names

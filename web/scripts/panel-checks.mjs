@@ -22,8 +22,12 @@ import { nextPageUrl } from '../src/lib/pagelink.ts';
 import { suggest, tally } from '../src/lib/changes.ts';
 import { renderMarkdown, safeUrl } from '../src/lib/markdown.ts';
 import { diffManifests } from '../src/lib/diff.ts';
+import { resolve } from '../src/lib/message.ts';
+import { en } from '../src/lib/locales/en.ts';
+import { ru } from '../src/lib/locales/ru.ts';
 
 let failures = 0;
+const say = (dict, loc, key, n) => resolve(dict[key], loc, { n, count: n });
 const check = (name, cond, detail = '') => {
   if (cond) console.log(`ok   ${name}`);
   else {
@@ -410,6 +414,64 @@ check('the offered list holds what old packs need', [8, 11, 16, 17, 21].every((v
   const same = diffManifests(manifest([mod('a.jar', 'a1')]), manifest([mod('a.jar', 'a1')]));
   check('an unchanged pack reports nothing', same.unchanged === 1 && !same.changed.length);
 }
+
+// tail
+
+// ── counted strings ─────────────────────────────────────────────────────────
+// A count and a noun beside it is the one place a dictionary of flat strings
+// cannot be right in both languages at once. English needs two forms, Russian
+// three, and the wrong one reads as broken rather than as a translation that
+// could be better: "1 модов" is not a near miss.
+{
+  const rus = (key, n) => say(ru, 'ru', key, n);
+  const eng = (key, n) => say(en, 'en', key, n);
+
+  check('one mod is a mod', eng('prev.modsChip', 1) === '1 mod', eng('prev.modsChip', 1));
+  check('two are mods', eng('prev.modsChip', 2) === '2 mods', eng('prev.modsChip', 2));
+  check('none are mods', eng('prev.modsChip', 0) === '0 mods', eng('prev.modsChip', 0));
+
+  // Russian counts in three: 1, then 2-4, then 5 and up, and it starts over at
+  // 21. The teens are the trap, 11 goes with the many form and not with 1.
+  check('один мод', rus('prev.modsChip', 1) === '1 мод', rus('prev.modsChip', 1));
+  check('два мода', rus('prev.modsChip', 2) === '2 мода', rus('prev.modsChip', 2));
+  check('пять модов', rus('prev.modsChip', 5) === '5 модов', rus('prev.modsChip', 5));
+  check('одиннадцать модов, не мод', rus('prev.modsChip', 11) === '11 модов', rus('prev.modsChip', 11));
+  check('двадцать один мод', rus('prev.modsChip', 21) === '21 мод', rus('prev.modsChip', 21));
+  check('двадцать два мода', rus('prev.modsChip', 22) === '22 мода', rus('prev.modsChip', 22));
+  check('сто одиннадцать модов', rus('prev.modsChip', 111) === '111 модов', rus('prev.modsChip', 111));
+  check('ноль модов', rus('prev.modsChip', 0) === '0 модов', rus('prev.modsChip', 0));
+
+  check('один человек', rus('pe.touchedByN', 1) === '1 человек', rus('pe.touchedByN', 1));
+  check('два человека', rus('pe.touchedByN', 2) === '2 человека', rus('pe.touchedByN', 2));
+  check('пять человек', rus('pe.touchedByN', 5) === '5 человек', rus('pe.touchedByN', 5));
+  check('one person, not people', eng('pe.touchedByN', 1) === '1 person', eng('pe.touchedByN', 1));
+
+  check('один ассет', rus('prev.assetsChip', 1) === '1 ассет', rus('prev.assetsChip', 1));
+  check('один лишний', rus('pe.valExtra', 1) === '1 лишний', rus('pe.valExtra', 1));
+  check('Архив: 1 мод', rus('pe.valArchiveMods', 1) === 'Архив: 1 мод', rus('pe.valArchiveMods', 1));
+
+  // The crutch these replaced: the dictionary used to say "comment(s)".
+  check('one comment', eng('thr.comments', 1) === '1 comment', eng('thr.comments', 1));
+  check('two comments', eng('thr.comments', 2) === '2 comments', eng('thr.comments', 2));
+  check('no bracketed plural survives',
+    !JSON.stringify(en).includes('(s)'), 'a "(s)" is still in the English dictionary');
+
+  // `count` is the older placeholder name, still carried by a few keys.
+  check('count drives the choice too', eng('cache.count', 1).startsWith('1 jar ·'), eng('cache.count', 1));
+
+  // A sentence naming three counts cannot be counted on one of them, so the
+  // three nouns are counted separately and dropped in finished.
+  const words = (c) => ({
+    add: rus('chg.nArrivals', c.add),
+    remove: rus('chg.nDepartures', c.remove),
+    change: rus('chg.nChanges', c.change),
+  });
+  check('одно прибытие, два ухода, пять изменений',
+    resolve(ru['commit.leadLive'], 'ru', words({ add: 1, remove: 2, change: 5 })) ===
+      'Возврат запишет: 1 прибытие, 2 ухода, 5 изменений.',
+    resolve(ru['commit.leadLive'], 'ru', words({ add: 1, remove: 2, change: 5 })));
+}
+
 
 console.log(failures ? `\n${failures} failed` : '\nall good');
 process.exit(failures ? 1 : 0);
