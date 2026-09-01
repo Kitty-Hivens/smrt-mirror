@@ -77,20 +77,24 @@ because that is how the work actually goes. `FloatDock` was the first move in
 that direction and stays as the nucleus. What each kind of panel obeys is
 recorded in ADR 0005.
 
-Two things gate it, in order. The surfaces are dark-first with white tints
-written literally into the tokens (`--dotfield`, `--seam`, the table zebra,
-`--accent-soft`), so a light substrate is a rewrite rather than a swap -- and
-the geometry only reads on a substrate where elevation can be a shadow instead
-of a lighter surface, which is what the token file says it currently is not.
-Then the reflow rules have to key off the container: a pane is a narrow context
-inside a wide window, and every one of the 21 `@media` rules asks the window.
+Two things gated it, and both have since been cleared. The tints that were
+written literally as white are values in both halves of the token file, and the
+light half gives elevation a real shadow rather than a lighter surface, which is
+the substrate the geometry needs. The reflow rules key off the container: the
+content views answer `@container view`, and the `@media` rules left are the ones
+that genuinely ask the window -- the shell, the dock, and the dialogs that are
+sized against the viewport rather than against a pane.
 
 A spike (warm paper substrate, softer geometry, an editor that arrives rather
 than cuts) said the idiom sits on this product without a fight, and said the two
 places it breaks: rows lose their boundary when elevation stops being a lighter
-surface, and a blanket pill radius swallows small destructive controls. Both are
-per-component decisions, not token values. The spike was a look, not a
-foundation; it is not in the tree.
+surface, and a blanket pill radius swallows small destructive controls. Two of
+its three have since landed on their own terms -- the substrate as the light
+half of the token file, the arrival as the transition the pack editor opens
+with -- and both breaks were answered rather than inherited: on paper elevation
+is a real shadow, and the radius scale stayed at three steps, with the pill kept
+for chips, where nothing destructive lives. The spike itself was a look and is
+not in the tree.
 
 ## How to write things down
 

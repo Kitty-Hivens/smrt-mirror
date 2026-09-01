@@ -5,8 +5,9 @@
    category and navigation (see --accent-hue), depth may show hierarchy (the
    --panel..--panel-3 surface ladder), motion may settle on small controls
    (--ease-out-back). White still marks "you are here", machine data stays mono.
-   Components steer off the tokens below. Dark-first; a light theme re-points
-   tokens, but several below are alpha-on-white and need real light values first. */
+   Components steer off the tokens below. Dark by default, and the light half is
+   the block after this one: the tints that were once written literally as white
+   are values in both. */
 
 /* Self-hosted so Cyrillic labels/data render in the intended mono rather than a
    system fallback. Latin+Cyrillic subset, variable weight, ligatures dropped so
