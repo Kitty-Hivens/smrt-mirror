@@ -3,6 +3,8 @@
   import { api, ApiError } from '../lib/api';
   import { t } from '../lib/i18n.svelte';
   import TabStrip from './ui/TabStrip.svelte';
+  import Skeleton from './ui/Skeleton.svelte';
+  import { settle, stagger } from '../lib/motion.svelte';
   import type {
     ModSummary,
     VersionRow,
@@ -125,20 +127,37 @@
     err = e instanceof ApiError ? `${e.status} ${e.body}` : String(e);
   }
 
+  // Which search is the current one. The debounce shortens the window but does
+  // not close it: a slow first request can land after a narrower second, and
+  // then the list on screen does not match what is typed above it.
+  let modsGeneration = 0;
+  // Set at the keystroke, not when the debounced request goes out: for the
+  // quarter-second in between, the list below is an answer to a question that is
+  // no longer the one on screen, and it should not read as a current one.
+  let modsStale = $state(false);
+
   async function loadMods() {
+    const mine = ++modsGeneration;
     modsLoading = true;
     err = '';
     try {
-      mods = (
+      const rows = (
         await api.registryMods(q.trim() || undefined, loaderF.trim() || undefined, mcF.trim() || undefined)
       ).rows;
+      if (mine !== modsGeneration) return;
+      mods = rows;
     } catch (e) {
+      if (mine !== modsGeneration) return;
       fail(e);
     } finally {
-      modsLoading = false;
+      if (mine === modsGeneration) {
+        modsLoading = false;
+        modsStale = false;
+      }
     }
   }
   function onModFilter() {
+    modsStale = true;
     clearTimeout(modTimer);
     modTimer = setTimeout(loadMods, 250);
   }
@@ -251,11 +270,16 @@
     }
   }
 
+  // Matched against every filename the jar is used under, not just the first: a
+  // jar three packs ship under three names was only findable by the name the
+  // first of them gave it.
   const rawShown = $derived(
     raw.filter((e) => {
       const n = rawQ.trim().toLowerCase();
       if (!n) return true;
-      return e.sha1.includes(n) || (e.uses[0]?.filename ?? '').toLowerCase().includes(n);
+      return (
+        e.sha1.includes(n) || e.uses.some((u) => u.filename.toLowerCase().includes(n))
+      );
     }),
   );
   const rawName = (e: CacheUsageEntry) => e.uses[0]?.filename ?? '';
@@ -311,10 +335,10 @@
           <input class="sm" bind:value={loaderF} oninput={onModFilter} placeholder={t('mirror.loader')} aria-label={t('mirror.loader')} />
           <input class="sm" bind:value={mcF} oninput={onModFilter} placeholder={t('mirror.mc')} aria-label={t('mirror.mc')} />
         </div>
-        {#if modsLoading}<div class="muted s">{t('common.loading')}</div>{/if}
-        <div class="hits scroll">
-          {#each mods as m (m.mod_id)}
-            <button class="hit" onclick={() => openMod(m)}>
+        {#if mods.length === 0 && modsLoading}<Skeleton rows={5} height={51} gap={0} shape="row" lead={0} />{/if}
+        <div class="hits scroll" class:stale={modsStale || modsLoading}>
+          {#each mods as m, i (m.mod_id)}
+            <button class="hit row-in" use:stagger={i} animate:settle onclick={() => openMod(m)}>
               <div class="info">
                 <div class="t">
                   {m.name}
@@ -328,14 +352,14 @@
               <span class="cnt faint mono">{t('mirror.versionsN', { n: m.version_count })}</span>
             </button>
           {/each}
-          {#if mods.length === 0 && !modsLoading}<div class="muted s">{t('mirror.noMods')}</div>{/if}
+          {#if mods.length === 0 && !modsLoading && !modsStale}<div class="muted s">{t('mirror.noMods')}</div>{/if}
         </div>
       {:else}
         <div class="ph row">
           <button onclick={() => (selMod = null)}>{t('mrp.back')}</button>
           <div class="seltitle">{selMod.name}</div>
         </div>
-        {#if versLoading}<div class="muted s">{t('common.loading')}</div>{/if}
+        {#if modVersions.length === 0 && versLoading}<Skeleton rows={4} height={51} gap={0} shape="row" lead={0} />{/if}
         <div class="hits scroll">
           {#each modVersions as v (v.sha1)}
             <button class="vrow" disabled={!sourceFor(v) || inPack(v)} onclick={() => pickVersion(v)}>
@@ -357,7 +381,7 @@
       {/if}
     {:else if mode === 'builds'}
       {#if !selBuild}
-        {#if buildsLoading}<div class="muted s">{t('common.loading')}</div>{/if}
+        {#if builds.length === 0 && buildsLoading}<Skeleton rows={5} height={51} gap={0} shape="row" lead={0} />{/if}
         <div class="hits scroll">
           {#each builds as b (b.pack_id + b.pack_version)}
             <button class="hit" onclick={() => openBuild(b)}>
@@ -383,7 +407,7 @@
             <button class="primary sm" onclick={addAllFromBuild}>{t('mirror.addAll', { n: buildModRows.length })}</button>
           {/if}
         </div>
-        {#if bmLoading}<div class="muted s">{t('common.loading')}</div>{/if}
+        {#if buildModRows.length === 0 && bmLoading}<Skeleton rows={6} height={51} gap={0} shape="row" lead={0} />{/if}
         <div class="hits scroll">
           {#each buildModRows as m (m.sha1 + m.filename)}
             <div class="vrow static">
@@ -433,7 +457,7 @@
       <div class="filters">
         <input class="grow" bind:value={rawQ} placeholder={t('cachePick.search')} aria-label={t('cachePick.search')} />
       </div>
-      {#if rawLoading}<div class="muted s">{t('common.loading')}</div>{/if}
+      {#if raw.length === 0 && rawLoading}<Skeleton rows={6} height={51} gap={0} shape="row" lead={0} />{/if}
       <div class="hits scroll">
         {#each rawShown as e (e.sha1)}
           <button

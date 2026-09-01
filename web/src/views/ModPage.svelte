@@ -7,6 +7,7 @@
   import type { JarDiff, ModDetail, ModEdge, Source, VersionRow } from '../lib/types';
   import ModIcon from './ModIcon.svelte';
   import Section from './ui/Section.svelte';
+  import Skeleton from './ui/Skeleton.svelte';
 
   // The mod page: a public, read-only view of one mod -- identity, releases,
   // relations, and the packs that ship it. Reachable from the registry, a pack's
@@ -128,7 +129,10 @@
 
 
   {#if loading}
-    <div class="muted s">{t('common.loading')}</div>
+    <!-- the head, then the releases under it: the page's own shape rather than a
+         line of text where a page is about to be -->
+    <Skeleton rows={1} height={72} />
+    <Skeleton rows={4} height={46} gap={0} shape="row" lead={22} />
   {:else if detail}
     <header class="head">
       <ModIcon name={detail.name} source={iconSource} sha1={iconSha1} size={52} mono />
@@ -198,7 +202,7 @@
               {#if diffFor === f.sha1}
                 <div class="diffpanel">
                   {#if diffLoading}
-                    <div class="muted s">{t('common.loading')}</div>
+                    <Skeleton rows={3} height={18} gap={4} />
                   {:else if diffErr}
                     <div class="err mono">{diffErr}</div>
                   {:else if diffData}

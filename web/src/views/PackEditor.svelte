@@ -7,7 +7,7 @@
   import { t } from '../lib/i18n.svelte';
   import { advertisesModList } from '../lib/handshake';
   import { assetPath } from '../lib/packassets';
-  import { arrive, stagger } from '../lib/motion.svelte';
+  import { arrive, depart, settle, stagger } from '../lib/motion.svelte';
   import { openPackSession, type PackSession } from '../lib/packsession.svelte';
   import { JAVA_MAJORS, suggestedJava } from '../lib/java';
   import { changedPaths, createTouches } from '../lib/touched.svelte';
@@ -17,6 +17,7 @@
   import type {
     CommitLogEntry,
     DeclaredAsset,
+    DeclaredMod,
     JobStatus,
     PackConfig,
     PackEvent,
@@ -42,8 +43,16 @@
   import GithubPicker from './GithubPicker.svelte';
   import PackPreview from './PackPreview.svelte';
   import DropZone from './ui/DropZone.svelte';
+  import Skeleton from './ui/Skeleton.svelte';
   import Field from './ui/Field.svelte';
-  import { filenameError, javaError, relPathError, requiredError, say, urlError } from '../lib/validate';
+  import {
+    cardImageError,
+    filenameError,
+    javaError,
+    relPathError,
+    requiredError,
+    say,
+  } from '../lib/validate';
   import Section from './ui/Section.svelte';
   import Select from './ui/Select.svelte';
   import TabStrip from './ui/TabStrip.svelte';
@@ -878,6 +887,23 @@
     }
   }
 
+  /// An icon or banner was just uploaded into the pack's own static tree: put
+  /// its path on the card, which is the half that makes it visible.
+  ///
+  /// The two used to be unconnected, on the same tab. Uploading a picture left
+  /// the card's field empty, and filling it in meant knowing the file is served
+  /// at `/v1/packs/<pack_id>/static/<path>` -- with the id percent-encoded for a
+  /// community pack, which is `u/<uid>/<name>`. Nothing said so anywhere, so the
+  /// one-action path was to paste a link to somebody else's CDN, and the pack's
+  /// own picture sat unused in its own tree. The build resolves this path
+  /// against the mirror, so what a launcher reads is a URL either way.
+  function setCardImage(target: 'icon' | 'banner', relPath: string) {
+    if (!cfg) return;
+    if (target === 'icon') cfg.pack_meta.icon_url = relPath;
+    else cfg.pack_meta.banner_url = relPath;
+    toasts.push({ kind: 'ok', text: t(target === 'icon' ? 'be.iconSet' : 'be.bannerSet') });
+  }
+
   // ── mods ──
   function blankSource(type: SourceDecl['type']): SourceDecl {
     if (type === 'modrinth') return { type, project_id: '', version_id: '' };
@@ -889,13 +915,23 @@
   // stray click on the dropdown lost a project id with no undo and an autosave
   // 700ms behind it. Each row remembers what it had per type, so switching back
   // restores it.
-  const priorSource = new Map<number, Partial<Record<SourceDecl['type'], SourceDecl>>>();
+  //
+  // Keyed by the row rather than by its position: the list re-sorts itself
+  // whenever a mod is added or removed, and removing one shifts every row after
+  // it down. A position-keyed memory therefore handed a row whatever the mod
+  // that used to sit at that index had been pinned to -- restoring another
+  // mod's project id into this one, which is worse than not remembering at all.
+  // A weak map also lets a removed row's memory go with it.
+  const priorSource = new WeakMap<
+    DeclaredMod,
+    Partial<Record<SourceDecl['type'], SourceDecl>>
+  >();
 
   function changeSourceType(i: number, type: SourceDecl['type']) {
     const row = cfg!.mods[i];
-    const kept = priorSource.get(i) ?? {};
+    const kept = priorSource.get(row) ?? {};
     kept[row.source.type] = $state.snapshot(row.source) as SourceDecl;
-    priorSource.set(i, kept);
+    priorSource.set(row, kept);
     row.source = kept[type] ?? blankSource(type);
   }
 
@@ -1248,7 +1284,7 @@
 <div class="body" class:split={previewOpen} in:arrive|global>
   <div class="editcol">
     {#if loading}
-      <div class="muted mono">{t('common.loading')}</div>
+      <Skeleton rows={6} height={44} />
     {:else if route.thread !== null}
       <!-- A discussion is a place of its own, over the pack it belongs to. -->
       <ThreadPage threadId={route.thread} onChanged={() => (threadTick += 1)} />
@@ -1388,7 +1424,7 @@
 
           <div class="mods">
             {#each cfg.mods as m, i (m)}
-              <div class="modrow row-in" use:stagger={i} animate:flip={{ duration: 200 }}>
+              <div class="modrow row-in" use:stagger={i} animate:settle out:depart>
                 <ModIcon name={m.filename} iconUrl={m.display?.icon_url} source={m.source} size={24} mono />
                 <!-- no room for a caption in this row, so the verdict is the
                      control's own state and its title, which is where a dense
@@ -1558,11 +1594,12 @@
 
         <Section title={t('pe.card.title')}>
           <div class="card">
-            <Field label={t('pe.card.icon')} wide error={say(urlError(cfg.pack_meta.icon_url ?? ''))}>
-              <input class="mono" bind:value={cfg.pack_meta.icon_url} placeholder="https://.../icon.png" />
+            <p class="cardhint muted">{t('pe.card.hint')}</p>
+            <Field label={t('pe.card.icon')} wide error={say(cardImageError(cfg.pack_meta.icon_url ?? ''))}>
+              <input class="mono" bind:value={cfg.pack_meta.icon_url} placeholder="_pack/icon.png" />
             </Field>
-            <Field label={t('pe.card.banner')} wide error={say(urlError(cfg.pack_meta.banner_url ?? ''))}>
-              <input class="mono" bind:value={cfg.pack_meta.banner_url} placeholder="https://.../banner.png" />
+            <Field label={t('pe.card.banner')} wide error={say(cardImageError(cfg.pack_meta.banner_url ?? ''))}>
+              <input class="mono" bind:value={cfg.pack_meta.banner_url} placeholder="_pack/banner.png" />
             </Field>
             <Field label={t('pe.card.gallery')} wide><textarea class="mono" rows="3" bind:value={cardGalleryStr}></textarea></Field>
             <Field label={t('pe.card.description')} wide><textarea class="mono" rows="5" bind:value={cfg.pack_meta.description_md}></textarea></Field>
@@ -1570,7 +1607,7 @@
         </Section>
       {/if}
     {:else if tab === 'branding'}
-      <BrandingEditor {packId} />
+      <BrandingEditor {packId} onBranding={setCardImage} />
       {#if cfg}
         <div class="dzone">
           <div class="dztitle mono">{t('pe.dangerZone')}</div>
@@ -1856,10 +1893,15 @@
        the duration token is zeroed there, like everything else */
     animation: row-in var(--dur-enter) var(--ease-out) backwards;
   }
-  .javahint {
+  .javahint,
+  .cardhint {
     grid-column: 1 / -1;
     font-size: var(--fs-sm);
     margin: -4px 0 0;
+  }
+  .cardhint {
+    margin: 0 0 var(--space-2);
+    line-height: 1.5;
   }
   .card textarea {
     resize: vertical;

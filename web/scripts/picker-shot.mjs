@@ -1,48 +1,32 @@
-// Open a pack with a modrinth-source mod, open the Modrinth picker, search,
-// screenshot the results.
-import puppeteer from 'puppeteer-core';
+// The search-to-add picker, with results on screen.
+//
+// It used to open the Modrinth-only picker. That is one half of what the button
+// does now: "Add a mod" searches the mirror's own registry and Modrinth at once
+// (#101) and each hit says which it came from, which is the thing worth a
+// screenshot. Env: QUERY (default `appleskin`).
+import { launch, signedIn, openFirstPack, clickByText, shoot, sleep } from './lib/harness.mjs';
 
-const EXE = process.env.CHROME;
-const BASE = process.env.BASE ?? 'http://127.0.0.1:9000';
-const TOKEN = process.env.TOKEN ?? '';
-const OUT = process.env.OUT ?? '/tmp';
 const QUERY = process.env.QUERY ?? 'appleskin';
 
-const browser = await puppeteer.launch({
-  executablePath: EXE,
-  headless: true,
-  args: ['--no-sandbox', '--disable-gpu', '--hide-scrollbars'],
-  defaultViewport: { width: 1280, height: 900, deviceScaleFactor: 2 },
-});
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
+const browser = await launch({ width: 1280, height: 900 });
 try {
-  const page = await browser.newPage();
-  await page.goto(`${BASE}/admin`, { waitUntil: 'networkidle0' });
-  await page.waitForSelector('input[type=password]', { timeout: 6000 });
-  await page.type('input[type=password]', TOKEN);
-  await Promise.all([
-    page.click('button[type=submit]'),
-    page.waitForSelector('.tiles', { timeout: 8000 }),
-  ]);
-  await page.evaluate(() =>
-    [...document.querySelectorAll('.tab')].find((b) => b.textContent.trim() === 'Packs')?.click(),
-  );
-  await sleep(400);
-  await page.click('td.actions button');
-  await sleep(600);
-  await page.evaluate(() =>
-    [...document.querySelectorAll('button')]
-      .find((b) => b.textContent.trim() === 'find on Modrinth')
-      ?.click(),
-  );
-  await sleep(300);
-  await page.type('.picker input', QUERY);
-  await page.waitForSelector('.hit', { timeout: 12000 });
-  await sleep(600);
-  await page.screenshot({ path: `${OUT}/smrt-modrinth.png` });
-  const n = await page.$$eval('.hit', (els) => els.length);
-  console.log('modrinth hits:', n);
+  const page = await signedIn(browser);
+  if (!(await openFirstPack(page))) {
+    console.log('the mirror has no packs -- nothing to shoot.');
+  } else if (!(await clickByText(page, 'button', 'Add a mod'))) {
+    throw new Error('no "Add a mod" button on the editor\'s Config tab');
+  } else {
+    await page.waitForSelector('input', { timeout: 4000 });
+    // the picker's own search box is the first input inside the dialog
+    const box = await page.$('[role=dialog] input');
+    if (!box) throw new Error('the picker opened without a search box');
+    await box.type(QUERY);
+    // the search is debounced, then answers from the registry and upstream
+    await sleep(2500);
+    await shoot(page, 'smrt-picker');
+    const hits = await page.$$eval('[role=dialog] .hit', (els) => els.length);
+    console.log(`picker: ${hits} hit(s) for ${JSON.stringify(QUERY)}`);
+  }
 } finally {
   await browser.close();
 }

@@ -433,12 +433,15 @@
   .sk-row {
     height: 46px;
   }
-  @keyframes sk-pulse {
-    0% {
-      background-position: 100% 0;
-    }
-    100% {
-      background-position: 0 0;
+  /* The sweep itself is the product's, declared once in app.css. Only the two
+     colours it runs between are this card's, because the preview paints in the
+     pack's palette rather than the panel's. Scoping raises the specificity of
+     the rule above past the global reduced-motion switch, so the switch is
+     repeated here at the same weight -- a shimmer nobody asked to see is worse
+     than no shimmer. */
+  @media (prefers-reduced-motion: reduce) {
+    .sk {
+      animation: none;
     }
   }
   .checks {

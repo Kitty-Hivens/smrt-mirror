@@ -10,6 +10,7 @@
   import ModIcon from './ModIcon.svelte';
   import PackThreads from './PackThreads.svelte';
   import TabStrip from './ui/TabStrip.svelte';
+  import Skeleton from './ui/Skeleton.svelte';
   import type { CommunityPack, PackManifest, PackSummary } from '../lib/types';
 
   // A signed-in member can fork any pack they can browse into their namespace.
@@ -106,7 +107,15 @@
 
   <TabStrip variant="pill" value={tab} tabs={tabTabs} onChange={(v) => (tab = v as Tab)} />
 
-  {#if items.length === 0 && !loading}
+  <!-- The catalog is the first thing a guest sees, and the first read of it used
+       to be a blank page: no rows yet, and the empty state deliberately held
+       back until the answer was in. Holding the shape of the rows says the
+       mirror is answering; saying nothing says it is bare. -->
+  {#if items.length === 0 && loading}
+    <!-- in the list's own frame, so the card does not appear around the rows a
+         moment after the rows do -->
+    <div class="panel plist"><Skeleton rows={5} height={63} gap={0} shape="row" lead={34} /></div>
+  {:else if items.length === 0}
     <div class="emptystate">
       <span class="mk" aria-hidden="true"></span>
       <div class="etitle">
@@ -122,7 +131,7 @@
       {/if}
     </div>
   {:else}
-  <div class="panel plist">
+  <div class="panel plist" class:stale={loading}>
     {#each items as { summary: p, owner } (p.pack_id)}
       <div class="pack" class:open={openId === p.pack_id}>
         <button class="prow" onclick={() => open(p)}>
@@ -148,7 +157,7 @@
         {#if openId === p.pack_id}
           <div class="detail">
             {#if mLoading}
-              <div class="muted s">{t('common.loading')}</div>
+              <Skeleton rows={3} height={22} />
             {:else if manifest}
               {#if me}
                 <button class="forkbtn" onclick={() => fork(p)}>{t('browse.fork')}</button>
@@ -377,11 +386,6 @@
     color: var(--fg-faint);
     flex-shrink: 0;
   }
-  .s {
-    padding: var(--space-4);
-    font-size: var(--fs-sm);
-  }
-
   /* Empty catalog: a centred block with somewhere to go, not a thin bar of text
      stranded at the top of the void. */
   .emptystate {

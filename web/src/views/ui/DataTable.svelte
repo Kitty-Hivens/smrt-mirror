@@ -39,18 +39,24 @@
 <script lang="ts" generics="T extends RowData">
   import type { Snippet } from 'svelte';
   import type { RowData } from '@tanstack/svelte-table';
+  import { settle } from '../../lib/motion.svelte';
 
   let {
     data,
     columns,
     row,
+    onRow,
     empty,
     filter = '',
   }: {
     data: T[];
     columns: Column<T>[];
-    // renders one full <tr>...</tr> for row.original
+    // renders the cells -- the <td>s -- for one row. The <tr> around them is the
+    // table's, so every table gets the same row behaviour and the same movement
+    // when the list is sorted or filtered, rather than each caller re-deciding.
     row: Snippet<[T]>;
+    // What clicking (or Enter/Space on) a row does. Absent leaves rows inert.
+    onRow?: (row: T) => void;
     // rendered as the tbody body when there are no rows (a full-width <tr>)
     empty?: Snippet;
     // caller-owned global filter text; the caller renders its own input. Empty
@@ -140,7 +146,29 @@
     </thead>
     <tbody>
       {#each table.getRowModel().rows as r (r.id)}
-        {@render row(r.original)}
+        <!-- Sorting and filtering rewrite this list, and the rows that survive are
+             the same rows: `settle` moves them to their new place instead of
+             letting them teleport, so the eye can follow the one it was reading.
+             The keydown guard keeps a link or button inside a cell from firing
+             the row's own action on top of its own. -->
+        <tr
+          animate:settle
+          class:clickable={!!onRow}
+          role={onRow ? 'button' : undefined}
+          tabindex={onRow ? 0 : undefined}
+          onclick={onRow ? () => onRow(r.original) : undefined}
+          onkeydown={onRow
+            ? (e) => {
+                if (e.target !== e.currentTarget) return;
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  onRow(r.original);
+                }
+              }
+            : undefined}
+        >
+          {@render row(r.original)}
+        </tr>
       {/each}
       {#if table.getRowModel().rows.length === 0 && empty}
         {@render empty()}
@@ -150,6 +178,16 @@
 </div>
 
 <style>
+  /* The row is the table's now, and so is how it reads as one: a whole row that
+     does something says so under the pointer and takes focus like anything else
+     that can be pressed. */
+  tr.clickable {
+    cursor: pointer;
+  }
+  tr.clickable:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
   /* the sortable header label is a button; reset it to read as the <th> text it
      replaces, with a caret that reveals sort direction */
   .dt-th {

@@ -1,72 +1,77 @@
-// Drive the pack editor: open a pack, screenshot config + curator, run a Build
-// and wait for the live log to reach a terminal status. Verifies the whole
-// authoring-in-GUI loop.
-import puppeteer from 'puppeteer-core';
+// The authoring loop, driven end to end: open a pack, declare a checkpoint,
+// build it, and wait for the live log to reach a terminal status.
+//
+// A check rather than a screenshot -- it answers whether the whole GUI path
+// still works, and says which step it stopped at when it does not. Exit code 1
+// on a build that fails, so it can be run in anger.
+import { launch, signedIn, openFirstPack, editorTab, clickByText, shoot, sleep }
+  from './lib/harness.mjs';
 
-const EXE = process.env.CHROME;
-const BASE = process.env.BASE ?? 'http://127.0.0.1:9000';
-const TOKEN = process.env.TOKEN ?? '';
-const OUT = process.env.OUT ?? '/tmp';
-
-const browser = await puppeteer.launch({
-  executablePath: EXE,
-  headless: true,
-  args: ['--no-sandbox', '--disable-gpu', '--hide-scrollbars'],
-  defaultViewport: { width: 1280, height: 920, deviceScaleFactor: 2 },
-});
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-try {
-  const page = await browser.newPage();
-  await page.goto(`${BASE}/admin`, { waitUntil: 'networkidle0' });
-  await page.waitForSelector('input[type=password]', { timeout: 6000 });
-  await page.type('input[type=password]', TOKEN);
-  await Promise.all([
-    page.click('button[type=submit]'),
-    page.waitForSelector('.tiles', { timeout: 8000 }),
-  ]);
-
-  async function clickByText(selector, text) {
-    const h = await page.evaluateHandle(
-      (s, t) => [...document.querySelectorAll(s)].find((e) => e.textContent.trim() === t),
-      selector,
-      text,
-    );
-    const el = h.asElement();
-    if (el) await el.click();
-    return !!el;
+/// Wait for the live log to settle. The status rides in the log's own class
+/// (`.st.ok` / `.st.bad`), which is where the component puts it -- no test seam
+/// needed, and no scraping of prose that is localised.
+async function awaitBuild(page, timeoutMs = 360_000) {
+  const started = Date.now();
+  // A build waits out a running or pending harvest before it classifies, capped
+  // at five minutes -- so the wait here has to be longer than that cap, or a
+  // healthy build on a freshly-started mirror reads as a hang.
+  let sawLog = false;
+  while (Date.now() - started < timeoutMs) {
+    const state = await page.evaluate(() => {
+      const st = document.querySelector('.jl .st');
+      if (!st) return null;
+      window.__sawLog = true;
+      const done = st.classList.contains('ok');
+      const failed = st.classList.contains('bad');
+      if (!done && !failed) return null;
+      const log = document.querySelector('.jl .log');
+      return { status: done ? 'done' : 'failed', log: (log?.textContent ?? '').split('\n') };
+    });
+    if (state) return state;
+    sawLog ||= await page.evaluate(() => !!document.querySelector('.jl'));
+    await sleep(500);
   }
-
-  await clickByText('.tab', 'Packs');
-  await sleep(400);
-  const edit = await page.$('td.actions button');
-  await edit.click();
-  await sleep(700);
-  await page.screenshot({ path: `${OUT}/smrt-pack-config.png` });
-
-  await clickByText('.seg', 'Curator');
-  await sleep(400);
-  await page.screenshot({ path: `${OUT}/smrt-pack-curator.png` });
-
-  await clickByText('.seg', 'Build');
-  await sleep(300);
-  await page.evaluate(() => {
-    const b = [...document.querySelectorAll('button')].find((x) =>
-      x.textContent.trim().startsWith('Build pack'),
-    );
-    b?.click();
-  });
-  await page.waitForFunction(
-    () => {
-      const s = document.querySelector('.st');
-      return s && ['done', 'failed'].includes(s.textContent.trim());
-    },
-    { timeout: 15000 },
+  throw new Error(
+    sawLog
+      ? `the build did not settle within ${timeoutMs / 1000}s`
+      : 'no build log ever appeared -- the build was never started (the button did nothing)',
   );
-  await sleep(300);
-  await page.screenshot({ path: `${OUT}/smrt-pack-build.png` });
-  const status = await page.$eval('.st', (e) => e.textContent.trim());
-  console.log('build status:', status);
+}
+
+const browser = await launch({ width: 1280, height: 900 });
+try {
+  const page = await signedIn(browser);
+  if (!(await openFirstPack(page))) {
+    console.log('the mirror has no packs -- nothing to drive.');
+  } else {
+    await editorTab(page, 'Config');
+    await sleep(500);
+    await shoot(page, 'check-config');
+
+    if (!(await editorTab(page, 'Build'))) throw new Error('no Build tab in the editor');
+    await sleep(600);
+
+    // A build is made from a checkpoint, so a pack with uncommitted work is
+    // committed first -- which is what the console's own button does in one
+    // press. Either way the message box has to be filled.
+    // The commit subject, not the version field or a release note: the build
+    // refuses without one and says so in a toast, which is a build that never
+    // starts and a check that waits for a log that never appears.
+    const box = await page.$('.declare .lines input');
+    if (!box) throw new Error('no commit-message box on the Build tab');
+    await box.type('checkpoint from pack-editor-check');
+    await sleep(200);
+    const pressed =
+      (await clickByText(page, 'button', 'Commit and build')) ||
+      (await clickByText(page, 'button', 'Build'));
+    if (!pressed) throw new Error('neither "Commit and build" nor "Build" is on the Build tab');
+
+    const result = await awaitBuild(page);
+    await shoot(page, 'check-build');
+    console.log('build status:', result.status);
+    for (const line of result.log.slice(-4)) if (line.trim()) console.log('  ', line);
+    if (result.status !== 'done') process.exitCode = 1;
+  }
 } finally {
   await browser.close();
 }

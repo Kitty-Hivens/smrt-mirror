@@ -878,13 +878,30 @@ struct RenameModBody {
 
 async fn put_mod_rename(
     State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
     Path(mod_id): Path<i64>,
     Json(b): Json<RenameModBody>,
 ) -> Result<StatusCode, ApiError> {
+    let detail = [b.name.clone(), b.slug.clone()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
     run_write(&state, "rename", move |reg| {
         reg.rename_mod(mod_id, b.name.as_deref(), b.slug.as_deref())
     })
     .await?;
+    // Audited like every other authored registry write. It was the one that
+    // was not, and it is not a small one: the name and slug are what the panel
+    // and a merge read a mod by.
+    audit(
+        &state,
+        &identity,
+        "registry.mod.rename",
+        Some(&mod_id.to_string()),
+        Some(&detail),
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 

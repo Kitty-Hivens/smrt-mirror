@@ -8,6 +8,7 @@
   import { api } from '../lib/api';
   import { notifyFail, toasts } from '../lib/toasts.svelte';
   import { t } from '../lib/i18n.svelte';
+  import Skeleton from './ui/Skeleton.svelte';
   import { dialogs } from '../lib/dialogs.svelte';
   import { route } from '../lib/route.svelte';
   import { tally } from '../lib/changes';
@@ -146,7 +147,8 @@
   </div>
 
   {#if loading && !commit}
-    <p class="muted">{t('common.loading')}</p>
+    <Skeleton rows={1} height={64} />
+    <Skeleton rows={4} height={28} gap={4} />
   {:else if failed && !commit}
     <p class="muted">{t('commit.unreadable')}</p>
   {:else if commit}
@@ -182,7 +184,7 @@
     </div>
 
     {#if loading}
-      <p class="muted">{t('common.loading')}</p>
+      <Skeleton rows={4} height={28} gap={4} />
     {:else if failed}
       <p class="muted">{t('commit.diffUnreadable')}</p>
     {:else if diff && diff.changes.length}

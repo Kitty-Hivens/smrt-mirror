@@ -20,6 +20,8 @@ import { advertisesModList } from '../src/lib/handshake.ts';
 import { assetPath, isPackFile, ASSET_PREFIX } from '../src/lib/packassets.ts';
 import { nextPageUrl } from '../src/lib/pagelink.ts';
 import { suggest, tally } from '../src/lib/changes.ts';
+import { renderMarkdown, safeUrl } from '../src/lib/markdown.ts';
+import { diffManifests } from '../src/lib/diff.ts';
 
 let failures = 0;
 const check = (name, cond, detail = '') => {
@@ -322,6 +324,91 @@ check('the offered list holds what old packs need', [8, 11, 16, 17, 21].every((v
   check('the tally counts each operation',
     JSON.stringify(tally([row('add', 'a.jar'), row('add', 'b.jar'), row('remove', 'c.jar')])) ===
       JSON.stringify({ add: 2, remove: 1, change: 0 }));
+}
+
+// ── the description renderer ────────────────────────────────────────────────
+//
+// It renders text somebody else wrote -- a community pack's description -- into
+// a page other people read, so what it must never do is emit markup or a link
+// its author did not write.
+{
+  const md = (s) => renderMarkdown(s);
+
+  check('raw html is text, not markup',
+    md('<img src=x onerror=alert(1)>').includes('&lt;img') &&
+    !md('<img src=x onerror=alert(1)>').includes('<img'));
+  check('a script url is not a link target',
+    md('[x](javascript:alert(1))').includes('href="#"'),
+    md('[x](javascript:alert(1))'));
+  check('quotes cannot escape an attribute',
+    !md('[x](https://a" onmouseover="alert(1))').includes('onmouseover="alert'),
+    md('[x](https://a" onmouseover="alert(1))'));
+  check('safeUrl refuses the schemes that execute',
+    safeUrl('javascript:alert(1)') === '#' && safeUrl('data:text/html,x') === '#' &&
+    safeUrl('https://ok/') === 'https://ok/');
+
+  // The renderer parks each finished link, image and code span behind a
+  // placeholder while it escapes the prose around them, then puts them back.
+  // When that placeholder was printable, prose containing one was substituted
+  // for somebody else's span -- so a description reading `@@MD0@@` rendered a
+  // second copy of the first link in it.
+  const forged = md('@@MD0@@ and [y](https://ok/)');
+  check('a placeholder written in the prose stays prose',
+    forged.includes('@@MD0@@') && (forged.match(/<a /g) ?? []).length === 1,
+    forged);
+  check('and the spans it protects still come back',
+    md('`code` and [y](https://ok/) and ![i](https://ok/i.png)').includes('<code>code</code>'),
+    md('`code` and [y](https://ok/)'));
+}
+
+// ── the preview diff ────────────────────────────────────────────────────────
+//
+// The preview answers "what would publishing change?" locally, because a dry run
+// has no published version for the mirror to diff against. It has to give the
+// answer the mirror gives, which means matching mods the way `domain/diff.rs`
+// does: the Modrinth project, else the curator slug, else the filename.
+{
+  const manifest = (mods) => ({ pack_version: 'v', mods, assets: [] });
+  const mod = (filename, sha1, extra = {}) => ({
+    filename, sha1, size_bytes: 1, required: false, default_enabled: true,
+    source: { type: 'smrt_cache', url: 'u' }, ...extra,
+  });
+  const pinned = (filename, sha1, project) => ({
+    filename, sha1, size_bytes: 1, required: false, default_enabled: true,
+    source: { type: 'modrinth', project_id: project, version_id: 'v' },
+  });
+
+  // A re-pin that renames the jar is one mod moving, not one leaving and
+  // another arriving -- which is what the update dialog will call it.
+  const repin = diffManifests(
+    manifest([pinned('sodium-0.5.jar', 's1', 'AANobbMI')]),
+    manifest([pinned('sodium-0.6.jar', 's2', 'AANobbMI')]),
+  );
+  check('a renamed re-pin is an update, not a swap',
+    repin.changed.length === 1 && !repin.added.length && !repin.removed.length,
+    JSON.stringify(repin));
+
+  // A self-hosted jar carries its version in its name, so the curator slug is
+  // what makes it the same mod across builds (ADR 0002).
+  const slugged = diffManifests(
+    manifest([mod('mymod-1.0.jar', 'a1', { slug: 'mymod' })]),
+    manifest([mod('mymod-1.1.jar', 'a2', { slug: 'mymod' })]),
+  );
+  check('a slugged self-hosted jar is followed across a rename',
+    slugged.changed.length === 1 && !slugged.added.length && !slugged.removed.length,
+    JSON.stringify(slugged));
+
+  // Two different mods stay two different mods.
+  const swap = diffManifests(
+    manifest([mod('a.jar', 'a1')]),
+    manifest([mod('b.jar', 'b1')]),
+  );
+  check('an actual swap is still an add and a remove',
+    swap.added.length === 1 && swap.removed.length === 1 && !swap.changed.length,
+    JSON.stringify(swap));
+
+  const same = diffManifests(manifest([mod('a.jar', 'a1')]), manifest([mod('a.jar', 'a1')]));
+  check('an unchanged pack reports nothing', same.unchanged === 1 && !same.changed.length);
 }
 
 console.log(failures ? `\n${failures} failed` : '\nall good');

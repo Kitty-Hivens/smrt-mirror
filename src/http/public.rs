@@ -220,7 +220,7 @@ pub(crate) async fn list_packs(
 /// manifest's header. Read-time derivation, so the values can never drift from
 /// the manifest they describe; a pack without a readable build simply keeps
 /// both fields absent.
-async fn enrich_latest_build(state: &AppState, summary: &mut PackSummary) {
+pub(super) async fn enrich_latest_build(state: &AppState, summary: &mut PackSummary) {
     if let Ok(Some(info)) = state.storage.latest_build_info(&summary.pack_id).await {
         summary.latest_built_at = Some(info.date_published);
         summary.latest_channel = Some(info.version_type);
@@ -1037,18 +1037,36 @@ pub(crate) async fn get_user_avatar(
     if uid <= 0 {
         return Err(ApiError::NotFound);
     }
-    let url = format!("https://avatars.githubusercontent.com/u/{uid}?s=160&v=4");
-    let (bytes, content_type) = state
-        .modrinth
-        .fetch_image(&url)
-        .await
-        .map_err(|_| ApiError::NotFound)?;
+    // Held, like the project icons: without a copy the mirror asked GitHub once
+    // per image per page load, which is a byline on every comment and a row in
+    // every user list. The proxy is here so a viewer never reaches GitHub; it
+    // should not mean the mirror reaches it instead, every time.
+    let (bytes, content_type) = match state.storage.read_avatar(uid).await {
+        Some(held) => held,
+        None => {
+            let url = format!("https://avatars.githubusercontent.com/u/{uid}?s=160&v=4");
+            let (bytes, content_type) = state
+                .modrinth
+                .fetch_image(&url)
+                .await
+                .map_err(|_| ApiError::NotFound)?;
+            state.storage.store_avatar(uid, &bytes, &content_type).await;
+            // read back rather than trust the upstream string: what is served
+            // is one of the kinds the mirror is willing to serve, or the bytes
+            // as fetched when it is a kind it will not keep
+            state
+                .storage
+                .read_avatar(uid)
+                .await
+                .unwrap_or((bytes, "image/png"))
+        }
+    };
     Ok((
         [
             (header::CONTENT_TYPE, content_type),
-            (header::CACHE_CONTROL, "public, max-age=86400".to_string()),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
             // proxied third-party bytes: pin the type so the browser can't sniff
-            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
         ],
         bytes,
     )

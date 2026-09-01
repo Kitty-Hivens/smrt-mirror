@@ -3,6 +3,7 @@
 
 use super::model::*;
 use super::semver;
+use crate::domain::compare_pack_versions;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -278,13 +279,28 @@ pub fn loader_bridges(conn: &Connection) -> Result<HashMap<String, String>> {
     Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
 }
 
-/// Artifact hashes per mod, for answering "does the mirror hold bytes for this
-/// one" against the cache inventory. Folded in Rust over the whole table like
-/// the facet maps above: the registry is single-operator-sized.
-pub fn sha1s_by_mod(conn: &Connection) -> Result<HashMap<i64, Vec<String>>> {
-    let mut stmt = conn.prepare("SELECT mod_id, sha1 FROM mod_version")?;
-    let mut rows = stmt.query([])?;
+/// Artifact hashes for the mods named, for answering "does the mirror hold
+/// bytes for this one" against the cache inventory.
+///
+/// Scoped to the mods actually being asked about rather than folded over the
+/// whole table: a search answers thirty hits, and reading every artifact row
+/// the mirror holds to decide a flag on each of them is a cost that grows with
+/// the mirror while the answer does not. The ids are the database's own
+/// integers, from a previous statement, never anyone's input.
+pub fn sha1s_for_mods(conn: &Connection, mod_ids: &[i64]) -> Result<HashMap<i64, Vec<String>>> {
     let mut out: HashMap<i64, Vec<String>> = HashMap::new();
+    if mod_ids.is_empty() {
+        return Ok(out);
+    }
+    let ids = mod_ids
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT mod_id, sha1 FROM mod_version WHERE mod_id IN ({ids})"
+    ))?;
+    let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {
         out.entry(r.get(0)?).or_default().push(r.get(1)?);
     }
@@ -1120,17 +1136,19 @@ pub fn packs_using_mod(
 ///
 /// One row per pack, carrying its latest build: a mod that rides every snapshot
 /// of a pack is used by that one pack, not by it forty times over -- the page
-/// answers "which packs", not "which builds". `MAX(pack_version)` picks the
-/// latest, and SQLite reads the bare columns from that same winning row.
+/// answers "which packs", not "which builds".
+///
+/// The latest is picked in Rust rather than with `MAX(pack_version)`, because a
+/// pack version is a numeric tuple and SQL's `MAX` on it is a string compare:
+/// it reads `0.1.9` as newer than `0.1.10`, so the page would name a build two
+/// releases old and the file it shipped with it.
 pub fn packs_using_mod_by_id(conn: &Connection, mod_id: i64) -> Result<Vec<ModUse>> {
     let mut stmt = conn.prepare(
-        "SELECT pb.pack_id, MAX(pb.pack_version), mv.version, pbm.filename
+        "SELECT pb.pack_id, pb.pack_version, mv.version, pbm.filename
          FROM mod_version mv
          JOIN pack_build_mod pbm ON pbm.mod_version_id = mv.id
          JOIN pack_build pb ON pb.id = pbm.build_id
-         WHERE mv.mod_id = ?1
-         GROUP BY pb.pack_id
-         ORDER BY pb.pack_id",
+         WHERE mv.mod_id = ?1",
     )?;
     let rows = stmt
         .query_map(params![mod_id], |r| {
@@ -1142,7 +1160,21 @@ pub fn packs_using_mod_by_id(conn: &Connection, mod_id: i64) -> Result<Vec<ModUs
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+
+    let mut latest: HashMap<String, ModUse> = HashMap::new();
+    for row in rows {
+        match latest.get(&row.pack_id) {
+            Some(best)
+                if compare_pack_versions(&row.pack_version, &best.pack_version)
+                    != std::cmp::Ordering::Greater => {}
+            _ => {
+                latest.insert(row.pack_id.clone(), row);
+            }
+        }
+    }
+    let mut out: Vec<ModUse> = latest.into_values().collect();
+    out.sort_by(|a, b| a.pack_id.cmp(&b.pack_id));
+    Ok(out)
 }
 
 /// Q2 -- artifacts on disk (in `mod_version`) no build references.
@@ -1299,12 +1331,18 @@ pub fn releases_of_mod_by_id(conn: &Connection, mod_id: i64) -> Result<Vec<Relea
 /// what an unpaged caller asks for.
 ///
 /// The cursor is the id alone and the ordering is resolved here rather than by
-/// the caller: the sort key is the name the row sorts under, which is not
-/// always the name the row is displayed by, and a caller reconstructing it from
-/// the answer would silently drift from what the listing actually did. A cursor
-/// naming a mod that has since been merged away ends the listing rather than
-/// resuming mid-way -- the caller starts over, which is the correct read of a
-/// listing that moved under them.
+/// the caller: a caller reconstructing the sort key from the answer would
+/// silently drift from what the listing actually did. A cursor naming a mod
+/// that has since been merged away ends the listing rather than resuming
+/// mid-way -- the caller starts over, which is the correct read of a listing
+/// that moved under them.
+///
+/// Sorted by the name each row is displayed by, which is what an alphabetical
+/// listing means to whoever reads it. The two must be the same expression: the
+/// sort key used to stop at `canonical_name -> slug`, so every mod the mirror
+/// knows only by its modid -- an unidentified self-hosted jar, which is exactly
+/// what the browser is opened to fix -- sorted under the empty string and came
+/// back in id order, ahead of everything, under a heading claiming otherwise.
 pub fn list_mods(
     conn: &Connection,
     q: Option<&str>,
@@ -1320,7 +1358,12 @@ pub fn list_mods(
     // `loader_parent` ancestors, or `any` -- the same reachability eligible_for_
     // loader uses. Seeded case-insensitively so a pack's free-text "Forge" hits
     // the registry's "forge" target.
-    let mut stmt = conn.prepare(
+    let sort_key = display_name_sql("m");
+    let cursor_key = format!(
+        "(SELECT {} FROM mods c WHERE c.id = ?5)",
+        display_name_sql("c")
+    );
+    let mut stmt = conn.prepare(&format!(
         "WITH RECURSIVE ancestors(id) AS (
             SELECT lower(?2) WHERE ?2 IS NOT NULL
             UNION
@@ -1343,14 +1386,11 @@ pub fn list_mods(
                  SELECT 1 FROM mod_version mv
                  WHERE mv.mod_id = m.id AND mv.mc_versions LIKE ?4 ESCAPE '\\'))
            AND (?5 IS NULL
-                OR lower(COALESCE(m.canonical_name, m.slug, ''))
-                   > (SELECT lower(COALESCE(c.canonical_name, c.slug, '')) FROM mods c WHERE c.id = ?5)
-                OR (lower(COALESCE(m.canonical_name, m.slug, ''))
-                    = (SELECT lower(COALESCE(c.canonical_name, c.slug, '')) FROM mods c WHERE c.id = ?5)
-                    AND m.id > ?5))
-         ORDER BY lower(COALESCE(m.canonical_name, m.slug, '')), m.id
-         LIMIT ?6",
-    )?;
+                OR {sort_key} > {cursor_key}
+                OR ({sort_key} = {cursor_key} AND m.id > ?5))
+         ORDER BY {sort_key}, m.id
+         LIMIT ?6"
+    ))?;
     // a negative limit is SQLite for "all of them", which is what an unpaged
     // caller asked for
     let take = take.map(|n| n as i64).unwrap_or(-1);
@@ -1420,6 +1460,19 @@ pub fn list_mods(
         .collect())
 }
 
+/// The name a mod is displayed by, as SQL over the table aliased `alias`:
+/// `canonical_name -> slug -> modid -> #<id>`, lowercased. The same cascade
+/// [`list_mods`] builds each row's `name` from, so a listing that orders by
+/// this orders by what a reader actually sees. `alias` is a literal from this
+/// module, never anyone's input.
+fn display_name_sql(alias: &str) -> String {
+    format!(
+        "lower(COALESCE({alias}.canonical_name, {alias}.slug, \
+         (SELECT external_key FROM mod_alias WHERE mod_id = {alias}.id AND source = 'modid' LIMIT 1), \
+         '#' || {alias}.id))"
+    )
+}
+
 /// `mod_id -> its loader targets` and `mod_id -> its Minecraft versions`, over
 /// the whole registry or over the mod ids in `only` (a comma-joined list).
 type Facets = (
@@ -1464,15 +1517,18 @@ fn facets_of(conn: &Connection, only: Option<&str>) -> Result<Facets> {
 
 /// Registry browser: every published build, newest/latest first per pack, with
 /// its mod count.
+///
+/// The version ordering is done here rather than in the `ORDER BY`, for the
+/// reason [`packs_using_mod_by_id`] states: SQL compares a pack version as a
+/// string, which puts `0.1.10` before `0.1.9`.
 pub fn list_builds(conn: &Connection) -> Result<Vec<BuildSummary>> {
     let mut stmt = conn.prepare(
         "SELECT pb.pack_id, pb.pack_version, pb.mc_version, pb.loader_id, pb.loader_version,
                 pb.java_major, pb.is_latest,
                 (SELECT count(*) FROM pack_build_mod pbm WHERE pbm.build_id = pb.id) AS mod_count
-         FROM pack_build pb
-         ORDER BY pb.pack_id, pb.is_latest DESC, pb.pack_version DESC",
+         FROM pack_build pb",
     )?;
-    let rows = stmt
+    let mut rows = stmt
         .query_map([], |r| {
             Ok(BuildSummary {
                 pack_id: r.get(0)?,
@@ -1486,6 +1542,12 @@ pub fn list_builds(conn: &Connection) -> Result<Vec<BuildSummary>> {
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.sort_by(|a, b| {
+        a.pack_id
+            .cmp(&b.pack_id)
+            .then(b.is_latest.cmp(&a.is_latest))
+            .then(compare_pack_versions(&b.pack_version, &a.pack_version))
+    });
     Ok(rows)
 }
 
@@ -1659,7 +1721,10 @@ pub fn stats(conn: &Connection) -> Result<RegistryStats> {
 
 #[cfg(test)]
 mod tests {
-    use super::sort_mc;
+    use super::*;
+    use crate::registry::{Registry, upsert};
+
+    const NOW: &str = "2026-08-30T00:00:00Z";
 
     #[test]
     fn mc_versions_sort_numerically() {
@@ -1668,5 +1733,110 @@ mod tests {
             .to_vec();
         sort_mc(&mut v);
         assert_eq!(v, ["1.7.10", "1.8.9", "1.10.2", "1.12.2", "1.16.5"]);
+    }
+
+    /// A mod known by `modid`, optionally given a display name.
+    fn a_mod(r: &Registry, modid: &str, name: Option<&str>) -> i64 {
+        r.with_conn_mut(|c| {
+            let id = upsert::upsert_mod_by_alias(c, &[("modid", modid)], NOW)?;
+            upsert::set_mod_meta(c, id, name, None, None, NOW)?;
+            Ok(id)
+        })
+        .unwrap()
+    }
+
+    /// The listing a reader sees is alphabetical by the name on the row. A mod
+    /// the mirror knows only by its modid has no canonical name and no slug --
+    /// which is most of what a fresh self-hosted cache holds -- and used to sort
+    /// under the empty string, so the whole unidentified tail came back first,
+    /// in id order, under a heading that said A-Z.
+    #[test]
+    fn the_browser_sorts_by_the_name_it_shows() {
+        let r = Registry::open_in_memory().unwrap();
+        a_mod(&r, "zebra", Some("Zebra Mod"));
+        a_mod(&r, "betterbeds", None);
+        a_mod(&r, "alpha", Some("Alpha Mod"));
+        a_mod(&r, "yeti", None);
+
+        let names = |rows: &[ModSummary]| rows.iter().map(|m| m.name.clone()).collect::<Vec<_>>();
+        let all = r
+            .with_conn(|c| list_mods(c, None, None, None, None, None))
+            .unwrap();
+        assert_eq!(
+            names(&all),
+            ["Alpha Mod", "betterbeds", "yeti", "Zebra Mod"],
+            "a modid-only mod sorts among the named ones, by the name shown"
+        );
+
+        // and paging follows that same order rather than a second one: the
+        // cursor is compared with the key the listing is sorted by
+        let mut paged: Vec<String> = Vec::new();
+        let mut after: Option<i64> = None;
+        loop {
+            let page = r
+                .with_conn(|c| list_mods(c, None, None, None, after, Some(1)))
+                .unwrap();
+            let Some(row) = page.first() else { break };
+            paged.push(row.name.clone());
+            after = Some(row.mod_id);
+        }
+        assert_eq!(paged, names(&all), "one page at a time reads the same list");
+    }
+
+    /// A pack version is a numeric tuple, so `0.1.10` is newer than `0.1.9`.
+    /// SQL's `MAX` and `ORDER BY` compare it as a string and say the opposite,
+    /// which made both of these name a build two releases old.
+    #[test]
+    fn pack_versions_order_as_numbers_not_as_text() {
+        let r = Registry::open_in_memory().unwrap();
+        let mod_id = a_mod(&r, "jei", Some("JEI"));
+        r.with_conn_mut(|c| {
+            let mv = upsert::upsert_mod_version(
+                c,
+                mod_id,
+                "1.0",
+                &["forge"],
+                &"a".repeat(40),
+                10,
+                Some("jei.jar"),
+                None,
+                NOW,
+            )?;
+            upsert::upsert_pack(c, "Industrial", NOW)?;
+            for version in ["0.1.9", "0.1.10"] {
+                let build = upsert::upsert_pack_build(
+                    c,
+                    "Industrial",
+                    version,
+                    "1.12.2",
+                    Some("forge"),
+                    None,
+                    None,
+                    None,
+                    true,
+                    NOW,
+                )?;
+                upsert::link_build_mod(c, build, mv, "jei.jar", true, true)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+        let used = r.with_conn(|c| packs_using_mod_by_id(c, mod_id)).unwrap();
+        assert_eq!(used.len(), 1, "one row per pack");
+        assert_eq!(
+            used[0].pack_version, "0.1.10",
+            "the newest build, not the longest string"
+        );
+
+        let builds = r.with_conn(list_builds).unwrap();
+        assert_eq!(
+            builds
+                .iter()
+                .map(|b| b.pack_version.as_str())
+                .collect::<Vec<_>>(),
+            ["0.1.10", "0.1.9"],
+            "newest first"
+        );
     }
 }

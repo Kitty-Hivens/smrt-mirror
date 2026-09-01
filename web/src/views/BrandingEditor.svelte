@@ -7,7 +7,18 @@
   import DropZone from './ui/DropZone.svelte';
   import ImageCropper from './ImageCropper.svelte';
 
-  let { packId }: { packId: string } = $props();
+  let {
+    packId,
+    onBranding,
+  }: {
+    packId: string;
+    /// An icon or banner just landed in the pack's own static tree, at this
+    /// path. The card's field is what makes it visible, and having uploaded the
+    /// picture is the whole of what somebody meant to do -- so whoever owns the
+    /// card is told, rather than leaving them to work out that the file is at
+    /// `/v1/packs/<id>/static/<path>` and type it.
+    onBranding?: (target: 'icon' | 'banner', relPath: string) => void;
+  } = $props();
 
   // where a dropped file lands: the two branding images get stable names so the
   // pack-card URL stays put; everything else keeps its own filename
@@ -68,6 +79,7 @@
       }
     }
     await uploadOne(relPath, data);
+    onBranding?.(target, relPath);
   }
 
   async function onDrop(dropped: File[]) {

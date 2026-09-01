@@ -1,41 +1,32 @@
-// Drive a real cache-jar upload through the panel: login, go to Cache,
-// pick a file, confirm it lands. Verifies the client-side SHA-1 + PUT path.
-import puppeteer from 'puppeteer-core';
+// A real cache-jar upload through the panel: the client hashes the file and PUTs
+// it under its own sha1, and the mirror re-verifies. Verifies that whole path.
+//
+// Env: JAR (a .jar to upload; required).
+import { launch, signedIn, go, shoot, sleep } from './lib/harness.mjs';
 
-const EXE = process.env.CHROME;
-const BASE = process.env.BASE ?? 'http://127.0.0.1:9000';
-const TOKEN = process.env.TOKEN ?? '';
 const JAR = process.env.JAR;
-const OUT = process.env.OUT ?? '/tmp';
+if (!JAR) {
+  console.error('set JAR=/path/to/some.jar');
+  process.exit(1);
+}
 
-const browser = await puppeteer.launch({
-  executablePath: EXE,
-  headless: true,
-  args: ['--no-sandbox', '--disable-gpu', '--hide-scrollbars'],
-  defaultViewport: { width: 1180, height: 760, deviceScaleFactor: 2 },
-});
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
+const browser = await launch({ width: 1280, height: 900 });
 try {
-  const page = await browser.newPage();
-  await page.goto(`${BASE}/admin`, { waitUntil: 'networkidle0' });
-  await page.waitForSelector('input[type=password]', { timeout: 6000 });
-  await page.type('input[type=password]', TOKEN);
-  await Promise.all([
-    page.click('button[type=submit]'),
-    page.waitForSelector('.tiles', { timeout: 8000 }),
-  ]);
-  const cacheTab = await page.evaluateHandle(() =>
-    [...document.querySelectorAll('.tab')].find((b) => b.textContent.trim() === 'Cache'),
-  );
-  await cacheTab.asElement().click();
-  await sleep(300);
+  const page = await signedIn(browser);
+  // The cache tab became the Mods section: one place for the registry and the
+  // jars behind it, rather than a list of hashes on its own.
+  await go(page, 'Mods');
+  await sleep(600);
   const input = await page.$('input[type=file]');
+  if (!input) throw new Error('no drop target on the Mods section (operator only -- check the role)');
   await input.uploadFile(JAR);
-  await sleep(1400);
-  await page.screenshot({ path: `${OUT}/smrt-cache.png` });
-  const head = await page.$eval('.cache-head', (e) => e.textContent.trim());
-  console.log('cache-head:', head);
+  // hashing happens in the page, so a large jar takes a moment before the PUT
+  await sleep(3000);
+  await shoot(page, 'check-upload');
+  const msg = await page.$eval('.upmsg', (el) => el.textContent.trim()).catch(() => '');
+  if (!msg) throw new Error('the upload reported nothing -- it may not have started');
+  console.log('upload said:', msg);
+  if (/0/.test(msg) && !/1|2|3|4|5|6|7|8|9/.test(msg.replace(/0/g, ''))) process.exitCode = 1;
 } finally {
   await browser.close();
 }

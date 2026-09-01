@@ -15,6 +15,7 @@
   import Profile from './views/Profile.svelte';
   import MyPacks from './views/MyPacks.svelte';
   import Settings from './views/Settings.svelte';
+  import Skeleton from './views/ui/Skeleton.svelte';
   import Toaster from './views/ui/Toaster.svelte';
   import DialogHost from './views/DialogHost.svelte';
 
@@ -73,7 +74,9 @@
       <!-- read-only for a member, full authoring for an operator; the view gates
            its own write surface, so one component serves both -->
       {#await lazy(() => import('./views/ModManager.svelte'))}
-        <div class="muted mono">{t('common.loading')}</div>
+        <!-- the section's own shape while its code is on the wire, so the wait
+             for the chunk and the wait for the data read as one -->
+        <div class="panel"><Skeleton rows={6} height={73} gap={0} shape="row" lead={32} /></div>
       {:then { default: ModManager }}
         <ModManager />
       {:catch}
@@ -84,7 +87,7 @@
            view gates its own write affordances, so one component serves both.
            lazy: Svelte Flow + dagre are ~200KB, loaded only when the graph opens -->
       {#await lazy(() => import('./views/GraphView.svelte'))}
-        <div class="muted mono">{t('common.loading')}</div>
+        <Skeleton rows={1} height={420} />
       {:then { default: GraphView }}
         <GraphView />
       {:catch}

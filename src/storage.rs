@@ -908,6 +908,54 @@ impl Storage {
         }
     }
 
+    /// A GitHub avatar the mirror already holds, while it is still fresh.
+    ///
+    /// The proxy exists so a page never hands a viewer's address to GitHub. It
+    /// held nothing, though, so the mirror itself asked GitHub once per image
+    /// per page load -- a byline on every comment, a row in the user list. The
+    /// same argument as the project icons, and the same window: a picture that
+    /// changes rarely, re-asked for daily.
+    pub async fn read_avatar(&self, uid: i64) -> Option<(Vec<u8>, &'static str)> {
+        let dir = self.root.join("icons").join("avatars");
+        for (ext, content_type) in ICON_KINDS {
+            let path = dir.join(format!("{uid}.{ext}"));
+            let Ok(meta) = fs::metadata(&path).await else {
+                continue;
+            };
+            let fresh = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age < AVATAR_MAX_AGE);
+            if !fresh {
+                continue;
+            }
+            if let Ok(bytes) = fs::read(&path).await {
+                return Some((bytes, content_type));
+            }
+        }
+        None
+    }
+
+    /// Keep an avatar. Best-effort: a copy that cannot be written costs the
+    /// next viewer one fetch.
+    pub async fn store_avatar(&self, uid: i64, bytes: &[u8], content_type: &str) {
+        let Some(ext) = ICON_KINDS
+            .iter()
+            .find(|(_, ct)| *ct == content_type)
+            .map(|(ext, _)| *ext)
+        else {
+            return; // a kind we do not serve back; see ICON_KINDS
+        };
+        let dir = self.root.join("icons").join("avatars");
+        if fs::create_dir_all(&dir).await.is_err() {
+            return;
+        }
+        if let Err(e) = fs::write(dir.join(format!("{uid}.{ext}")), bytes).await {
+            tracing::warn!(uid, error = %e, "could not keep an avatar");
+        }
+    }
+
     /// Project ids are Modrinth's own base62 handles; a slug may also arrive.
     /// Anything that could leave the directory, or is not a plausible handle at
     /// all, gets no path -- this becomes a filename.
@@ -1534,6 +1582,9 @@ const ICON_KINDS: [(&str, &str); 4] = [
 ];
 /// Marker extension for "this jar was opened and carries no icon".
 const NO_ICON: &str = "none";
+/// How long a proxied GitHub avatar is served before it is fetched again --
+/// the same day the response's own `Cache-Control` gives a browser.
+const AVATAR_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(86_400);
 /// How long a project icon copied from upstream is served before it is fetched
 /// again. A jar's icon cannot change -- the jar is its hash -- but a project's
 /// can, so this one has a shelf life.

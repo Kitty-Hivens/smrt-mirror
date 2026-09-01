@@ -11,8 +11,10 @@ use super::resolve;
 use super::sources::ModrinthCache;
 use crate::domain::{DeclaredMod, Display, PackConfig, Requirement, SourceDecl};
 use crate::registry::{Registry, queries, semver};
+use crate::storage::Storage;
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// A dep chain deeper than this is almost certainly a resolution loop, not a real
 /// tree; stop pulling rather than spin.
@@ -22,14 +24,15 @@ const MAX_PASSES: usize = 8;
 /// mirror's own cache second), then write the resolved requires graph into
 /// `display.requires`. A dep's own dependencies come in on the next pass; the
 /// loop stops once a pass adds nothing. A dependency neither source can provide
-/// is left for the resolve report to flag, not invented. `cached` is the live
-/// cache inventory (sha1 set): only a jar whose bytes the mirror actually holds
-/// can be declared as a `smrt_cache` source.
+/// is left for the resolve report to flag, not invented. Only a jar whose bytes
+/// the mirror actually holds can be declared as a `smrt_cache` source, which is
+/// what `storage` is asked -- about the candidates that come up, rather than by
+/// listing the whole cache before anything is known.
 pub async fn fill_dependencies(
     cfg: &mut PackConfig,
-    registry: &Registry,
+    registry: &Arc<Registry>,
     modrinth: &Modrinth,
-    cached: &HashSet<String>,
+    storage: &Storage,
 ) -> Result<usize> {
     // Read once, reused by every pass: the wire pass below walks the same pins
     // each time round, and a pass that adds nothing must not cost a round trip.
@@ -38,12 +41,7 @@ pub async fn fill_dependencies(
     let versions = ModrinthCache::default();
     let mut added_total = 0;
     for _ in 0..MAX_PASSES {
-        let plan = {
-            let cfg = &*cfg;
-            let mut plan = registry.with_conn(|c| resolve::dependency_fill_plan(c, cfg))?;
-            merge_wire_deps(&mut plan, cfg, registry, modrinth, &mut read).await;
-            plan
-        };
+        let plan = plan_for(cfg, registry, modrinth, &mut read).await?;
         let mut added = false;
         for target in &plan.missing {
             // Per-target isolation: one unresolvable target (a Modrinth
@@ -52,7 +50,7 @@ pub async fn fill_dependencies(
             // report's missing list instead of silently taking the rest
             // down with it.
             let decl =
-                match resolve_target(target, cfg, registry, modrinth, cached, &versions).await {
+                match resolve_target(target, cfg, registry, modrinth, storage, &versions).await {
                     Ok(Some(d)) => d,
                     Ok(None) => continue,
                     Err(e) => {
@@ -75,15 +73,32 @@ pub async fn fill_dependencies(
         }
     }
     // record the final graph so the build derives required-ness from it
-    let plan = {
-        let cfg = &*cfg;
-        let mut plan = registry.with_conn(|c| resolve::dependency_fill_plan(c, cfg))?;
-        merge_wire_deps(&mut plan, cfg, registry, modrinth, &mut read).await;
-        plan
-    };
+    let plan = plan_for(cfg, registry, modrinth, &mut read).await?;
     apply_requires(cfg, &plan.requires);
     prune_orphaned_pulled(cfg);
     Ok(added_total)
+}
+
+/// What this config still needs: the registry's own fill plan, folded together
+/// with the dependencies Modrinth declares for pins the harvest has not read.
+///
+/// The registry half runs off the runtime, on a clone of the config. The plan
+/// walks every declared mod against the relation graph, and this is called once
+/// per fill pass on a path that runs about every second while somebody types in
+/// the editor -- so it is the last place to hold a runtime worker on a mutex
+/// the harvest also wants.
+async fn plan_for(
+    cfg: &PackConfig,
+    registry: &Arc<Registry>,
+    modrinth: &Modrinth,
+    read: &mut HashMap<String, MrVersion>,
+) -> Result<resolve::DepFillPlan> {
+    let snapshot = cfg.clone();
+    let mut plan = registry
+        .read(move |c| resolve::dependency_fill_plan(c, &snapshot))
+        .await?;
+    merge_wire_deps(&mut plan, cfg, registry, modrinth, read).await;
+    Ok(plan)
 }
 
 /// One hard dependency read straight off a Modrinth version, before the mirror
@@ -114,7 +129,7 @@ struct WireDep {
 async fn merge_wire_deps(
     plan: &mut resolve::DepFillPlan,
     cfg: &PackConfig,
-    registry: &Registry,
+    registry: &Arc<Registry>,
     modrinth: &Modrinth,
     read: &mut HashMap<String, MrVersion>,
 ) {
@@ -153,11 +168,11 @@ async fn merge_wire_deps(
 /// nothing is pulled from it and the resolve report still flags what is missing.
 async fn wire_deps(
     cfg: &PackConfig,
-    registry: &Registry,
+    registry: &Arc<Registry>,
     modrinth: &Modrinth,
     read: &mut HashMap<String, MrVersion>,
 ) -> Vec<WireDep> {
-    let pins: Vec<(String, String, String)> = cfg
+    let declared: Vec<(String, String, String)> = cfg
         .mods
         .iter()
         .filter_map(|m| match &m.source {
@@ -167,16 +182,28 @@ async fn wire_deps(
             } => Some((m.filename.clone(), project_id.clone(), version_id.clone())),
             _ => None,
         })
-        .filter(|(_, _, version_id)| {
-            let vid = version_id.clone();
-            let harvested = registry
-                .with_conn(move |c| {
-                    Ok(queries::mod_version_id_for_modrinth_version_id(c, &vid)?.is_some())
-                })
-                .unwrap_or(false);
-            // a pin the harvest has read is the registry's to speak for
-            !harvested
-        })
+        .collect();
+    // Which pins the harvest has already read -- asked once for the whole set
+    // rather than once per pin from inside an iterator chain running on the
+    // runtime. A pin the harvest has read is the registry's to speak for.
+    let harvested: HashSet<String> = {
+        let ids: Vec<String> = declared.iter().map(|(_, _, v)| v.clone()).collect();
+        registry
+            .read(move |c| {
+                let mut out = HashSet::new();
+                for id in ids {
+                    if queries::mod_version_id_for_modrinth_version_id(c, &id)?.is_some() {
+                        out.insert(id);
+                    }
+                }
+                Ok(out)
+            })
+            .await
+            .unwrap_or_default()
+    };
+    let pins: Vec<(String, String, String)> = declared
+        .into_iter()
+        .filter(|(_, _, version_id)| !harvested.contains(version_id))
         .collect();
     let unread: Vec<String> = pins
         .iter()
@@ -265,9 +292,9 @@ pub struct PulledPreview {
 /// answer cannot drift from what the save will actually do; nothing is written.
 pub async fn preview_fill(
     cfg: &PackConfig,
-    registry: &Registry,
+    registry: &Arc<Registry>,
     modrinth: &Modrinth,
-    cached: &HashSet<String>,
+    storage: &Storage,
 ) -> Result<Vec<PulledPreview>> {
     let before: HashSet<String> = cfg
         .mods
@@ -275,12 +302,14 @@ pub async fn preview_fill(
         .map(|m| source_identity(&m.source))
         .collect();
     let mut filled = cfg.clone();
-    fill_dependencies(&mut filled, registry, modrinth, cached).await?;
+    fill_dependencies(&mut filled, registry, modrinth, storage).await?;
 
     // who requires what, among the mods the filled config would hold
     let plan = {
-        let filled = &filled;
-        registry.with_conn(|c| resolve::dependency_fill_plan(c, filled))?
+        let snapshot = filled.clone();
+        registry
+            .read(move |c| resolve::dependency_fill_plan(c, &snapshot))
+            .await?
     };
     let mut needed_by: HashMap<&str, Vec<String>> = HashMap::new();
     for (requirer, dep) in &plan.requires {
@@ -383,9 +412,9 @@ fn prune_orphaned_pulled(cfg: &mut PackConfig) {
 async fn resolve_target(
     target: &resolve::MissingTarget,
     cfg: &PackConfig,
-    registry: &Registry,
+    registry: &Arc<Registry>,
     modrinth: &Modrinth,
-    cached: &HashSet<String>,
+    storage: &Storage,
     versions: &ModrinthCache,
 ) -> Result<Option<DeclaredMod>> {
     let bare = target
@@ -400,10 +429,12 @@ async fn resolve_target(
         Some(p) => Some(p.to_string()),
         None => {
             let sel = bare.to_string();
-            registry.with_conn(move |c| {
-                Ok(queries::mod_id_for_selector(c, &sel)?
-                    .and_then(|id| queries::modrinth_id_for_mod(c, id).ok().flatten()))
-            })?
+            registry
+                .read(move |c| {
+                    Ok(queries::mod_id_for_selector(c, &sel)?
+                        .and_then(|id| queries::modrinth_id_for_mod(c, id).ok().flatten()))
+                })
+                .await?
         }
     };
     if let Some(project) = project {
@@ -441,7 +472,7 @@ async fn resolve_target(
         }
     }
     // Modrinth cannot provide it: fall back to the mirror's own cache.
-    resolve_from_cache(target, cfg, registry, cached)
+    resolve_from_cache(target, cfg, registry, storage).await
 }
 
 /// Whether a Modrinth version can actually be declared: it runs on the pack's
@@ -470,76 +501,86 @@ fn pulled_from_version(project: &str, v: &MrVersion) -> DeclaredMod {
     }
 }
 
-/// The cache leg of the chain: the selector's mod, its cached artifacts,
-/// narrowed to the pack's loader family and Minecraft version, the requirer's
-/// version window applied where comparable, newest surviving artifact wins.
-fn resolve_from_cache(
+/// The cache leg of the chain: the selector's mod, its artifacts narrowed to the
+/// pack's loader family and Minecraft version, the requirer's version window
+/// applied where comparable, and the newest survivor whose bytes the mirror
+/// actually holds.
+///
+/// The registry decides which artifacts are eligible; the cache is then asked
+/// about those, newest first, one `stat` at a time. It used to be handed the
+/// mirror's whole cache listing instead -- built by the caller before any of
+/// this ran, on every config save, so answering a question about a handful of
+/// jars meant opening every directory in the cache.
+async fn resolve_from_cache(
     target: &resolve::MissingTarget,
     cfg: &PackConfig,
-    registry: &Registry,
-    cached: &HashSet<String>,
+    registry: &Arc<Registry>,
+    storage: &Storage,
 ) -> Result<Option<DeclaredMod>> {
     let selector = target.selector.clone();
     let range = target.version_range.clone();
     let loader = cfg.loader.name.to_ascii_lowercase();
     let mc = cfg.minecraft_version.clone();
-    let cached = cached.clone();
-    registry.with_conn(move |c| {
-        let Some(mod_id) = queries::mod_id_for_selector(c, &selector)? else {
-            return Ok(None);
-        };
-        let chain = queries::loader_chain(c, &loader)?;
-        let mut best: Option<(i64, DeclaredMod)> = None;
-        for (i, v) in queries::versions_of_mod_by_id(c, mod_id)?
-            .into_iter()
-            .enumerate()
-        {
-            if !cached.contains(&v.sha1) {
-                continue;
-            }
-            let loader_ok = v
-                .targets
-                .iter()
-                .any(|t| t == "any" || chain.contains(&t.to_lowercase()));
-            let mc_ok = v.mc_versions.is_empty() || v.mc_versions.contains(&mc);
-            if !loader_ok || !mc_ok {
-                continue;
-            }
-            // the requirer's window: reject a plainly out-of-window artifact;
-            // an incomparable version passes (never act on a guess)
-            if let Some(r) = range.as_deref()
-                && semver::in_range(&v.version, r) == Some(false)
-            {
-                continue;
-            }
-            // Prefer the registry's stored filename. Absent (a cache jar ingested
-            // without a harvest), name it after the requested modid rather than an
-            // opaque `<sha1>.jar`: the selector on the cache leg is a bare modid
-            // (a `modrinth:`/`external:` selector resolves on the Modrinth leg and
-            // never reaches here), and a human name is what the panel and the
-            // launcher's mods/<filename> both want. Sha1 stays the last resort.
-            let filename = v.filename.clone().unwrap_or_else(|| {
-                if selector.contains(':') {
-                    format!("{}.jar", v.sha1)
-                } else {
-                    format!("{selector}.jar")
-                }
-            });
-            let decl = DeclaredMod {
-                filename,
-                default_enabled: true,
-                source: SourceDecl::SmrtCache {
-                    sha1: v.sha1.clone(),
-                },
-                display: None,
-                slug: None,
-                pulled: true,
+    let candidates: Vec<DeclaredMod> = registry
+        .read(move |c| {
+            let Some(mod_id) = queries::mod_id_for_selector(c, &selector)? else {
+                return Ok(Vec::new());
             };
-            // rows come version-ordered; keep the last acceptable one (newest)
-            best = Some((i as i64, decl));
+            let chain = queries::loader_chain(c, &loader)?;
+            let mut out = Vec::new();
+            for v in queries::versions_of_mod_by_id(c, mod_id)? {
+                let loader_ok = v
+                    .targets
+                    .iter()
+                    .any(|t| t == "any" || chain.contains(&t.to_lowercase()));
+                let mc_ok = v.mc_versions.is_empty() || v.mc_versions.contains(&mc);
+                if !loader_ok || !mc_ok {
+                    continue;
+                }
+                // the requirer's window: reject a plainly out-of-window artifact;
+                // an incomparable version passes (never act on a guess)
+                if let Some(r) = range.as_deref()
+                    && semver::in_range(&v.version, r) == Some(false)
+                {
+                    continue;
+                }
+                // Prefer the registry's stored filename. Absent (a cache jar ingested
+                // without a harvest), name it after the requested modid rather than an
+                // opaque `<sha1>.jar`: the selector on the cache leg is a bare modid
+                // (a `modrinth:`/`external:` selector resolves on the Modrinth leg and
+                // never reaches here), and a human name is what the panel and the
+                // launcher's mods/<filename> both want. Sha1 stays the last resort.
+                let filename = v.filename.clone().unwrap_or_else(|| {
+                    if selector.contains(':') {
+                        format!("{}.jar", v.sha1)
+                    } else {
+                        format!("{selector}.jar")
+                    }
+                });
+                out.push(DeclaredMod {
+                    filename,
+                    default_enabled: true,
+                    source: SourceDecl::SmrtCache {
+                        sha1: v.sha1.clone(),
+                    },
+                    display: None,
+                    slug: None,
+                    pulled: true,
+                });
+            }
+            Ok(out)
+        })
+        .await?;
+    // rows come version-ordered, so the newest acceptable one is last
+    for decl in candidates.into_iter().rev() {
+        let SourceDecl::SmrtCache { sha1 } = &decl.source else {
+            continue;
+        };
+        if storage.has_cache_jar(sha1).await {
+            return Ok(Some(decl));
         }
-        Ok(best.map(|(_, d)| d))
-    })
+    }
+    Ok(None)
 }
 
 /// A pulled dependency is already in the pack when its source identity is
@@ -641,6 +682,39 @@ mod tests {
         }
     }
 
+    /// The hash of a test artifact, named by the tag its bytes are. Storage
+    /// keys a jar by its own hash and verifies it on write, so a test hash has
+    /// to be a real one -- the tag keeps the call site readable.
+    fn sha(tag: &str) -> String {
+        use sha1::{Digest, Sha1};
+        let mut h = Sha1::new();
+        h.update(tag.as_bytes());
+        hex::encode(h.finalize())
+    }
+
+    /// A cache that actually holds the named jars. The fill asks storage
+    /// whether it has a candidate rather than being handed a set of hashes, so
+    /// the tests hand it a cache with those jars in it.
+    async fn cache_holding(tags: &[&str]) -> (tempfile::TempDir, Storage) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Storage::new(tmp.path().to_path_buf());
+        for tag in tags {
+            store
+                .save_cache_jar(&sha(tag), tag.as_bytes())
+                .await
+                .unwrap();
+        }
+        (tmp, store)
+    }
+
+    /// A cache with nothing in it, for the cases where the fallback must find
+    /// no candidate at all.
+    fn empty_cache() -> (tempfile::TempDir, Storage) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Storage::new(tmp.path().to_path_buf());
+        (tmp, store)
+    }
+
     use crate::registry::model::{RelKind, Source};
     use crate::registry::{Registry, upsert};
 
@@ -681,9 +755,9 @@ mod tests {
     // asked about.
     #[tokio::test]
     async fn preview_reports_what_a_save_would_pull_without_touching_the_config() {
-        let r = Registry::open_in_memory().unwrap();
-        let a = add_artifact(&r, "moda", "1.0", "sha_a", "a.jar");
-        add_artifact(&r, "modb", "1.0", "sha_b", "modb-1.0.jar");
+        let r = Arc::new(Registry::open_in_memory().unwrap());
+        let a = add_artifact(&r, "moda", "1.0", &sha("sha_a"), "a.jar");
+        add_artifact(&r, "modb", "1.0", &sha("sha_b"), "modb-1.0.jar");
         r.with_conn_mut(|c| {
             upsert::upsert_relation(
                 c,
@@ -699,12 +773,12 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        let mut c = cfg(vec![cache_mod("a.jar", "sha_a")]);
+        let mut c = cfg(vec![cache_mod("a.jar", &sha("sha_a"))]);
         c.loader.name = "forge".into();
         let modrinth = Modrinth::new().unwrap();
-        let cached: HashSet<String> = ["sha_a", "sha_b"].iter().map(|s| s.to_string()).collect();
+        let (_tmp, store) = cache_holding(&["sha_a", "sha_b"]).await;
 
-        let preview = preview_fill(&c, &r, &modrinth, &cached).await.unwrap();
+        let preview = preview_fill(&c, &r, &modrinth, &store).await.unwrap();
         assert_eq!(preview.len(), 1, "one dependency would come with a.jar");
         assert_eq!(preview[0].filename, "modb-1.0.jar");
         assert_eq!(preview[0].source, "cache");
@@ -720,7 +794,7 @@ mod tests {
         );
 
         // and it agrees with the save: filling for real adds exactly that row
-        fill_dependencies(&mut c, &r, &modrinth, &cached)
+        fill_dependencies(&mut c, &r, &modrinth, &store)
             .await
             .unwrap();
         let filled: Vec<&str> = c
@@ -737,9 +811,9 @@ mod tests {
     // nothing (deduped by sha1).
     #[tokio::test]
     async fn cache_fallback_pulls_a_cached_artifact() {
-        let r = Registry::open_in_memory().unwrap();
-        let a = add_artifact(&r, "moda", "1.0", "sha_a", "a.jar");
-        add_artifact(&r, "modb", "1.0", "sha_b", "modb-1.0.jar");
+        let r = Arc::new(Registry::open_in_memory().unwrap());
+        let a = add_artifact(&r, "moda", "1.0", &sha("sha_a"), "a.jar");
+        add_artifact(&r, "modb", "1.0", &sha("sha_b"), "modb-1.0.jar");
         r.with_conn_mut(|c| {
             upsert::upsert_relation(
                 c,
@@ -755,12 +829,12 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        let mut c = cfg(vec![cache_mod("a.jar", "sha_a")]);
+        let mut c = cfg(vec![cache_mod("a.jar", &sha("sha_a"))]);
         c.loader.name = "forge".into();
         let modrinth = Modrinth::new().unwrap();
-        let cached: HashSet<String> = ["sha_a", "sha_b"].iter().map(|s| s.to_string()).collect();
+        let (_tmp, store) = cache_holding(&["sha_a", "sha_b"]).await;
 
-        let added = fill_dependencies(&mut c, &r, &modrinth, &cached)
+        let added = fill_dependencies(&mut c, &r, &modrinth, &store)
             .await
             .unwrap();
         assert_eq!(added, 1, "the cached dependency is pulled");
@@ -770,14 +844,14 @@ mod tests {
             .find(|m| m.filename == "modb-1.0.jar")
             .unwrap();
         assert!(
-            matches!(&pulled.source, SourceDecl::SmrtCache { sha1 } if sha1 == "sha_b"),
+            matches!(&pulled.source, SourceDecl::SmrtCache { sha1 } if sha1 == &sha("sha_b")),
             "declared as a smrt_cache source"
         );
         // the requires edge landed so the build locks the pulled dep
         let reqs = &c.mods[0].display.as_ref().unwrap().requires;
         assert_eq!(reqs[0].filename, "modb-1.0.jar");
 
-        let again = fill_dependencies(&mut c, &r, &modrinth, &cached)
+        let again = fill_dependencies(&mut c, &r, &modrinth, &store)
             .await
             .unwrap();
         assert_eq!(again, 0, "idempotent: nothing re-added");
@@ -788,12 +862,22 @@ mod tests {
     // the hash-name UX wart depfill used to produce.
     #[tokio::test]
     async fn cache_fallback_without_a_stored_filename_names_by_modid() {
-        let r = Registry::open_in_memory().unwrap();
-        let a = add_artifact(&r, "moda", "1.0", "sha_a", "a.jar");
+        let r = Arc::new(Registry::open_in_memory().unwrap());
+        let a = add_artifact(&r, "moda", "1.0", &sha("sha_a"), "a.jar");
         r.with_conn_mut(|c| {
             let id = upsert::upsert_mod_by_alias(c, &[("modid", "modb")], NOW)?;
             // None filename: the gap that used to fall back to the sha1
-            upsert::upsert_mod_version(c, id, "1.0", &["forge"], "sha_b", 10, None, None, NOW)?;
+            upsert::upsert_mod_version(
+                c,
+                id,
+                "1.0",
+                &["forge"],
+                &sha("sha_b"),
+                10,
+                None,
+                None,
+                NOW,
+            )?;
             upsert::upsert_relation(
                 c,
                 a,
@@ -808,12 +892,12 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        let mut c = cfg(vec![cache_mod("a.jar", "sha_a")]);
+        let mut c = cfg(vec![cache_mod("a.jar", &sha("sha_a"))]);
         c.loader.name = "forge".into();
         let modrinth = Modrinth::new().unwrap();
-        let cached: HashSet<String> = ["sha_a", "sha_b"].iter().map(|s| s.to_string()).collect();
+        let (_tmp, store) = cache_holding(&["sha_a", "sha_b"]).await;
 
-        fill_dependencies(&mut c, &r, &modrinth, &cached)
+        fill_dependencies(&mut c, &r, &modrinth, &store)
             .await
             .unwrap();
         assert!(
@@ -832,9 +916,9 @@ mod tests {
     // when nothing declared reaches it anymore.
     #[tokio::test]
     async fn pulled_dependencies_stick_through_outages_and_prune_as_orphans() {
-        let r = Registry::open_in_memory().unwrap();
-        let a = add_artifact(&r, "moda", "1.0", "sha_a", "a.jar");
-        add_artifact(&r, "modb", "1.0", "sha_b", "modb-1.0.jar");
+        let r = Arc::new(Registry::open_in_memory().unwrap());
+        let a = add_artifact(&r, "moda", "1.0", &sha("sha_a"), "a.jar");
+        add_artifact(&r, "modb", "1.0", &sha("sha_b"), "modb-1.0.jar");
         r.with_conn_mut(|c| {
             upsert::upsert_relation(
                 c,
@@ -852,17 +936,15 @@ mod tests {
         .unwrap();
 
         // the previously-saved config: curator mod + its pulled dependency
-        let mut saved = cfg(vec![cache_mod("a.jar", "sha_a")]);
+        let mut saved = cfg(vec![cache_mod("a.jar", &sha("sha_a"))]);
         saved.loader.name = "forge".into();
-        let mut dep = cache_mod("modb-1.0.jar", "sha_b");
-        dep.source = SourceDecl::SmrtCache {
-            sha1: "sha_b".into(),
-        };
+        let mut dep = cache_mod("modb-1.0.jar", &sha("sha_b"));
+        dep.source = SourceDecl::SmrtCache { sha1: sha("sha_b") };
         dep.pulled = true;
         saved.mods.push(dep);
 
         // a stale client body: the curator mod only -- and Modrinth is down
-        let mut incoming = cfg(vec![cache_mod("a.jar", "sha_a")]);
+        let mut incoming = cfg(vec![cache_mod("a.jar", &sha("sha_a"))]);
         incoming.loader.name = "forge".into();
         merge_pulled(&saved, &mut incoming);
         assert!(
@@ -871,8 +953,8 @@ mod tests {
         );
 
         let modrinth = Modrinth::with_base("http://127.0.0.1:9").unwrap();
-        let cached: HashSet<String> = ["sha_a", "sha_b"].iter().map(|s| s.to_string()).collect();
-        fill_dependencies(&mut incoming, &r, &modrinth, &cached)
+        let (_tmp, store) = cache_holding(&["sha_a", "sha_b"]).await;
+        fill_dependencies(&mut incoming, &r, &modrinth, &store)
             .await
             .unwrap();
         let kept = incoming
@@ -891,7 +973,7 @@ mod tests {
             "removing a curator mod is an explicit act"
         );
         // ...and once the dependent is gone, the orphaned pulled dep prunes
-        fill_dependencies(&mut without_curator, &r, &modrinth, &cached)
+        fill_dependencies(&mut without_curator, &r, &modrinth, &store)
             .await
             .unwrap();
         assert!(
@@ -930,9 +1012,9 @@ mod tests {
     // still fills, and the fill itself reports success.
     #[tokio::test]
     async fn an_unreachable_target_does_not_abort_the_pass() {
-        let r = Registry::open_in_memory().unwrap();
-        let a = add_artifact(&r, "moda", "1.0", "sha_a", "a.jar");
-        add_artifact(&r, "modb", "1.0", "sha_b", "modb-1.0.jar");
+        let r = Arc::new(Registry::open_in_memory().unwrap());
+        let a = add_artifact(&r, "moda", "1.0", &sha("sha_a"), "a.jar");
+        add_artifact(&r, "modb", "1.0", &sha("sha_b"), "modb-1.0.jar");
         r.with_conn_mut(|c| {
             // netlib resolves through Modrinth (it carries a project alias)
             let netlib = upsert::upsert_mod_by_alias(
@@ -966,13 +1048,13 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        let mut c = cfg(vec![cache_mod("a.jar", "sha_a")]);
+        let mut c = cfg(vec![cache_mod("a.jar", &sha("sha_a"))]);
         c.loader.name = "forge".into();
         // nothing listens here: the Modrinth leg fails fast with a connect error
         let modrinth = Modrinth::with_base("http://127.0.0.1:9").unwrap();
-        let cached: HashSet<String> = ["sha_a", "sha_b"].iter().map(|s| s.to_string()).collect();
+        let (_tmp, store) = cache_holding(&["sha_a", "sha_b"]).await;
 
-        let added = fill_dependencies(&mut c, &r, &modrinth, &cached)
+        let added = fill_dependencies(&mut c, &r, &modrinth, &store)
             .await
             .expect("a dead target must not fail the whole fill");
         assert_eq!(added, 1, "the cache-resolvable dependency still fills");
@@ -986,9 +1068,9 @@ mod tests {
     // pulled; a jar whose bytes are not actually in the cache never is.
     #[tokio::test]
     async fn cache_fallback_respects_window_and_inventory() {
-        let r = Registry::open_in_memory().unwrap();
-        let a = add_artifact(&r, "moda", "1.0", "sha_a", "a.jar");
-        add_artifact(&r, "oldlib", "1.0", "sha_old", "oldlib-1.0.jar");
+        let r = Arc::new(Registry::open_in_memory().unwrap());
+        let a = add_artifact(&r, "moda", "1.0", &sha("sha_a"), "a.jar");
+        add_artifact(&r, "oldlib", "1.0", &sha("sha_old"), "oldlib-1.0.jar");
         r.with_conn_mut(|c| {
             upsert::upsert_relation(
                 c,
@@ -1004,18 +1086,18 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        let mut c = cfg(vec![cache_mod("a.jar", "sha_a")]);
+        let mut c = cfg(vec![cache_mod("a.jar", &sha("sha_a"))]);
         c.loader.name = "forge".into();
         let modrinth = Modrinth::new().unwrap();
 
-        let cached: HashSet<String> = ["sha_a", "sha_old"].iter().map(|s| s.to_string()).collect();
-        let added = fill_dependencies(&mut c, &r, &modrinth, &cached)
+        let (_tmp, store) = cache_holding(&["sha_a", "sha_old"]).await;
+        let added = fill_dependencies(&mut c, &r, &modrinth, &store)
             .await
             .unwrap();
         assert_eq!(added, 0, "1.0 is outside [2.0,): not pulled");
 
         // and without the bytes in the cache inventory, nothing to declare
-        let sparse: HashSet<String> = ["sha_a".to_string()].into_iter().collect();
+        let (_tmp, sparse) = cache_holding(&["sha_a"]).await;
         let added = fill_dependencies(&mut c, &r, &modrinth, &sparse)
             .await
             .unwrap();
@@ -1026,11 +1108,18 @@ mod tests {
     // client-side mod pulls nothing, so a client mod can never arrive locked.
     #[tokio::test]
     async fn client_side_dep_is_not_pulled() {
-        let r = Registry::open_in_memory().unwrap();
-        let a = add_artifact(&r, "chisel", "1.0", "sha_a", "chisel.jar");
-        add_artifact(&r, "ctm", "1.0", "sha_ctm", "ctm.jar");
+        let r = Arc::new(Registry::open_in_memory().unwrap());
+        let a = add_artifact(&r, "chisel", "1.0", &sha("sha_a"), "chisel.jar");
+        add_artifact(&r, "ctm", "1.0", &sha("sha_ctm"), "ctm.jar");
         r.with_conn_mut(|c| {
-            upsert::set_jar_class(c, "sha_ctm", "mod", Some("client"), Some("tolerant"), None)?;
+            upsert::set_jar_class(
+                c,
+                &sha("sha_ctm"),
+                "mod",
+                Some("client"),
+                Some("tolerant"),
+                None,
+            )?;
             upsert::upsert_relation(
                 c,
                 a,
@@ -1045,11 +1134,11 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        let mut c = cfg(vec![cache_mod("chisel.jar", "sha_a")]);
+        let mut c = cfg(vec![cache_mod("chisel.jar", &sha("sha_a"))]);
         c.loader.name = "forge".into();
         let modrinth = Modrinth::new().unwrap();
-        let cached: HashSet<String> = ["sha_a", "sha_ctm"].iter().map(|s| s.to_string()).collect();
-        let added = fill_dependencies(&mut c, &r, &modrinth, &cached)
+        let (_tmp, store) = cache_holding(&["sha_a", "sha_ctm"]).await;
+        let added = fill_dependencies(&mut c, &r, &modrinth, &store)
             .await
             .unwrap();
         assert_eq!(added, 0, "a client-side mod is never auto-pulled");
@@ -1060,9 +1149,9 @@ mod tests {
     // suggested list for the panel to offer.
     #[tokio::test]
     async fn recommends_is_suggested_not_added() {
-        let r = Registry::open_in_memory().unwrap();
-        let a = add_artifact(&r, "moda", "1.0", "sha_a", "a.jar");
-        add_artifact(&r, "modr", "1.0", "sha_r", "modr.jar");
+        let r = Arc::new(Registry::open_in_memory().unwrap());
+        let a = add_artifact(&r, "moda", "1.0", &sha("sha_a"), "a.jar");
+        add_artifact(&r, "modr", "1.0", &sha("sha_r"), "modr.jar");
         r.with_conn_mut(|c| {
             upsert::upsert_relation(
                 c,
@@ -1078,11 +1167,11 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        let mut c = cfg(vec![cache_mod("a.jar", "sha_a")]);
+        let mut c = cfg(vec![cache_mod("a.jar", &sha("sha_a"))]);
         c.loader.name = "forge".into();
         let modrinth = Modrinth::new().unwrap();
-        let cached: HashSet<String> = ["sha_a", "sha_r"].iter().map(|s| s.to_string()).collect();
-        let added = fill_dependencies(&mut c, &r, &modrinth, &cached)
+        let (_tmp, store) = cache_holding(&["sha_a", "sha_r"]).await;
+        let added = fill_dependencies(&mut c, &r, &modrinth, &store)
             .await
             .unwrap();
         assert_eq!(added, 0, "recommends is never auto-added");
@@ -1153,7 +1242,7 @@ mod tests {
     // the fill now reads it there.
     #[tokio::test]
     async fn an_unharvested_pin_pulls_its_dependency_from_the_wire() {
-        let r = Registry::open_in_memory().unwrap();
+        let r = Arc::new(Registry::open_in_memory().unwrap());
         let pin = version_json(
             "PROJ_A",
             "VER_A",
@@ -1186,7 +1275,7 @@ mod tests {
             pulled: false,
         }]);
 
-        let added = fill_dependencies(&mut c, &r, &modrinth, &HashSet::new())
+        let added = fill_dependencies(&mut c, &r, &modrinth, &empty_cache().1)
             .await
             .unwrap();
         assert_eq!(
@@ -1208,7 +1297,7 @@ mod tests {
         let reqs = &c.mods[0].display.as_ref().unwrap().requires;
         assert_eq!(reqs[0].filename, "lib-1.0.jar");
 
-        let again = fill_dependencies(&mut c, &r, &modrinth, &HashSet::new())
+        let again = fill_dependencies(&mut c, &r, &modrinth, &empty_cache().1)
             .await
             .unwrap();
         assert_eq!(again, 0, "idempotent");

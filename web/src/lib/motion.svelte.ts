@@ -5,8 +5,10 @@
 // app.css). Durations and easings live in app.css as tokens; these are the
 // behaviours that need JavaScript.
 
-import { fly, slide } from 'svelte/transition';
+import { fade, fly, slide } from 'svelte/transition';
 import type { TransitionConfig } from 'svelte/transition';
+import { flip } from 'svelte/animate';
+import type { FlipParams } from 'svelte/animate';
 
 /// Requests currently in flight, for the shell's activity wire. A counter
 /// rather than a boolean: overlapping requests must not have the first one to
@@ -163,4 +165,32 @@ export function arrive(node: Element, params?: { y?: number }): TransitionConfig
 /// rather than covered -- the list stays one surface.
 export function unroll(node: Element): TransitionConfig {
   return slide(node, { duration: dur('enter'), easing: easeOut() });
+}
+
+/// A row taking its new place in a list rather than appearing in it.
+///
+/// Sorting, filtering and paging all rewrite a list, and without this the rows
+/// that survive teleport: the same twenty items are on screen before and after,
+/// and nothing connects the two frames, so the eye has to re-read the list to
+/// find what it was looking at. Rows arriving are handled by `.row-in`, which
+/// fires on the element being created; this is the other half -- what happens to
+/// everything that stayed.
+///
+/// `--dur-state`, not `--dur-enter`: a row moving is a state change, not an
+/// arrival, and it should be over before it is noticed. Reading the token is
+/// also what disarms it under `prefers-reduced-motion` -- the same one rule that
+/// disarms the rest, rather than a second switch to remember.
+export function settle(node: Element, params: FlipParams & { from: DOMRect; to: DOMRect }) {
+  return flip(node, params, { duration: dur('state'), easing: easeOut() });
+}
+
+/// A row leaving a list it was removed from. Quick and downward-weighted, so the
+/// gap closes while the eye is still on it -- the alternative is a row vanishing
+/// between frames and the list below jumping up to fill a space nobody saw.
+///
+/// For a list that is replaced wholesale (a new search) this is the wrong tool:
+/// every old row would linger over every new one. Use it where rows leave one at
+/// a time.
+export function depart(node: Element): TransitionConfig {
+  return fade(node, { duration: dur('state'), easing: easeOut() });
 }

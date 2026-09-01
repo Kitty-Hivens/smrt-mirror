@@ -14,6 +14,15 @@ fn valid_channel(ch: &str) -> bool {
     CHANNELS.contains(&ch)
 }
 
+/// The refusal, listing what would have been accepted. Built from [`CHANNELS`]
+/// rather than written out, because the written-out version drifted: it went on
+/// offering `dev` for two releases after migration 0016 folded that channel into
+/// `alpha`, so the one message an operator sees when a channel is refused named
+/// a channel that no longer exists and omitted the one they wanted.
+fn bad_channel(ch: &str) -> anyhow::Error {
+    anyhow::anyhow!("channel must be one of {}, got {ch:?}", CHANNELS.join("/"))
+}
+
 /// Record an operator-asserted relation. De-duped against an identical authored
 /// row by the unique index; coexists with rows of other sources (precedence
 /// resolves later).
@@ -328,10 +337,7 @@ pub fn author_file_identity(conn: &Connection, id: &FileIdentity, now: &str) -> 
         bail!("version_number must not be empty");
     }
     if !valid_channel(id.channel) {
-        bail!(
-            "channel must be one of release/beta/dev/unknown, got {:?}",
-            id.channel
-        );
+        return Err(bad_channel(id.channel));
     }
 
     let mod_id = match id.mod_ref {
@@ -481,7 +487,7 @@ pub fn edit_release(
     if let Some(ch) = channel
         && !valid_channel(ch)
     {
-        bail!("channel must be one of release/beta/dev/unknown, got {ch:?}");
+        return Err(bad_channel(ch));
     }
     if version_number.is_none() && channel.is_none() {
         return Ok(());

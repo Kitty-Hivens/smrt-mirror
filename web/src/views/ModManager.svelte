@@ -1,6 +1,6 @@
 <script lang="ts">
   import { api, ApiError } from '../lib/api';
-  import { stagger, unroll } from '../lib/motion.svelte';
+  import { settle, stagger, unroll } from '../lib/motion.svelte';
   import { detailOf, notifyFail, toasts } from '../lib/toasts.svelte';
   import { dialogs } from '../lib/dialogs.svelte';
   import { href, plainClick, route } from '../lib/route.svelte';
@@ -18,6 +18,7 @@
   import ModIcon from './ModIcon.svelte';
   import IdentityDialog, { type IdentityTarget } from './IdentityDialog.svelte';
   import DropZone from './ui/DropZone.svelte';
+  import Skeleton from './ui/Skeleton.svelte';
 
   // A member reads the registry -- search, the faceted list, a mod's releases and
   // files -- but does none of its authoring. `canOperate` (admin and up) gates the
@@ -65,7 +66,15 @@
   let upMsg = $state('');
 
 
+  // Which listing is the current one. Typing narrows the query while a walk
+  // into the index may be in flight, and the two write the same list: without
+  // this the older read's page could be appended to -- or land on top of -- the
+  // newer query's results, leaving rows on screen that do not match what was
+  // typed. The commit page guards its two readings the same way.
+  let generation = 0;
+
   async function load() {
+    const mine = ++generation;
     loading = true;
     try {
       const page = await api.registryMods(
@@ -74,18 +83,24 @@
         mcF.trim() || undefined,
         PAGE,
       );
+      if (mine !== generation) return;
       mods = page.rows;
       more = page.next;
       // the needs-identity bucket and the takedown list are operator-only reads
       if (canOperate) {
         const [u, rm] = await Promise.all([api.unassigned(), api.removed()]);
+        if (mine !== generation) return;
         unassigned = u;
         removed = rm.removed;
       }
     } catch (e) {
+      if (mine !== generation) return;
       notifyFail(e);
     } finally {
-      loading = false;
+      if (mine === generation) {
+        loading = false;
+        stale = false;
+      }
     }
   }
 
@@ -103,9 +118,15 @@
   init();
 
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
+  // What is listed answers the filters as they were a keystroke ago. Said at the
+  // keystroke rather than when the request goes out: the debounce exists so the
+  // mirror is asked once, not so the person is left wondering whether the key
+  // registered.
+  let stale = $state(false);
   // any change to the query or the facets is a different listing, so it starts
   // the walk over rather than continuing the old one
   function onSearch() {
+    stale = true;
     clearTimeout(searchTimer);
     searchTimer = setTimeout(load, 250);
   }
@@ -116,15 +137,20 @@
   // top, because a rename or a merge changes what the pages already read said.
   async function loadMore() {
     if (!more || loading) return;
+    const mine = ++generation;
     loading = true;
     try {
       const page = await api.registryModsPage(more);
+      // a narrower query started while this page was in flight: its rows are
+      // the answer now, and appending to them would mix two listings
+      if (mine !== generation) return;
       mods = [...mods, ...page.rows];
       more = page.next;
     } catch (e) {
+      if (mine !== generation) return;
       notifyFail(e);
     } finally {
-      loading = false;
+      if (mine === generation) loading = false;
     }
   }
 
@@ -410,9 +436,16 @@
     <input class="sm" bind:value={mcF} oninput={onSearch} placeholder={t('mirror.mc')} aria-label={t('mirror.mc')} />
   </div>
 
-  <div class="panel modlist">
+  <!-- The first read showed nothing at all: an empty panel, which reads as a
+       mirror that holds no mods rather than as one still answering. Once there
+       are rows they stay and dim instead -- what is listed is still a true
+       answer to the filters it was asked for. -->
+  {#if mods.length === 0 && loading}
+    <div class="panel modlist"><Skeleton rows={6} height={73} gap={0} shape="row" lead={32} /></div>
+  {:else}
+  <div class="panel modlist" class:stale={stale || (loading && mods.length > 0)}>
     {#each mods as m, i (m.mod_id)}
-      <div class="mod row-in" class:open={isOpen(m.mod_id)} use:stagger={i}>
+      <div class="mod row-in" class:open={isOpen(m.mod_id)} use:stagger={i} animate:settle>
         <div
           class="modrow"
           role="button"
@@ -485,7 +518,7 @@
                surface instead of becoming a stack of layers -->
           <div class="rels" transition:unroll>
             {#if loadingIds.includes(m.mod_id)}
-              <div class="muted s">{t('common.loading')}</div>
+              <Skeleton rows={3} height={40} gap={0} shape="row" lead={22} />
             {/if}
             {#each relsByMod[m.mod_id] ?? [] as rel (rel.release_id)}
               <div class="rel">
@@ -541,7 +574,7 @@
                   {#if diffFor === f.sha1}
                     <div class="diffpanel">
                       {#if diffLoading}
-                        <div class="muted s">{t('common.loading')}</div>
+                        <Skeleton rows={3} height={18} gap={4} />
                       {:else if diffErr}
                         <div class="err mono">{diffErr}</div>
                       {:else if diffData}
@@ -577,6 +610,7 @@
       <div class="muted empty">{t('mm.noMods')}</div>
     {/if}
   </div>
+  {/if}
   {#if more}
     <button class="sm more" onclick={loadMore} disabled={loading}>{t('mm.more')}</button>
   {/if}

@@ -115,10 +115,39 @@ impl Modrinth {
         Ok(out)
     }
 
+    /// Whether a caller-supplied project handle may be pasted into an upstream
+    /// path.
+    ///
+    /// A handle arrives from a URL segment, and axum hands a single `{param}`
+    /// its percent-decoded value -- slashes included. Interpolated straight in,
+    /// `..%2F..%2Fv2%2Ftag` becomes `.../v2/project/../../v2/tag`, which the URL
+    /// parser then normalises into a different Modrinth endpoint: an
+    /// unauthenticated caller shaping the requests the mirror makes to somebody
+    /// else's API. Nothing comes back to them -- only an icon url is read out of
+    /// the answer -- but the mirror should not be issuing those requests at all.
+    ///
+    /// Deliberately a rejection of what breaks a path rather than an allowlist
+    /// of characters: Modrinth slugs are richer than base62, and a guard that
+    /// refuses a real project is a bug of its own.
+    fn is_path_handle(s: &str) -> bool {
+        !s.is_empty()
+            && s.len() <= 64
+            && s != "."
+            && s != ".."
+            && !s.contains('/')
+            && !s.contains('\\')
+            && !s.contains('?')
+            && !s.contains('#')
+            && !s.chars().any(|c| c.is_control() || c.is_whitespace())
+    }
+
     /// A project's icon URL -- the launcher's `ModIconResolver` runtime
     /// fallback when a manifest entry carries no `display.icon_url`. `None`
     /// when the project has no icon. Slug or numeric id both work.
     pub async fn project_icon(&self, slug_or_id: &str) -> Result<Option<String>> {
+        if !Self::is_path_handle(slug_or_id) {
+            return Ok(None);
+        }
         if let Some(known) = self.remembered_icon(slug_or_id) {
             return Ok(known);
         }
@@ -278,6 +307,9 @@ impl Modrinth {
         slug_or_id: &str,
         mc_filter: Option<&str>,
     ) -> Result<Vec<Version>> {
+        if !Self::is_path_handle(slug_or_id) {
+            anyhow::bail!("{slug_or_id:?} is not a Modrinth project handle");
+        }
         let base = format!("{}/v2/project/{slug_or_id}/version", self.base);
         let Some(mc) = mc_filter else {
             return self.versions_at(&base).await;
@@ -690,6 +722,41 @@ mod tests {
         let m = offline();
         m.remember_icon("iron-chests", &None);
         assert_eq!(m.project_icon("iron-chests").await.unwrap(), None);
+    }
+
+    // The handle comes out of a URL segment, and axum hands a single `{param}`
+    // its decoded value -- slashes and all. Pasted into the upstream path it
+    // would normalise into a different Modrinth endpoint, so an anonymous
+    // caller would be choosing which requests the mirror makes to somebody
+    // else's API.
+    #[tokio::test]
+    async fn a_handle_that_would_reshape_the_upstream_path_is_refused() {
+        let m = offline();
+        for hostile in [
+            "../../v2/tag/category",
+            "..",
+            ".",
+            "a/b",
+            "a\\b",
+            "x?y",
+            "x#y",
+            "",
+        ] {
+            assert_eq!(
+                m.project_icon(hostile).await.unwrap(),
+                None,
+                "icon lookup for {hostile:?}"
+            );
+            assert!(
+                m.project_versions(hostile, None).await.is_err(),
+                "version listing for {hostile:?}"
+            );
+        }
+        // and a real handle is still a real handle -- the guard refuses what
+        // breaks a path, not everything that is not base62
+        assert!(Modrinth::is_path_handle("iron-chests"));
+        assert!(Modrinth::is_path_handle("P7dR8mSH"));
+        assert!(Modrinth::is_path_handle("some.mod_name-2"));
     }
 
     #[tokio::test]

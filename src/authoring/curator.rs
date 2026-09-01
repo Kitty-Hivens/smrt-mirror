@@ -14,7 +14,7 @@ use crate::domain::SourceDecl;
 use crate::domain::{Display, Requirement};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Cursor;
 use std::path::Path;
@@ -254,6 +254,90 @@ fn content_type_for(name: &str) -> &'static str {
     }
 }
 
+// ── mcmod.info dependency lists ───────────────────────────────────────────
+
+// mcmod.info dependency lists routinely name the platform, not a real mod.
+// Compared lowercased, so the loader is dropped however a jar spells it.
+const PSEUDO_DEPS: &[&str] = &[
+    "forge",
+    "minecraftforge",
+    "mod_minecraftforge",
+    "forgemodloader",
+    "fml",
+    "cpw.mods.fml",
+    "mcp",
+    "minecraft",
+    "mod_mcversion",
+    "neoforge",
+    "fabric",
+    "fabricloader",
+    "cleanroom",
+    "quilt",
+];
+
+/// Split and clean a jar's declared dependency list into plausible modids. Real
+/// mcmod.info files vary wildly: a Forge dependency string
+/// (`required-after:jei@[4.16,)`), a comma- or semicolon-joined list kept in one
+/// entry (`forge,codechickenlib,cofhcore`), a human-readable phrase
+/// (`ic2 experimental or ic2 classic`), or the platform itself. Split on the
+/// separators, drop the Forge ordering prefix and the version window, drop the
+/// platform, and keep only what reads as a modid -- so a bogus token never becomes
+/// a relation the resolver then reports missing (#10). Order-preserving, deduped.
+/// The hard-dependency modids a jar's `mcmod.info` declares. `requiredMods` is the
+/// hard-require list; when the author filled it, it is authoritative and a modid
+/// only in `dependencies` is a load-order hint, not a hard dep (WorldEditCUI
+/// requires only forge, listing `worldedit` in `dependencies` alone). When
+/// `requiredMods` is empty the author did not distinguish, so `dependencies` is the
+/// best hard-dep signal there is. Cleaned through [`filter_deps`] either way.
+pub fn mcmod_hard_deps(info: &McModInfo) -> Vec<String> {
+    let hard = if info.required_mods.is_empty() {
+        &info.dependencies
+    } else {
+        &info.required_mods
+    };
+    filter_deps(hard)
+}
+
+pub fn filter_deps(deps: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for raw in deps {
+        for token in raw.split([',', ';']) {
+            let Some(modid) = clean_dep_token(token) else {
+                continue;
+            };
+            if PSEUDO_DEPS.contains(&modid.to_lowercase().as_str()) {
+                continue;
+            }
+            if seen.insert(modid.clone()) {
+                out.push(modid);
+            }
+        }
+    }
+    out
+}
+
+/// One dependency token -> its bare modid, or None when it is not one. Drops a
+/// Forge ordering prefix (`required-after:`, `after:`, ...) and the `@[range]`
+/// window, then keeps the token only if what remains reads as a modid
+/// (`[A-Za-z0-9_.-]+`) -- a phrase with spaces is a human-readable note, not a
+/// modid, and cannot be resolved, so it is dropped rather than stored as junk.
+fn clean_dep_token(token: &str) -> Option<String> {
+    // a Forge dependency string is `<ordering>:<modid>`; the modid is the last
+    // colon-segment (a real modid has no colons)
+    let t = token.trim().rsplit(':').next().unwrap_or("").trim();
+    // drop the version window
+    let t = t.split('@').next().unwrap_or("").trim();
+    if t.is_empty()
+        || !t
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+    {
+        return None;
+    }
+    Some(t.to_string())
+}
+
 // ── Pass 1: enrich display from mcmod.info ────────────────────────────────
 
 #[derive(Debug, Default)]
@@ -352,12 +436,21 @@ pub struct InferRequiresReport {
     pub edges_skipped_unresolved: Vec<(String, String)>,
 }
 
-/// Walks every smrt_cache-sourced mod's `mcmod.info.dependencies` list
-/// and emits `display.requires` entries pointing at sibling mods in the
-/// same pack. Modid -> filename resolution uses the modid declared
-/// inside each jar's own mcmod.info, so this only works for jars that
-/// declare one. Modrinth-sourced mods are skipped (their deps live in
-/// the Modrinth API and need a separate pass).
+/// Walks every smrt_cache-sourced mod's declared hard dependencies and emits
+/// `display.requires` entries pointing at sibling mods in the same pack. Modid
+/// -> filename resolution uses the modid declared inside each jar's own
+/// mcmod.info, so this only works for jars that declare one. Modrinth-sourced
+/// mods are skipped (their deps live in the Modrinth API and need a separate
+/// pass).
+///
+/// Hard means [`mcmod_hard_deps`], the same rule the harvest applies: a modid
+/// that appears only in `dependencies` while `requiredMods` is filled is a
+/// load-order hint, not a requirement. Reading the raw `dependencies` list here
+/// -- which is what this pass used to do -- turned those hints into hard edges
+/// at build time, and `derive_required` then locked their targets required,
+/// so the same jar came out of a harvest and out of a build meaning different
+/// things. It also drops the platform pseudo-deps and Forge's `@[range]`
+/// syntax, neither of which resolves to a sibling mod.
 ///
 /// Existing `display.requires` wins -- this pass never replaces an
 /// authored list, only fills an empty one.
@@ -419,16 +512,14 @@ pub fn infer_requires_from_mcmod_info(
         let Some(info) = read_mcmod_info(&bytes)? else {
             continue;
         };
-        if info.dependencies.is_empty() {
+        let hard = mcmod_hard_deps(&info);
+        if hard.is_empty() {
             continue;
         }
         report.mods_with_deps += 1;
 
         let mut edges = Vec::new();
-        for dep_modid in &info.dependencies {
-            // mcmod.info dependencies are bare modids in 1.12 era.
-            // Forge's @Mod annotation has more structured deps with
-            // version ranges; that's a future enrichment path.
+        for dep_modid in &hard {
             match modids.get(dep_modid) {
                 Some(target_fname) => edges.push(Requirement {
                     filename: target_fname.clone(),
@@ -509,6 +600,69 @@ mod tests {
         zw.write_all(mcmod_json.as_bytes())?;
         zw.finish()?;
         Ok(())
+    }
+
+    #[test]
+    fn mcmod_hard_deps_trusts_required_mods_when_present() {
+        // WorldEditCUI hard-requires only forge; worldedit is a load-order hint in
+        // `dependencies`, so it must not become a hard dependency (a false missing).
+        let cui = parse_mcmod_info(
+            br#"[{"modid":"worldeditcuife2","requiredMods":["forge@[14,)"],"dependencies":["forge@[14,)","worldedit"]}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            mcmod_hard_deps(&cui),
+            Vec::<String>::new(),
+            "worldedit is load-order-only, not a hard dependency"
+        );
+        // GravitationSuite leaves requiredMods empty, so its `dependencies` ic2 is
+        // the only hard-dep signal and stays hard.
+        let gs = parse_mcmod_info(br#"[{"modid":"gravisuite","dependencies":["ic2"]}]"#).unwrap();
+        assert_eq!(
+            mcmod_hard_deps(&gs),
+            vec!["ic2".to_string()],
+            "no requiredMods -> dependencies is the hard signal"
+        );
+    }
+
+    #[test]
+    fn filter_deps_drops_platform_pseudo_deps() {
+        let got = filter_deps(&[
+            "appleskin".into(),
+            "Forge".into(),
+            "minecraft".into(),
+            "  ".into(),
+            "jei".into(),
+        ]);
+        assert_eq!(got, vec!["appleskin".to_string(), "jei".to_string()]);
+    }
+
+    #[test]
+    fn filter_deps_splits_cleans_and_drops_junk() {
+        let got = filter_deps(&[
+            // comma-joined list, platform first -> loader dropped, rest split out
+            "forge,codechickenlib,cofhcore,thermalfoundation".into(),
+            // Forge dependency string: ordering prefix + version window stripped
+            "required-after:jei@[4.16,)".into(),
+            // the loader by another spelling, with a range
+            "MinecraftForge@[14.21.0.2373,)".into(),
+            "mod_MinecraftForge".into(),
+            // human-readable phrases are not modids -> dropped; `chisel` survives
+            "ic2 experimental or ic2 classic, chisel".into(),
+            "Applied Energistics 2".into(),
+            // duplicate collapses
+            "codechickenlib".into(),
+        ]);
+        assert_eq!(
+            got,
+            vec![
+                "codechickenlib".to_string(),
+                "cofhcore".to_string(),
+                "thermalfoundation".to_string(),
+                "jei".to_string(),
+                "chisel".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -654,6 +808,50 @@ mod tests {
         assert_eq!(
             report.edges_skipped_unresolved,
             vec![("Lonely.jar".into(), "ghost".into())]
+        );
+    }
+
+    // The build reads the same hard-dependency rule the harvest does. A modid
+    // that appears only in `dependencies` while `requiredMods` is filled is a
+    // load-order hint (WorldEditCUI names `worldedit` there and requires only
+    // forge); turning it into a `display.requires` edge is what makes
+    // `derive_required` lock the target required, so the same jar would mean
+    // one thing after a harvest and another after a build.
+    #[test]
+    fn infer_requires_reads_hard_dependencies_not_load_order_hints() {
+        let dir = TempDir::new().unwrap();
+        let sha_we = "4".repeat(40);
+        let sha_cui = "5".repeat(40);
+        write_test_jar(dir.path(), &sha_we, r#"[{"modid":"worldedit"}]"#).unwrap();
+        write_test_jar(
+            dir.path(),
+            &sha_cui,
+            r#"[{"modid":"worldeditcuife2","requiredMods":["forge@[14,)"],"dependencies":["forge@[14,)","worldedit"]}]"#,
+        )
+        .unwrap();
+
+        let mut cfg = empty_config();
+        for (filename, sha1) in [("WorldEdit.jar", sha_we), ("WorldEditCUI.jar", sha_cui)] {
+            cfg.mods.push(DeclaredMod {
+                filename: filename.into(),
+                default_enabled: true,
+                source: SourceDecl::SmrtCache { sha1 },
+                display: None,
+                slug: None,
+                pulled: false,
+            });
+        }
+
+        let report = infer_requires_from_mcmod_info(&mut cfg, dir.path()).unwrap();
+        assert_eq!(
+            report.edges_added, 0,
+            "the platform is not a mod and worldedit is only a load-order hint"
+        );
+        assert!(
+            cfg.mods[1]
+                .display
+                .as_ref()
+                .is_none_or(|d| d.requires.is_empty())
         );
     }
 

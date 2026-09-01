@@ -117,6 +117,25 @@ export interface Page<T> {
   next: string | null;
 }
 
+/// Run one request under the shell's activity wire.
+///
+/// Every fetch in this file goes through this or through a helper that does the
+/// same. It did not: the wire was wired into the cheap reads and left out of
+/// the expensive writes, so a listing of two kilobytes lit it up and dropping a
+/// forty-megabyte jar -- or a whole instance archive -- left the panel looking
+/// idle for as long as the upload took.
+///
+/// The one deliberate exception is the document sync, which fires while
+/// somebody types; see `sendPackDoc`.
+async function tracked<T>(run: () => Promise<T>): Promise<T> {
+  activity.begin();
+  try {
+    return await run();
+  } finally {
+    activity.end();
+  }
+}
+
 async function getPage<T>(path: string): Promise<Page<T>> {
   activity.begin();
   try {
@@ -193,19 +212,27 @@ async function send(method: string, path: string, jsonBody?: unknown): Promise<v
   }
 }
 
+/// A body that is not JSON: a jar, an archive, a CRDT update.
+///
+/// A `File` is handed to fetch as it is rather than read into an ArrayBuffer
+/// first -- the browser streams it off disk, so a multi-gigabyte instance
+/// archive costs the tab nothing to send. Reading it into JS memory first is
+/// how a bootstrap used to run the tab out of heap before a byte left it.
 async function sendRaw(
   method: string,
   path: string,
-  body: ArrayBuffer,
+  body: ArrayBuffer | Blob,
   contentType: string,
 ): Promise<void> {
-  const r = await fetch(path, {
-    method,
-    credentials: 'include',
-    headers: { 'Content-Type': contentType },
-    body,
+  await tracked(async () => {
+    const r = await fetch(path, {
+      method,
+      credentials: 'include',
+      headers: { 'Content-Type': contentType },
+      body,
+    });
+    if (!r.ok) throw await toError(r);
   });
-  if (!r.ok) throw await toError(r);
 }
 
 async function sha1Hex(buf: ArrayBuffer): Promise<string> {
@@ -259,20 +286,8 @@ export const api = {
 
   // server-side fetch of a GitHub release asset into the cache, returning its
   // content hash; the caller adds it as a normal smrt_cache mod
-  async ingestGithub(
-    repo: string,
-    tag: string,
-    asset: string,
-  ): Promise<{ sha1: string; size_bytes: number }> {
-    const r = await fetch('/v1/cache/github', {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ repo, tag, asset }),
-    });
-    if (!r.ok) throw await toError(r);
-    return (await r.json()) as { sha1: string; size_bytes: number };
-  },
+  ingestGithub: (repo: string, tag: string, asset: string) =>
+    postJson<{ sha1: string; size_bytes: number }>('/v1/cache/github', { repo, tag, asset }),
   removed: () => getJson<{ schema_version: number; removed: string[] }>('/v1/cache/removed'),
 
   // ── authoring: config, build ──
@@ -316,14 +331,15 @@ export const api = {
     }
   },
   // overwrite the config with one reconstructed from a published build; returns it
-  async revertPackConfig(id: string, version: string): Promise<RevisionedConfig> {
-    const r = await fetch(
-      `/v1/authoring/packs/${encodeURIComponent(id)}/config/revert?version=${encodeURIComponent(version)}`,
-      { method: 'POST', credentials: 'include' },
-    );
-    if (!r.ok) throw await toError(r);
-    return { config: (await r.json()) as PackConfig, rev: revisionOf(r) };
-  },
+  revertPackConfig: (id: string, version: string): Promise<RevisionedConfig> =>
+    tracked(async () => {
+      const r = await fetch(
+        `/v1/authoring/packs/${encodeURIComponent(id)}/config/revert?version=${encodeURIComponent(version)}`,
+        { method: 'POST', credentials: 'include' },
+      );
+      if (!r.ok) throw await toError(r);
+      return { config: (await r.json()) as PackConfig, rev: revisionOf(r) };
+    }),
   // ── discussions on a pack: reports and proposals ──
   //
   // Reading is as public as the pack, so a signed-out reader uses the same
@@ -490,18 +506,23 @@ export const api = {
     const changelog = opts?.changelog?.trim();
     const i18n = opts?.changelogI18n;
     const notes = i18n && Object.keys(i18n).length ? { changelog_i18n: i18n } : {};
-    const r = await fetch(`/v1/authoring/packs/${encodeURIComponent(id)}/build${qs ? `?${qs}` : ''}`, {
-      method: 'POST',
-      credentials: 'include',
-      ...(changelog || Object.keys(notes).length
-        ? {
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ...(changelog ? { changelog } : {}), ...notes }),
-          }
-        : {}),
+    return tracked(async () => {
+      const r = await fetch(
+        `/v1/authoring/packs/${encodeURIComponent(id)}/build${qs ? `?${qs}` : ''}`,
+        {
+          method: 'POST',
+          credentials: 'include',
+          ...(changelog || Object.keys(notes).length
+            ? {
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ...(changelog ? { changelog } : {}), ...notes }),
+              }
+            : {}),
+        },
+      );
+      if (!r.ok) throw await toError(r);
+      return (await r.json()) as { job_id: string };
     });
-    if (!r.ok) throw await toError(r);
-    return (await r.json()) as { job_id: string };
   },
   jobEventsUrl: (jobId: string) => `/v1/jobs/${encodeURIComponent(jobId)}/events`,
   // What is happening to a pack while it is open: who else is in it, and that it
@@ -521,25 +542,29 @@ export const api = {
   // the difference (#110). The POST rewrites it from the server's answer.
   packSpoof: (id: string) =>
     getJson<SpoofReport>(`/v1/authoring/packs/${encodeURIComponent(id)}/spoof`),
-  async generatePackSpoof(id: string): Promise<SpoofReport> {
-    const r = await fetch(`/v1/authoring/packs/${encodeURIComponent(id)}/spoof`, {
-      method: 'POST',
-      credentials: 'include',
-    });
-    if (!r.ok) throw await toError(r);
-    return (await r.json()) as SpoofReport;
-  },
+  generatePackSpoof: (id: string): Promise<SpoofReport> =>
+    tracked(async () => {
+      const r = await fetch(`/v1/authoring/packs/${encodeURIComponent(id)}/spoof`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+      if (!r.ok) throw await toError(r);
+      return (await r.json()) as SpoofReport;
+    }),
 
   // The pack's merge document (#115). Binary both ways: these are CRDT updates,
   // not configs, and base64 would only be the room's problem (server-sent events
   // being a text protocol).
-  async packDocState(id: string): Promise<Uint8Array> {
-    const r = await fetch(`/v1/authoring/packs/${encodeURIComponent(id)}/doc`, {
-      credentials: 'include',
-    });
-    if (!r.ok) throw await toError(r);
-    return new Uint8Array(await r.arrayBuffer());
-  },
+  packDocState: (id: string): Promise<Uint8Array> =>
+    tracked(async () => {
+      const r = await fetch(`/v1/authoring/packs/${encodeURIComponent(id)}/doc`, {
+        credentials: 'include',
+      });
+      if (!r.ok) throw await toError(r);
+      return new Uint8Array(await r.arrayBuffer());
+    }),
+  /// Deliberately outside the activity wire: this fires while somebody types,
+  /// and a wire that blinks per keystroke reports nothing anyone can read.
   async sendPackDoc(id: string, update: Uint8Array): Promise<void> {
     const r = await fetch(`/v1/authoring/packs/${encodeURIComponent(id)}/doc`, {
       method: 'POST',
@@ -562,19 +587,11 @@ export const api = {
 
   // What saving this config would pull in, asked before the save. Read-only:
   // the mirror runs the real fill on a copy and writes nothing.
-  async previewDependencies(id: string, cfg: PackConfig): Promise<PulledPreview[]> {
-    const r = await fetch(
+  previewDependencies: (id: string, cfg: PackConfig): Promise<PulledPreview[]> =>
+    postJson<PulledPreview[]>(
       `/v1/authoring/packs/${encodeURIComponent(id)}/dependency-preview`,
-      {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(cfg),
-      },
-    );
-    if (!r.ok) throw await toError(r);
-    return (await r.json()) as PulledPreview[];
-  },
+      cfg,
+    ),
 
   // ── resolve the saved config against the registry dependency graph ──
   // the pack's own relation graph: its mods, wired by what its shipped artifacts
@@ -585,17 +602,19 @@ export const api = {
     getJson<ResolveReport>(`/v1/authoring/packs/${encodeURIComponent(id)}/resolve`),
 
   // ── validate a config against an instance archive ──
-  async validatePack(id: string, file: File): Promise<ValidateReport> {
-    const buf = await file.arrayBuffer();
-    const r = await fetch(`/v1/authoring/packs/${encodeURIComponent(id)}/validate`, {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/zip' },
-      body: buf,
-    });
-    if (!r.ok) throw await toError(r);
-    return (await r.json()) as ValidateReport;
-  },
+  // The archive goes to fetch as the File it is: the browser streams it off
+  // disk, so an instance archive costs the tab nothing to send.
+  validatePack: (id: string, file: File): Promise<ValidateReport> =>
+    tracked(async () => {
+      const r = await fetch(`/v1/authoring/packs/${encodeURIComponent(id)}/validate`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/zip' },
+        body: file,
+      });
+      if (!r.ok) throw await toError(r);
+      return (await r.json()) as ValidateReport;
+    }),
 
   // ── bootstrap + pack static assets ──
   async bootstrapPack(
@@ -617,27 +636,30 @@ export const api = {
     if (params.tagline) q.set('tagline', params.tagline);
     if (params.loader_name) q.set('loader_name', params.loader_name);
     if (params.java_major != null) q.set('java_major', String(params.java_major));
-    const buf = await file.arrayBuffer();
-    const r = await fetch(`/v1/authoring/packs/${encodeURIComponent(id)}/bootstrap?${q}`, {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/zip' },
-      body: buf,
+    // The whole instance archive, streamed off disk rather than read into the
+    // tab's heap first -- these run to gigabytes, and reading one in was how a
+    // bootstrap ran out of memory before a byte left the browser.
+    return tracked(async () => {
+      const r = await fetch(`/v1/authoring/packs/${encodeURIComponent(id)}/bootstrap?${q}`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/zip' },
+        body: file,
+      });
+      if (!r.ok) throw await toError(r);
+      return (await r.json()) as { job_id: string };
     });
-    if (!r.ok) throw await toError(r);
-    return (await r.json()) as { job_id: string };
   },
   packStatic: (id: string) =>
     getJson<{ schema_version: number; pack_id: string; files: string[] }>(
       `/v1/authoring/packs/${encodeURIComponent(id)}/static`,
     ),
-  async uploadStatic(id: string, relPath: string, file: File): Promise<void> {
-    const buf = await file.arrayBuffer();
+  async uploadStatic(id: string, relPath: string, file: File | Blob): Promise<void> {
     const enc = relPath.split('/').map(encodeURIComponent).join('/');
     await sendRaw(
       'PUT',
       `/v1/authoring/packs/${encodeURIComponent(id)}/static/${enc}`,
-      buf,
+      file,
       file.type || 'application/octet-stream',
     );
   },
@@ -777,18 +799,19 @@ export const api = {
     file: File,
     opts?: { maintainer?: string; force?: boolean },
   ): Promise<UploadRow> {
-    const buf = await file.arrayBuffer();
     const q = new URLSearchParams({ filename: file.name });
     if (opts?.maintainer) q.set('maintainer', opts.maintainer);
     if (opts?.force) q.set('force', 'true');
-    const r = await fetch(`/v1/me/packs/${encodeURIComponent(packId)}/uploads?${q}`, {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/java-archive' },
-      body: buf,
+    return tracked(async () => {
+      const r = await fetch(`/v1/me/packs/${encodeURIComponent(packId)}/uploads?${q}`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/java-archive' },
+        body: file,
+      });
+      if (!r.ok) throw await toError(r);
+      return (await r.json()) as UploadRow;
     });
-    if (!r.ok) throw await toError(r);
-    return (await r.json()) as UploadRow;
   },
 
   async me(): Promise<{
@@ -798,8 +821,10 @@ export const api = {
     accepted_terms: boolean;
     suspension?: { reason?: string; by_uid: number; by_login?: string; at: number };
   } | null> {
-    const r = await fetch('/v1/me', { credentials: 'include' });
-    return r.ok ? r.json() : null;
+    return tracked(async () => {
+      const r = await fetch('/v1/me', { credentials: 'include' });
+      return r.ok ? r.json() : null;
+    });
   },
   acceptTerms: () => send('POST', '/v1/me/accept-terms'),
 
@@ -825,16 +850,18 @@ export const api = {
   rotateFeedKey: () => postJson<{ url: string }>('/v1/me/feed-key', {}),
   // The admin token no longer authenticates a human. A valid one comes back 410
   // so the panel can say it's deprecated; anything else is a plain rejection.
-  async login(token: string): Promise<'deprecated' | 'rejected'> {
-    const r = await fetch('/v1/auth/login', {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token }),
-    });
-    return r.status === 410 ? 'deprecated' : 'rejected';
-  },
-  async logout(): Promise<void> {
-    await fetch('/v1/auth/logout', { method: 'POST', credentials: 'include' });
-  },
+  login: (token: string): Promise<'deprecated' | 'rejected'> =>
+    tracked(async () => {
+      const r = await fetch('/v1/auth/login', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token }),
+      });
+      return r.status === 410 ? 'deprecated' : 'rejected';
+    }),
+  logout: (): Promise<void> =>
+    tracked(async () => {
+      await fetch('/v1/auth/logout', { method: 'POST', credentials: 'include' });
+    }),
 };

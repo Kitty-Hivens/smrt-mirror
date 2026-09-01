@@ -43,18 +43,31 @@ already does a little of it and is the proof it is possible here.
 
 ## What matters first, in order
 
-1. Data. Silent config loss on concurrent edits (#52). Builds that die when
-   Modrinth is down (#57).
-2. Flow traps. Adding a mod blind, with no sight of what it pulls (#53). The
-   editor you cannot leave with the back button (#54).
-3. Friction and comprehension. Forms with no field names (#55). No mod search.
-   No loading states. Jargon in the user's face.
+The order stands; the top of it has since been built, and this list is kept as
+the reading that produced the work rather than as a to-do.
+
+1. Data. Silent config loss on concurrent edits (#52) -- done: a config carries
+   an `ETag` and a save states the revision it edited. Builds that die when
+   Modrinth is down (#57) -- done: the registry answers for a pin the harvest
+   has read, and the build says which mods it fell back on.
+2. Flow traps. Adding a mod blind, with no sight of what it pulls (#53) -- done:
+   the dependency preview runs the real fill on a copy before the save. The
+   editor you cannot leave with the back button (#54) -- done: the open editor
+   is a location.
+3. Friction and comprehension. Loading states -- done: a wait holds the shape of
+   the rows that are coming instead of standing in as a line of text, and a
+   filter says it has heard a keystroke on the frame it arrives rather than
+   after the debounce it opens. Forms with no field names (#55), jargon in the
+   user's face. Still the live class.
 4. Cosmetics. Transliterations, wrong labels, tooltips in the wrong language. The
    cheapest class and the least of the evils.
 
-The largest single gap is search. A pack cannot be assembled without the Modrinth
-website open alongside, because the mirror only lets you add a mod whose exact
-name you already know. It is still unfiled.
+Search was the largest single gap and is closed: one search over both places a
+mod can come from (`/v1/search/mods`), each hit saying whether the mirror holds
+the bytes and how it sits with the pack's loader. A pack no longer needs the
+Modrinth website open alongside to be assembled. What is left of the complaint
+is discovery rather than lookup -- browsing what the mirror holds without
+knowing what to ask for.
 
 ## The shape it is heading toward
 
@@ -64,20 +77,24 @@ because that is how the work actually goes. `FloatDock` was the first move in
 that direction and stays as the nucleus. What each kind of panel obeys is
 recorded in ADR 0005.
 
-Two things gate it, in order. The surfaces are dark-first with white tints
-written literally into the tokens (`--dotfield`, `--seam`, the table zebra,
-`--accent-soft`), so a light substrate is a rewrite rather than a swap -- and
-the geometry only reads on a substrate where elevation can be a shadow instead
-of a lighter surface, which is what the token file says it currently is not.
-Then the reflow rules have to key off the container: a pane is a narrow context
-inside a wide window, and every one of the 21 `@media` rules asks the window.
+Two things gated it, and both have since been cleared. The tints that were
+written literally as white are values in both halves of the token file, and the
+light half gives elevation a real shadow rather than a lighter surface, which is
+the substrate the geometry needs. The reflow rules key off the container: the
+content views answer `@container view`, and the `@media` rules left are the ones
+that genuinely ask the window -- the shell, the dock, and the dialogs that are
+sized against the viewport rather than against a pane.
 
 A spike (warm paper substrate, softer geometry, an editor that arrives rather
 than cuts) said the idiom sits on this product without a fight, and said the two
 places it breaks: rows lose their boundary when elevation stops being a lighter
-surface, and a blanket pill radius swallows small destructive controls. Both are
-per-component decisions, not token values. The spike was a look, not a
-foundation; it is not in the tree.
+surface, and a blanket pill radius swallows small destructive controls. Two of
+its three have since landed on their own terms -- the substrate as the light
+half of the token file, the arrival as the transition the pack editor opens
+with -- and both breaks were answered rather than inherited: on paper elevation
+is a real shadow, and the radius scale stayed at three steps, with the pill kept
+for chips, where nothing destructive lives. The spike itself was a look and is
+not in the tree.
 
 ## How to write things down
 

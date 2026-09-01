@@ -20,16 +20,22 @@ export function safeUrl(url: string): string {
   return '#';
 }
 
+// The placeholder that stands in for an already-rendered span while the prose
+// around it is escaped. A NUL cannot be typed, cannot survive a JSON round trip
+// as anything else, and is stripped from the input below -- so unlike the
+// printable `@@MD0@@` this replaced, no authored text can forge one. Writing
+// that sequence used to make the restore pass substitute somebody else's link
+// or image in its place, duplicating a span the author never wrote.
+const MARK = '\u0000';
+
 function renderInline(text: string): string {
   const stash: string[] = [];
-  // The @@MD<n>@@ token cannot appear in authored prose, so the restore pass
-  // never collides with real numbers (e.g. "tier 2 mods").
   const keep = (html: string): string => {
     stash.push(html);
-    return `@@MD${stash.length - 1}@@`;
+    return `${MARK}${stash.length - 1}${MARK}`;
   };
 
-  let s = text;
+  let s = text.replaceAll(MARK, '');
   // Protect literal spans before escaping the surrounding prose.
   s = s.replace(/`([^`]+)`/g, (_m, code: string) => keep(`<code>${escapeHtml(code)}</code>`));
   s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_m, alt: string, url: string) =>
@@ -49,7 +55,7 @@ function renderInline(text: string): string {
     .replace(/\*([^*]+)\*/g, '<em>$1</em>')
     .replace(/(^|[^\w])_([^_]+)_(?=[^\w]|$)/g, '$1<em>$2</em>');
 
-  return s.replace(/@@MD(\d+)@@/g, (_m, i: string) => stash[Number(i)] ?? '');
+  return s.replace(/\u0000(\d+)\u0000/g, (_m, i: string) => stash[Number(i)] ?? '');
 }
 
 function isBlockStart(line: string): boolean {

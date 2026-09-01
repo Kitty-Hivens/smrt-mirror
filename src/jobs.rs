@@ -6,7 +6,7 @@
 
 use crate::accounts::{Accounts, Identity};
 use crate::authoring::{
-    self, BootstrapArgs, HarvestScheduler, build_manifest, enrich_from_mcmod_info, gate,
+    self, BootstrapArgs, HarvestScheduler, Modrinth, build_manifest, enrich_from_mcmod_info, gate,
     infer_requires_from_mcmod_info, make_pack_summary,
 };
 use crate::config::Config;
@@ -83,6 +83,10 @@ pub struct BuildDeps {
     pub config: Arc<Config>,
     pub registry: Arc<Registry>,
     pub accounts: Arc<Accounts>,
+    /// The mirror's one upstream client. Shared rather than built per build: it
+    /// pools connections and remembers the project lookups it has already made,
+    /// and both are thrown away by a client that lives for one build.
+    pub modrinth: Arc<Modrinth>,
     /// The harvester to wait on (and poke afterwards), where one is running.
     pub harvest: Option<Arc<HarvestScheduler>>,
     /// Where a publish is announced, so a catalog stops being stale the moment
@@ -235,9 +239,12 @@ impl JobRegistry {
         });
         let mut map = self.jobs.lock().unwrap();
         map.insert(id, job.clone());
-        // Bound memory, but never evict a job a client may still be tailing:
-        // drop the oldest FINISHED job. Ids are zero-padded (ms + counter) so
-        // lexical min is the oldest.
+        // Drop the oldest FINISHED job once the map is over the mark. Never a
+        // running one: a client may still be tailing it, and its log is the only
+        // copy until it finishes. So the bound is on finished jobs, not on the
+        // map -- fifty builds running at once would hold fifty, and each is
+        // holding a build's worth of work anyway. Ids are zero-padded
+        // (ms + counter), so lexical min is the oldest.
         if map.len() > 50 {
             let victim = map
                 .values()
@@ -259,6 +266,7 @@ impl JobRegistry {
             config,
             registry,
             accounts,
+            modrinth,
             harvest,
             events,
         } = deps;
@@ -289,7 +297,11 @@ impl JobRegistry {
                         .line("harvest still busy after 5 minutes; building against current state");
                 }
             }
-            match run_build(&handle, &storage, &config, &registry, &accounts, req).await {
+            match run_build(
+                &handle, &storage, &config, &registry, &accounts, &modrinth, req,
+            )
+            .await
+            {
                 Ok(()) => {
                     handle.finish(Status::Done);
                     // a published build added a build + its mods to harvest -- a
@@ -341,12 +353,14 @@ impl JobRegistry {
 /// transiently (config.json stays the source on disk), resolve sources, check
 /// what the build would publish, and publish the manifest + summary + latest
 /// pointer. Logs each step to the job.
+#[allow(clippy::too_many_arguments)]
 async fn run_build(
     job: &Job,
     storage: &Storage,
     config: &Config,
     registry: &Arc<Registry>,
     accounts: &Arc<Accounts>,
+    modrinth: &Arc<Modrinth>,
     req: BuildRequest,
 ) -> Result<(), String> {
     let pack_id = job.pack_id.clone();
@@ -372,11 +386,22 @@ async fn run_build(
 
     // Enrichment passes run on a transient copy of the config: fill display
     // metadata from each cache jar's mcmod.info, then infer the requires graph.
+    //
+    // Off the pool: both open and unzip every cache jar the pack names, which is
+    // hundreds of blocking file reads on a large pack. Run inline they would
+    // hold a runtime worker for the whole pass, and a mirror serving jars has
+    // few of those.
     job.line("running enrichment passes (enrich-mcmod / infer-requires)");
-    enrich_from_mcmod_info(&mut cfg, storage.root())
-        .map_err(|e| format!("enrich-mcmod failed: {e:#}"))?;
-    infer_requires_from_mcmod_info(&mut cfg, storage.root())
-        .map_err(|e| format!("infer-requires failed: {e:#}"))?;
+    let root = storage.root().to_path_buf();
+    cfg = tokio::task::spawn_blocking(move || {
+        enrich_from_mcmod_info(&mut cfg, &root)
+            .map_err(|e| format!("enrich-mcmod failed: {e:#}"))?;
+        infer_requires_from_mcmod_info(&mut cfg, &root)
+            .map_err(|e| format!("infer-requires failed: {e:#}"))?;
+        Ok::<_, String>(cfg)
+    })
+    .await
+    .map_err(|e| format!("enrichment task: {e}"))??;
 
     // The registry pass, in one hop off the pool: the side/policy classification
     // the required-ness seeds and side invariants ride on, and the dependency
@@ -405,16 +430,9 @@ async fn run_build(
     // whose pin has fallen behind a mod's floor does not start, and until this
     // ran nothing said so before a player's crash log.
     job.line("checking the pinned loader build against what the mods declare");
-    match crate::authoring::Modrinth::new() {
-        Ok(modrinth) => {
-            crate::authoring::loader_windows(&cfg, storage.root(), registry, &Arc::new(modrinth))
-                .await
-                .apply(&mut report);
-        }
-        Err(e) => job.line(format!(
-            "no http client for the loader-window check ({e:#}); the pinned build stays unchecked"
-        )),
-    }
+    crate::authoring::loader_windows(&cfg, storage.root(), registry, modrinth)
+        .await
+        .apply(&mut report);
 
     // The gate (#108). Two findings mean the pack cannot start and stop a
     // publish; the rest are recorded onto the build. A dry run runs the same
@@ -460,6 +478,7 @@ async fn run_build(
         &config.mirror_base,
         &classifications,
         registry,
+        modrinth,
     )
     .await
     .map_err(|e| format!("resolve failed: {e:#}"))?;
@@ -483,7 +502,7 @@ async fn run_build(
             fell_back.join(", ")
         ));
     }
-    let summary = make_pack_summary(&cfg, &manifest.pack_version);
+    let summary = make_pack_summary(&cfg, &manifest.pack_version, &config.mirror_base);
 
     if req.dry_run {
         job.line(format!(
@@ -596,6 +615,16 @@ async fn run_bootstrap(
         cfg.mods.len(),
         cfg.assets.len()
     ));
+    // The handler refused a pack that already had a config; this is the same
+    // question asked again with the lock held, which is what makes the answer
+    // hold for the write that follows it. Unpacking the archive takes as long
+    // as an archive takes, and a config can arrive in that time.
+    let _guard = storage.lock_pack_config(&pack_id).await;
+    if storage.load_pack_config(&pack_id).await.is_ok() {
+        return Err(format!(
+            "{pack_id} acquired a config while this archive was being read; nothing was written"
+        ));
+    }
     storage
         .save_pack_config(&pack_id, &cfg)
         .await
@@ -697,6 +726,7 @@ mod tests {
             config,
             registry: registry.unwrap_or_else(|| Arc::new(Registry::open_in_memory().unwrap())),
             accounts: accounts(),
+            modrinth: Arc::new(crate::authoring::Modrinth::new().unwrap()),
             harvest: None,
             events: Arc::new(MirrorEvents::default()),
         }

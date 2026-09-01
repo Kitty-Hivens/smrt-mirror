@@ -42,6 +42,9 @@ limiter: below it, body copy stops being readable.
 
 - The per-surface work (editor inspectors, FX, colour and depth where they earn
   their place, see 0004) is no longer building against a wall.
-- Several tokens are still alpha-on-white (`--seam`, `--dotfield`, the table
-  zebra, `--accent-soft`), so a genuine light theme still needs real light values
-  first. Tracked in #56.
+- Several tokens were still alpha-on-white (`--seam`, `--dotfield`, the table
+  zebra, `--accent-soft`), so a genuine light theme needed real light values
+  first (#56). Since paid: the token file carries both halves. The light one
+  reverses this record's elevation rule rather than inheriting it -- on paper the
+  surface ladder nearly vanishes and a drop shadow reads cleanly, so
+  `--shadow-1/2` carry the raise there and the ladder is left to hover.

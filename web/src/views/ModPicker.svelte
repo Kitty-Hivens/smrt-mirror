@@ -4,6 +4,8 @@
   import { t } from '../lib/i18n.svelte';
   import type { ModHit, ModrinthVersion, SourceDecl, VersionRow } from '../lib/types';
   import ModIcon from './ModIcon.svelte';
+  import { settle, stagger } from '../lib/motion.svelte';
+  import Skeleton from './ui/Skeleton.svelte';
 
   // Finding a mod, over both places one can come from. Which of the two holds it
   // is the mirror's problem, not a door to pick before the question (#101): the
@@ -45,35 +47,61 @@
   let upstreamVersions = $state<ModrinthVersion[]>([]);
   let versionsBusy = $state(false);
 
+  // Which search is the current one. The debounce narrows the window; it does
+  // not close it, and a slow first request landing after a narrower second
+  // leaves rows on screen that do not answer what is typed above them.
+  let generation = 0;
+
   async function search() {
     const query = q.trim();
     if (!query) {
       hits = [];
       return;
     }
+    const mine = ++generation;
     busy = true;
     err = '';
     try {
-      hits = await api.searchMods(query, { mc, loader, pack: packId });
+      const found = await api.searchMods(query, { mc, loader, pack: packId });
+      if (mine !== generation) return;
+      hits = found;
     } catch (e) {
+      if (mine !== generation) return;
       err = e instanceof ApiError ? `${e.status} ${e.body}` : String(e);
     } finally {
-      busy = false;
+      if (mine === generation) {
+        busy = false;
+        stale = false;
+      }
     }
   }
+  /// What is on screen answers the query as it was a keystroke ago. Saying so
+  /// at the keystroke rather than when the request finally goes out is the
+  /// difference between a search that responds and one that sits still for a
+  /// third of a second and then blinks: the debounce is there so the mirror is
+  /// asked once, not so the person is left wondering whether the key registered.
+  let stale = $state(false);
   function onInput() {
+    stale = q.trim() !== '';
     clearTimeout(timer);
     timer = setTimeout(search, 300);
   }
   // svelte-ignore state_referenced_locally -- fires once for the prefill
   if (q.trim()) void search();
 
-  // A hit is already in the pack when its identity is: the Modrinth project, or
-  // -- for a mirror-only mod -- any of the artifacts the pack declares by hash.
-  // Version is deliberately not part of it: another build of a mod the pack
-  // ships is still that mod.
+  // A hit is already in the pack when its identity is: the Modrinth project,
+  // or -- for a mirror-only mod -- the newest artifact the mirror holds for it,
+  // which is the sha1 the hit carries. Version is deliberately not part of the
+  // Modrinth half: another build of a mod the pack ships is still that mod.
+  //
+  // The hash half is one artifact rather than all of them, because that is what
+  // a search hit carries. So a pack shipping an older build of a mirror-only mod
+  // is not recognised and the mod is offered again. Erring that way on purpose:
+  // a false "already in the pack" disables the button on a mod somebody wants,
+  // which is worse than a duplicate row the editor already refuses on save.
   const inPack = (h: ModHit) =>
-    !!h.modrinth_project_id && presentSet.has(`m:${h.modrinth_project_id}`);
+    (!!h.modrinth_project_id && presentSet.has(`m:${h.modrinth_project_id}`)) ||
+    (!!h.icon_sha1 && presentSet.has(`c:${h.icon_sha1}`));
 
   async function open(h: ModHit) {
     sel = h;
@@ -181,10 +209,20 @@
 
       <div class="list scroll">
         {#if !sel}
-          {#if busy && hits.length === 0}<div class="muted s">{t('common.loading')}</div>{/if}
-          {#each hits as h (h.modrinth_project_id ?? h.mod_id ?? h.name)}
+          <!-- Nothing to show yet: a wait shaped like the rows that are coming.
+               Something already on screen: it stays and dims, because it is
+               still a true answer to the query it was asked for. -->
+          {#if hits.length === 0}
+            {#if busy}<Skeleton rows={5} height={54} gap={4} shape="row" lead={28} />{/if}
+          {/if}
+          <div class="hits" class:stale={stale || busy}>
+          {#each hits as h, i (h.modrinth_project_id ?? h.mod_id ?? h.name)}
             {@const label = fitLabel(h)}
-            <button class="hit" disabled={inPack(h)} onclick={() => open(h)}>
+            <!-- Results arrive in the order they are read, and a hit that
+                 survives a narrowing query slides to its new place rather than
+                 teleporting: typing one more letter should look like the list
+                 settling, not like a different list. -->
+            <button class="hit row-in" use:stagger={i} animate:settle disabled={inPack(h)} onclick={() => open(h)}>
               <ModIcon
                 name={h.name}
                 iconUrl={h.icon_url ?? null}
@@ -205,11 +243,12 @@
               </div>
             </button>
           {/each}
-          {#if !busy && q.trim() && hits.length === 0}
+          </div>
+          {#if !busy && !stale && q.trim() && hits.length === 0}
             <div class="muted s">{t('mp.noResults')}</div>
           {/if}
         {:else}
-          {#if versionsBusy}<div class="muted s">{t('common.loading')}</div>{/if}
+          {#if versionsBusy && mirrorVersions.length === 0}<Skeleton rows={4} height={34} gap={4} />{/if}
           {#each mirrorVersions as v (v.sha1)}
             {@const source = sourceFor(v)}
             <button class="ver" disabled={!source} onclick={() => pickMirror(v)}>
@@ -275,6 +314,14 @@
     flex-direction: column;
     gap: var(--space-2);
     min-height: 120px;
+  }
+  /* the rows sit in a group of their own so the whole set can dim as one while
+     a newer answer is on its way; it carries the list's own spacing so the
+     wrapper is invisible in the layout */
+  .hits {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
   }
   .hit,
   .ver {

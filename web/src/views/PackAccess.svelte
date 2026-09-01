@@ -8,6 +8,7 @@
   import { api } from '../lib/api';
   import { notifyFail, toasts } from '../lib/toasts.svelte';
   import { t } from '../lib/i18n.svelte';
+  import Skeleton from './ui/Skeleton.svelte';
   import { dialogs } from '../lib/dialogs.svelte';
   import { nameOf as decidedBy } from '../lib/people';
   import type { PackBlock, PackGrant, PackLevel } from '../lib/types';
@@ -118,7 +119,7 @@
   <p class="muted lead">{t('acc.lead')}</p>
 
   {#if loading && !rows.length}
-    <p class="muted">{t('common.loading')}</p>
+    <Skeleton rows={2} height={34} />
   {:else if failed}
     <p class="muted">{t('acc.unreadable')}</p>
   {:else if !rows.length}

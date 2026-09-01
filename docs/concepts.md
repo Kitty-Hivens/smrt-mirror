@@ -150,9 +150,17 @@ ship opted out; non-mod jars are never required; **a confidently client-side
 mod is never required, period** -- a hard edge into one does not lock it
 (client chains co-toggle in the launcher via the `requires` tree), and a
 classification that would force one fails the build rather than shipping a
-manifest that force-installs a client mod on a server. An opted-out
-`must_match` mod stays out (the curator's opt-out wins) and still reads
-`optional_both`.
+manifest that force-installs a client mod on a server.
+
+The curator's opt-out settles the seeds, not the graph. An opted-out
+`must_match` mod is not a seed -- it stays out and still reads `optional_both`
+-- but a mod the walk reaches, because something default-enabled hard-requires
+it, is required whatever its own `default_enabled` said: the pack does not start
+without it, and the opt-out was about the default install set rather than about
+that edge. A required entry always ships enabled, so the two flags never
+contradict each other on the wire; the launcher installs a required entry
+regardless of the flag, and the content fingerprint hashes both, so a
+contradiction would also make two identical packs fingerprint differently.
 
 ## The dependency graph
 
@@ -163,6 +171,14 @@ bytecode inference for the same jar), Modrinth version dependencies, legacy
 downgraded when they point across sides). `display.requires` on the wire is
 the resolved per-pack subset; launchers use it for co-toggling and dependency
 trees, the build uses it for the required walk.
+
+In `mcmod.info`, hard means `requiredMods` where the author filled it: a modid
+listed only under `dependencies` is a load-order hint. WorldEditCUI names
+`worldedit` there and requires only forge, so reading the raw list would report
+a missing dependency that is not one -- and, once it became a `requires` edge,
+lock a mod required that nothing requires. Where `requiredMods` is empty the
+author drew no distinction and `dependencies` is the best signal there is. The
+harvest and the build read the same rule.
 
 **Depfill** (on config save, or `smrt-pack depfill`) walks the declared mods'
 hard dependencies and pulls the missing ones into the config -- from Modrinth

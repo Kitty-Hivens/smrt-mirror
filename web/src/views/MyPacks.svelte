@@ -1,7 +1,8 @@
 <script lang="ts">
   import { api, ApiError } from '../lib/api';
-  import { notifyFail } from '../lib/toasts.svelte';
+  import { notifyFail, toasts } from '../lib/toasts.svelte';
   import { dialogs } from '../lib/dialogs.svelte';
+  import { idError, say } from '../lib/validate';
   import { t } from '../lib/i18n.svelte';
   import { mirror } from '../lib/mirror.svelte';
   import { terms } from '../lib/terms.svelte';
@@ -56,6 +57,14 @@
       await dialogs.prompt(t('mypacks.newPrompt'), { title: t('mypacks.new') })
     )?.trim();
     if (!name) return;
+    // The same rule the mirror applies to the id segment. Without it a name
+    // carrying a slash or a leading dot opens an editor that refuses its first
+    // save -- after the work is in it.
+    const bad = say(idError(name));
+    if (bad) {
+      toasts.push({ kind: 'error', text: bad });
+      return;
+    }
     route.openPack(`u/${me.uid}/${name}`);
   }
 

@@ -1,8 +1,9 @@
 <script lang="ts">
   import { api, ApiError } from '../lib/api';
-  import { countUp } from '../lib/motion.svelte';
-  import { notifyFail } from '../lib/toasts.svelte';
+  import { countUp, settle } from '../lib/motion.svelte';
+  import { notifyFail, toasts } from '../lib/toasts.svelte';
   import { dialogs } from '../lib/dialogs.svelte';
+  import { idError, say } from '../lib/validate';
   import { href, plainClick, route } from '../lib/route.svelte';
   import { mirror } from '../lib/mirror.svelte';
   import { t } from '../lib/i18n.svelte';
@@ -60,10 +61,20 @@
     }
   }
   loadAll();
-  // this view is the whole mirror at a glance -- the catalog, the registry and
-  // the cache -- so either kind of change makes it stale
+
+  // This view is the whole mirror at a glance -- the catalog, the registry and
+  // the cache -- so any of those changing makes it stale. Settled rather than
+  // reloaded on each event: one read here is seven requests, three of which
+  // answer whole collections (every mod the registry knows, every jar in the
+  // cache, and the diff between them), and a harvest landing or a burst of
+  // publishes fires several events in a row. A short quiet window turns a burst
+  // into one refresh; a single event still lands in well under a second.
+  let quiet: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
-    if (mirror.packs + mirror.registry + mirror.catalog > 0) loadAll();
+    if (mirror.packs + mirror.registry + mirror.catalog === 0) return;
+    clearTimeout(quiet);
+    quiet = setTimeout(() => void loadAll(), 400);
+    return () => clearTimeout(quiet);
   });
 
   // The list behind the editor is stale the moment editing ends, and editing now
@@ -165,17 +176,23 @@
   const featPackCount = $derived(packs.filter((p) => p.featured).length);
   const featServerCount = $derived(servers.filter((s) => s.featured).length);
 
-  // recent builds: built packs, newest first by the date baked into the version
-  // slug (SNAPSHOT-<ver>-<YYYY.MM.DD>). No separate build log to read.
+  // Recent builds: built packs, newest first by when the build was actually
+  // made. That is `latest_built_at`, which the mirror derives from the
+  // manifest's own timestamp -- this used to dig a YYYY.MM.DD out of the
+  // version string, which no version has carried since numbering became
+  // `<base>.<counter>`, so every entry scored the empty string and the list was
+  // in whatever order the catalog happened to arrive in. A pack whose manifest
+  // cannot be read has no date and sorts last rather than first.
   const recentBuilds = $derived(
     packs
       .filter((p) => p.latest_pack_version)
       .map((p) => ({
         pack: p.display_name,
         ver: p.latest_pack_version,
-        date: p.latest_pack_version.match(/(\d{4}\.\d{2}\.\d{2})/)?.[1] ?? '',
+        at: p.latest_built_at ?? '',
+        date: p.latest_built_at?.slice(0, 10) ?? '',
       }))
-      .sort((a, b) => b.date.localeCompare(a.date)),
+      .sort((a, b) => b.at.localeCompare(a.at)),
   );
   const cacheNum = $derived(
     cacheBytes >= 1e9
@@ -186,11 +203,26 @@
   );
   const cacheUnit = $derived(cacheBytes >= 1e9 ? 'GB' : cacheBytes >= 1e6 ? 'MB' : 'KB');
 
+  // Opened into the packs section rather than wherever the button was pressed.
+  // The editor is a location (#54), and only `/packs/<id>` and `/mypacks/<id>`
+  // are locations the router can read back -- pressed from the overview this
+  // used to mint `/overview/<id>`, which opens the editor and then cannot
+  // reopen it on a reload or from a shared link.
+  //
+  // The id is checked here for the same reason the editor's own field checks
+  // it: a name the mirror will refuse should be refused before somebody fills
+  // an editor with work behind it.
   async function newPack() {
     const id = (
       await dialogs.prompt(t('packs.newPrompt'), { title: t('packs.new') })
     )?.trim();
-    if (id) route.openPack(id);
+    if (!id) return;
+    const bad = say(idError(id));
+    if (bad) {
+      toasts.push({ kind: 'error', text: bad });
+      return;
+    }
+    route.openPackIn('packs', id);
   }
 </script>
 
@@ -295,22 +327,9 @@
           <input class="tfilter mono" bind:value={packFilter} placeholder={t('packs.filter')} aria-label={t('packs.filter')} />
         </div>
         <div class="panel">
-          <DataTable data={packRows} columns={packColumns} filter={packFilter} row={packRow} empty={packEmpty} />
+          <DataTable data={packRows} columns={packColumns} filter={packFilter} row={packRow} onRow={(r) => route.openPack(r.id)} empty={packEmpty} />
         </div>
         {#snippet packRow(r: PackRow)}
-          <tr
-            class="clickable"
-            role="button"
-            tabindex="0"
-            onclick={() => route.openPack(r.id)}
-            onkeydown={(e) => {
-              if (e.target !== e.currentTarget) return;
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                route.openPack(r.id);
-              }
-            }}
-          >
             <td>
               <!-- the row stays clickable for the mouse, but the name is the real
                    destination: a link the browser can open, copy and announce -->
@@ -347,7 +366,6 @@
                   }}>{sm.visibility === 'published' ? t('packs.unpublish') : t('packs.publish')}</button>
               {/if}
             </td>
-          </tr>
         {/snippet}
         {#snippet packEmpty()}
           <tr><td colspan="7" class="muted">{t('packs.empty')}</td></tr>
@@ -371,22 +389,9 @@
           <button class="primary" onclick={() => (serverEdit = 'new')}>{t('servers.new')}</button>
         </div>
         <div class="panel">
-          <DataTable data={servers} columns={serverColumns} row={serverRow} empty={serverEmpty} />
+          <DataTable data={servers} columns={serverColumns} row={serverRow} onRow={(s) => (serverEdit = s)} empty={serverEmpty} />
         </div>
         {#snippet serverRow(s: ServerEntry)}
-          <tr
-            class="clickable"
-            role="button"
-            tabindex="0"
-            onclick={() => (serverEdit = s)}
-            onkeydown={(e) => {
-              if (e.target !== e.currentTarget) return;
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                serverEdit = s;
-              }
-            }}
-          >
             <td>
               <div>{s.display_name}</div>
               <div class="faint mono">{s.server_id}</div>
@@ -404,7 +409,6 @@
                   delServer(s.server_id);
                 }}>{t('common.delete')}</button>
             </td>
-          </tr>
         {/snippet}
         {#snippet serverEmpty()}
           <tr><td colspan="5" class="muted">{t('servers.empty')}</td></tr>
@@ -428,13 +432,6 @@
   }
   .body {
     min-width: 0;
-  }
-  tr.clickable {
-    cursor: pointer;
-  }
-  tr.clickable:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: -2px;
   }
   .err {
     color: var(--danger);

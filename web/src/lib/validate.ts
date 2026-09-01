@@ -58,6 +58,18 @@ export function urlError(v: string): string | null {
   }
 }
 
+/// A pack-card image: either a URL somebody wrote, or a path inside the pack's
+/// own static tree, which is what the branding upload fills in and what the
+/// build resolves against the mirror (`pack_asset_url` in `authoring/build.rs`).
+/// The second is the ordinary case, so it is judged by the same rule the
+/// upload's destination is.
+export function cardImageError(v: string): string | null {
+  const s = v.trim();
+  if (!s) return null; // optional, like every image field on the card
+  if (/^(https?:\/\/|\/\/)/i.test(s)) return urlError(s);
+  return relPathError(s);
+}
+
 /// The Java major the launcher provisions: a whole number, and 8 at the oldest
 /// since nothing older is shipped.
 export function javaError(v: number | null | undefined): string | null {

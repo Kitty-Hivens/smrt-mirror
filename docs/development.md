@@ -21,15 +21,23 @@ examples/      # dev probes (parse_bench, evidence_dump, meta_probe)
 
 ## Gates
 
-Everything below must pass before a change is done; CI enforces the same set
-and `main` auto-deploys, so a red gate is a broken deploy:
+Everything below must pass before a change is done. This is the set CI runs,
+verbatim, and `main` auto-deploys, so a red gate is a broken deploy:
 
 ```
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-TS_RS_EXPORT_DIR=web/src/lib cargo test
-cd web && npm run build            # and: npx svelte-check --threshold error
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+TS_RS_EXPORT_DIR=web/src/lib cargo test --all-features
+cd web
+pnpm install --frozen-lockfile
+pnpm check      # svelte-check
+pnpm checks     # the panel's own logic suite (scripts/panel-checks.mjs)
+pnpm build
 ```
+
+pnpm, not npm: the lockfile is `web/pnpm-lock.yaml` and there is no
+`package-lock.json` for npm to honour, so an `npm install` here resolves a
+different tree than the one CI builds.
 
 ## Versioning
 
@@ -48,7 +56,7 @@ version.
 
 Wire structs derive `ts_rs::TS`; `cargo test` (with `TS_RS_EXPORT_DIR`)
 regenerates `web/src/lib/bindings/*.ts`. The bindings are committed --
-a wire change that breaks the panel fails `svelte-check`/`npm run build`
+a wire change that breaks the panel fails `pnpm check` / `pnpm build`
 instead of failing at runtime. Add `#[derive(TS)]` + `#[ts(export, ...)]` to
 any new wire type, and `utoipa::ToSchema` if it appears in a documented
 response.
@@ -94,6 +102,56 @@ for the full cascade and for bytecode-only. Re-run it (plus
 `testdata/corpus/baseline.py` for the diff) before touching classifier
 signals, edge grading, or metadata extraction; `docs/side-required-audit.md`
 records the accepted baseline and why each disagreement is tolerated.
+
+## Driving the panel headless
+
+`web/scripts/` holds nine scripts that open the panel in a real browser: the
+screenshot sweeps (`shot`, `branding-shot`, `structured-shot`, `picker-shot`,
+`preview-shot`) and the three end-to-end checks (`pack-editor-check` drives the
+whole authoring loop to a published build; `upload-check` drives a cache-jar
+upload; `loading-check` measures what the panel does while it is waiting). They
+share `scripts/lib/harness.mjs`, which is the only place that knows how to
+launch a browser and sign in -- six of them used to carry their own copy, and
+five of those still typed a token into a form that has answered `410` since
+sign-in became GitHub OAuth.
+
+`loading-check` needs no particular contents on the mirror: it stubs the listing
+response in front of `fetch` so the wait is long enough to observe, then asserts
+the things a screenshot of a loaded page cannot show -- that a placeholder is
+held back until the wait is worth drawing, that it is the height of the row it
+stands in for, and that a filter acknowledges a keystroke on the frame it
+arrives rather than after its debounce.
+
+They are run by hand, not by `pnpm`, and they need a browser and a session:
+
+```
+cd web
+FIREFOX=/usr/bin/firefox BASE=http://127.0.0.1:9000 SESSION=<cookie> OUT=/tmp/shots \
+  node scripts/shot.mjs
+```
+
+`SESSION` is the `smrt_session` cookie: sign in to the panel in a real browser
+and copy it out of DevTools (Application > Cookies -- it is HttpOnly, so
+`document.cookie` will not show it). Against a throwaway local mirror, minting
+one directly is quicker and needs no OAuth app:
+
+```
+sqlite3 <storage>/accounts.db "
+  INSERT INTO users (github_uid, login, role, created_at, last_login_at)
+  VALUES (1, 'local-operator', 'admin', strftime('%s','now'), strftime('%s','now'));
+  INSERT INTO sessions (id, user_id, created_at, expires_at)
+  VALUES ('localdev', last_insert_rowid(), strftime('%s','now'), strftime('%s','now') + 86400);
+  INSERT INTO terms_acceptance (github_uid, accepted_at) VALUES (1, strftime('%s','now'));"
+```
+
+Then `SESSION=localdev`. Never on a mirror anyone else uses: it is a session
+nobody signed in for.
+
+The scripts drive the panel in English (the harness sets `smrt.locale` before
+the app loads) so the labels they click are deterministic. The locale switch is
+on the login page and in Settings; there is none in the shell, which is what a
+script clicking for one used to miss silently -- and then navigate a Russian
+rail by English labels, screenshotting whatever happened to be on screen.
 
 ## Local run against real data
 

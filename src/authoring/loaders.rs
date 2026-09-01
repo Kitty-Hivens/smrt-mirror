@@ -102,12 +102,15 @@ pub async fn loader_versions(
         // Served now, refreshed behind. Forge's metadata is 210 kB, and having
         // whoever opens the editor first after six hours pay for that download
         // is an economy taken out of someone else's afternoon.
-        let (storage, modrinth, loader) = (storage.clone(), modrinth.clone(), loader.clone());
-        tokio::spawn(async move {
-            if let Err(e) = refresh(&storage, &modrinth, &loader).await {
-                tracing::warn!(loader, error = %format!("{e:#}"), "refreshing the loader build list failed");
-            }
-        });
+        if let Some(ticket) = super::versions::refresh_ticket(&key) {
+            let (storage, modrinth, loader) = (storage.clone(), modrinth.clone(), loader.clone());
+            tokio::spawn(async move {
+                let _ticket = ticket;
+                if let Err(e) = refresh(&storage, &modrinth, &loader).await {
+                    tracing::warn!(loader, error = %format!("{e:#}"), "refreshing the loader build list failed");
+                }
+            });
+        }
         return Ok(LoaderVersions {
             stale: true,
             ..list
@@ -225,6 +228,12 @@ fn version_key(version: &str) -> Vec<u64> {
 /// NeoForge versions carry the Minecraft version in their own first two
 /// segments: `21.1.x` is for 1.21.1. Derived rather than left blank, so the
 /// same filter works for it as for Forge.
+///
+/// A `.0` minor is the bare release, not a patch: `21.0.x` is for 1.21, and
+/// there is no such Minecraft version as 1.21.0. The picker filters on this
+/// string by equality, so labelling those builds `1.21.0` emptied the loader
+/// list for every major Minecraft release -- the exact versions a pack is most
+/// likely to be started on.
 fn parse_neoforge(body: &[u8]) -> Result<Vec<LoaderBuild>> {
     #[derive(Deserialize)]
     struct Versions {
@@ -237,6 +246,9 @@ fn parse_neoforge(body: &[u8]) -> Result<Vec<LoaderBuild>> {
         .map(|version| {
             let mut parts = version.split('.');
             let minecraft = match (parts.next(), parts.next()) {
+                (Some(major), Some("0")) if major.chars().all(|c| c.is_ascii_digit()) => {
+                    Some(format!("1.{major}"))
+                }
                 (Some(major), Some(minor)) if major.chars().all(|c| c.is_ascii_digit()) => {
                     Some(format!("1.{major}.{minor}"))
                 }
@@ -386,6 +398,28 @@ mod tests {
         assert!(
             builds[2].latest,
             "and 20.4.1-beta is the newest for its own"
+        );
+    }
+
+    // A `.0` minor is the bare Minecraft release: 21.0.x is for 1.21, and there
+    // is no 1.21.0 for the picker's equality filter to match -- so labelling it
+    // that way emptied the loader list for every major release.
+    #[test]
+    fn a_zero_minor_is_the_bare_minecraft_release() {
+        let body = br#"{"isSnapshot":false,"versions":["21.0.167","20.0.1","21.1.9"]}"#;
+        let builds = parse_neoforge(body).unwrap();
+        let mc = |v: &str| {
+            builds
+                .iter()
+                .find(|b| b.version == v)
+                .and_then(|b| b.minecraft.clone())
+        };
+        assert_eq!(mc("21.0.167").as_deref(), Some("1.21"));
+        assert_eq!(mc("20.0.1").as_deref(), Some("1.20"));
+        assert_eq!(
+            mc("21.1.9").as_deref(),
+            Some("1.21.1"),
+            "and a real patch keeps its patch"
         );
     }
 

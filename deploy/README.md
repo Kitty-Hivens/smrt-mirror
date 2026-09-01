@@ -19,12 +19,26 @@ useradd -r -s /usr/sbin/nologin -d /var/lib/smrt -M smrt
 mkdir -p /var/lib/smrt/{packs,servers,cache}
 chown -R smrt:smrt /var/lib/smrt
 
-# 2. config dir + env file (admin token; pick a long random value)
+# 2. config dir + env file
 mkdir -p /etc/smrt
 cat > /etc/smrt/env <<EOF
 SMRT_BIND_ADDR=127.0.0.1:9000
 SMRT_STORAGE_DIR=/var/lib/smrt
+# The origin baked into every manifest's source URLs. Set it before the first
+# build: a manifest is frozen, so one built under the default points every
+# launcher that downloads it at 127.0.0.1 forever.
+SMRT_MIRROR_BASE=https://smrt.hivens.dev
+# Machine auth for the CLI and scripts. Not a human login -- the panel's token
+# form is gone, and a valid token there answers 410.
 SMRT_ADMIN_TOKEN=$(openssl rand -base64 32)
+# Panel sign-in. Without a GitHub OAuth app and at least one uid on the
+# allowlist there is no way into the operator panel at all.
+SMRT_GITHUB_CLIENT_ID=<from the GitHub OAuth app>
+SMRT_GITHUB_CLIENT_SECRET=<from the GitHub OAuth app>
+SMRT_ADMIN_GITHUB_UIDS=<your numeric github uid>
+# Who owns operator-authored packs, and the backfill for packs predating the
+# field. Same uid as above on a single-operator mirror.
+SMRT_OPERATOR_UID=<your numeric github uid>
 RUST_LOG=smrt=info,tower_http=info
 EOF
 chmod 640 /etc/smrt/env
@@ -57,12 +71,15 @@ From your dev machine:
 ./deploy/deploy.sh
 ```
 
-The script builds `--release`, scp's the binary to
-`/usr/local/bin/smrt.new`, atomically swaps it into place, and
-restarts the systemd unit. Override host or key via env:
+The script builds `--release`, scp's **both** binaries to
+`/usr/local/bin/<name>.new`, atomically swaps them into place, and restarts the
+systemd unit. Both go together on purpose: `smrt-pack` opens the same
+`registry.db` the service migrates at start, so shipping one without the other
+leaves an on-box CLI that cannot read its own database. Override host, key or
+target directory via env:
 
 ```bash
-HOST=root@hivens.dev KEY=~/.ssh/other_key ./deploy/deploy.sh
+HOST=root@hivens.dev KEY=~/.ssh/other_key REMOTE_DIR=/usr/local/bin ./deploy/deploy.sh
 ```
 
 ## Verification
@@ -71,7 +88,8 @@ HOST=root@hivens.dev KEY=~/.ssh/other_key ./deploy/deploy.sh
 curl -s https://smrt.hivens.dev/v1/health | jq
 ```
 
-Expected:
+Expected -- `version` is `<year>.<commit height>`, so it moves with every
+deploy; what matters is that it changed and that `status` is `ok`:
 
 ```json
 {"schema_version":2,"status":"ok","version":"2026.388"}
