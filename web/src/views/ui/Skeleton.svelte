@@ -9,10 +9,10 @@
   // enough to be worth acknowledging, and the blocks hold the layout so the rows
   // land where the placeholders were.
   //
-  // `row` draws a row's interior -- a leading square and two lines of text --
-  // rather than a flat slab, because a slab says only that something is coming
-  // and a list of packs is a specific something. `bar` is the slab, for the
-  // waits that really are undifferentiated text.
+  // `row` draws a row's interior, a leading square and two lines of text,
+  // rather than a flat slab. A slab says only that something is coming, and a
+  // list of packs is a specific something. `bar` is the slab, for the waits
+  // that really are undifferentiated text.
   let {
     rows = 3,
     height = 46,
@@ -22,10 +22,10 @@
     delay = 250,
   }: {
     rows?: number;
-    /// Row height in px -- match what is coming, or the layout still jumps.
+    /// Row height in px. Match what is coming, or the layout still jumps.
     height?: number;
     /// Space between blocks. Zero for a list whose rows are separated by a rule
-    /// rather than by a gap; the rule is then drawn here too.
+    /// rather than by a gap, in which case the rule is drawn here too.
     gap?: number;
     shape?: 'bar' | 'row';
     /// Size of the leading square on a `row`, in px. Zero for a list whose rows
@@ -35,18 +35,19 @@
     delay?: number;
   } = $props();
 
-  // Rows of one width read as a barcode; content does not line up like that.
-  // Cycled rather than random so a re-render does not reshuffle the placeholder
-  // somebody is already looking at.
+  // Rows of one width read as a barcode, and content does not line up like
+  // that. Cycled rather than random so a re-render does not reshuffle the
+  // placeholder somebody is already looking at.
   const TITLE = ['42%', '31%', '52%', '37%', '46%'];
   const SUB = ['64%', '73%', '58%', '69%', '61%'];
 
   let show = $state(false);
-  // The blocks are the visual half of the wait and the only half a screen reader
-  // gets nothing from; this carries the other half. It is not held behind the
-  // delay -- that exists to stop a flash of grey, and there is no such thing as
-  // a flash of speech. Said one tick after mount so the live region is in the
-  // page before it has anything to announce, which is what makes it announce.
+  // The blocks are the visual half of the wait, the only half a screen reader
+  // gets nothing from. This carries the other half. It is not held behind the
+  // delay, because the delay exists to stop a flash of grey and there is no
+  // such thing as a flash of speech. Said one tick after mount so the live
+  // region is in the page before it has anything to announce, which is what
+  // makes it announce.
   let said = $state(false);
   $effect(() => {
     const blocks = setTimeout(() => (show = true), delay);

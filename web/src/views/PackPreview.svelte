@@ -433,7 +433,7 @@
   .sk-row {
     height: 46px;
   }
-  /* The sweep itself is the product's, declared once in app.css; only the two
+  /* The sweep itself is the product's, declared once in app.css. Only the two
      colours it runs between are this card's, because the preview paints in the
      pack's palette rather than the panel's. Scoping raises the specificity of
      the rule above past the global reduced-motion switch, so the switch is
