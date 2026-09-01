@@ -43,6 +43,7 @@
   import GithubPicker from './GithubPicker.svelte';
   import PackPreview from './PackPreview.svelte';
   import DropZone from './ui/DropZone.svelte';
+  import Skeleton from './ui/Skeleton.svelte';
   import Field from './ui/Field.svelte';
   import {
     cardImageError,
@@ -1283,7 +1284,7 @@
 <div class="body" class:split={previewOpen} in:arrive|global>
   <div class="editcol">
     {#if loading}
-      <div class="muted mono">{t('common.loading')}</div>
+      <Skeleton rows={6} height={44} />
     {:else if route.thread !== null}
       <!-- A discussion is a place of its own, over the pack it belongs to. -->
       <ThreadPage threadId={route.thread} onChanged={() => (threadTick += 1)} />

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { t } from '../lib/i18n.svelte';
+  import Skeleton from './ui/Skeleton.svelte';
   import { inbox } from '../lib/inbox.svelte';
   import { mirror } from '../lib/mirror.svelte';
   import { notifyFail } from '../lib/toasts.svelte';
@@ -114,8 +115,10 @@
         <button class="link" onclick={readAll} disabled={working}>{t('inbox.readAll')}</button>
       {/if}
     </header>
-    {#if !inbox.rows.length}
-      <p class="muted empty">{inbox.loaded ? t('inbox.none') : t('common.loading')}</p>
+    {#if !inbox.rows.length && !inbox.loaded}
+      <Skeleton rows={3} height={40} gap={0} shape="row" lead={0} />
+    {:else if !inbox.rows.length}
+      <p class="muted empty">{t('inbox.none')}</p>
     {:else}
       <ul>
         {#each inbox.rows as row (row.id)}

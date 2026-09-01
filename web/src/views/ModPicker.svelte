@@ -5,6 +5,7 @@
   import type { ModHit, ModrinthVersion, SourceDecl, VersionRow } from '../lib/types';
   import ModIcon from './ModIcon.svelte';
   import { settle, stagger } from '../lib/motion.svelte';
+  import Skeleton from './ui/Skeleton.svelte';
 
   // Finding a mod, over both places one can come from. Which of the two holds it
   // is the mirror's problem, not a door to pick before the question (#101): the
@@ -68,10 +69,20 @@
       if (mine !== generation) return;
       err = e instanceof ApiError ? `${e.status} ${e.body}` : String(e);
     } finally {
-      if (mine === generation) busy = false;
+      if (mine === generation) {
+        busy = false;
+        stale = false;
+      }
     }
   }
+  /// What is on screen answers the query as it was a keystroke ago. Saying so
+  /// at the keystroke rather than when the request finally goes out is the
+  /// difference between a search that responds and one that sits still for a
+  /// third of a second and then blinks: the debounce is there so the mirror is
+  /// asked once, not so the person is left wondering whether the key registered.
+  let stale = $state(false);
   function onInput() {
+    stale = q.trim() !== '';
     clearTimeout(timer);
     timer = setTimeout(search, 300);
   }
@@ -198,7 +209,13 @@
 
       <div class="list scroll">
         {#if !sel}
-          {#if busy && hits.length === 0}<div class="muted s">{t('common.loading')}</div>{/if}
+          <!-- Nothing to show yet: a wait shaped like the rows that are coming.
+               Something already on screen: it stays and dims, because it is
+               still a true answer to the query it was asked for. -->
+          {#if hits.length === 0}
+            {#if busy}<Skeleton rows={5} height={54} gap={4} shape="row" lead={28} />{/if}
+          {/if}
+          <div class="hits" class:stale={stale || busy}>
           {#each hits as h, i (h.modrinth_project_id ?? h.mod_id ?? h.name)}
             {@const label = fitLabel(h)}
             <!-- Results arrive in the order they are read, and a hit that
@@ -226,11 +243,12 @@
               </div>
             </button>
           {/each}
-          {#if !busy && q.trim() && hits.length === 0}
+          </div>
+          {#if !busy && !stale && q.trim() && hits.length === 0}
             <div class="muted s">{t('mp.noResults')}</div>
           {/if}
         {:else}
-          {#if versionsBusy}<div class="muted s">{t('common.loading')}</div>{/if}
+          {#if versionsBusy && mirrorVersions.length === 0}<Skeleton rows={4} height={34} gap={4} />{/if}
           {#each mirrorVersions as v (v.sha1)}
             {@const source = sourceFor(v)}
             <button class="ver" disabled={!source} onclick={() => pickMirror(v)}>
@@ -296,6 +314,14 @@
     flex-direction: column;
     gap: var(--space-2);
     min-height: 120px;
+  }
+  /* the rows sit in a group of their own so the whole set can dim as one while
+     a newer answer is on its way; it carries the list's own spacing so the
+     wrapper is invisible in the layout */
+  .hits {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
   }
   .hit,
   .ver {

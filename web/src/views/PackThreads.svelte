@@ -7,6 +7,7 @@
   import { api } from '../lib/api';
   import { notifyFail } from '../lib/toasts.svelte';
   import { t } from '../lib/i18n.svelte';
+  import Skeleton from './ui/Skeleton.svelte';
   import { route, href, plainClick } from '../lib/route.svelte';
   import type { Thread } from '../lib/types';
 
@@ -204,7 +205,7 @@
   {/if}
 
   {#if loading && !rows.length}
-    <p class="muted">{t('common.loading')}</p>
+    <Skeleton rows={3} height={44} gap={0} shape="row" lead={0} />
   {:else if failed}
     <p class="muted">{t('thr.unreadable')}</p>
   {:else if !rows.length}

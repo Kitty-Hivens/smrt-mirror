@@ -54,8 +54,11 @@ the reading that produced the work rather than as a to-do.
    the dependency preview runs the real fill on a copy before the save. The
    editor you cannot leave with the back button (#54) -- done: the open editor
    is a location.
-3. Friction and comprehension. Forms with no field names (#55). Loading states.
-   Jargon in the user's face. Still the live class.
+3. Friction and comprehension. Loading states -- done: a wait holds the shape of
+   the rows that are coming instead of standing in as a line of text, and a
+   filter says it has heard a keystroke on the frame it arrives rather than
+   after the debounce it opens. Forms with no field names (#55), jargon in the
+   user's face. Still the live class.
 4. Cosmetics. Transliterations, wrong labels, tooltips in the wrong language. The
    cheapest class and the least of the evils.
 

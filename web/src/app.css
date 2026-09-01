@@ -260,6 +260,46 @@
   }
 }
 
+/* A wait shaped like what is coming.
+
+   "Loading..." is a sentence where content will be: it says the same thing for
+   a list of three and a list of three hundred, and when the answer lands the
+   layout jumps from one line of text to whatever arrived. A block of the right
+   geometry says how much is coming and holds its place, so the arrival is the
+   rows fading in rather than the page rearranging itself.
+
+   The shimmer is the only part that distinguishes a wait from empty content --
+   which is why it stops under reduced motion rather than being the one
+   animation in the product that ignores the setting. */
+@keyframes sk-pulse {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: 0 0;
+  }
+}
+/* One step off the surface it sits on, sweeping to two. Not --panel: a
+   placeholder painted in its container's own colour is invisible, which is what
+   the first cut of this did on the paper substrate. The ladder runs lighter to
+   darker on paper and darker to lighter on the dark theme, so a placeholder
+   named by its rung reads on both without either being special-cased. */
+.sk {
+  border-radius: var(--radius-sm);
+  background: linear-gradient(90deg, var(--panel-2) 25%, var(--panel-3) 37%, var(--panel-2) 63%);
+  background-size: 400% 100%;
+  animation: sk-pulse 1.3s ease-in-out infinite;
+}
+
+/* Data that is on screen while a newer answer is on its way. Dimmed rather than
+   replaced: what is showing is still true, it is merely about to be superseded,
+   and swapping it for placeholders would throw away the answer somebody is
+   reading in order to say that a better one is coming. */
+.stale {
+  opacity: 0.45;
+  transition: opacity var(--dur-state) var(--ease-out);
+}
+
 /* One switch for the whole product: durations go to zero, so every transition
    and animation below still runs its logic and simply arrives immediately. No
    consumer needs its own media query. */
@@ -268,6 +308,10 @@
     --dur-state: 0ms;
     --dur-enter: 0ms;
     --dur-layer: 0ms;
+  }
+  /* the shimmer carries its own timing, so it is disarmed by name */
+  .sk {
+    animation: none;
   }
 }
 

@@ -7,6 +7,7 @@
   import { api } from '../lib/api';
   import { notifyFail, toasts } from '../lib/toasts.svelte';
   import { t } from '../lib/i18n.svelte';
+  import Skeleton from './ui/Skeleton.svelte';
   import { dialogs } from '../lib/dialogs.svelte';
   import { route } from '../lib/route.svelte';
   import { nameOf as who } from '../lib/people';
@@ -205,7 +206,8 @@
   </div>
 
   {#if loading && !view}
-    <p class="muted">{t('common.loading')}</p>
+    <Skeleton rows={1} height={56} />
+    <Skeleton rows={3} height={64} />
   {:else if failed && !view}
     <p class="muted">{t('thr.unreadable')}</p>
   {:else if thread}

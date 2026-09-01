@@ -105,14 +105,22 @@ records the accepted baseline and why each disagreement is tolerated.
 
 ## Driving the panel headless
 
-`web/scripts/` holds eight scripts that open the panel in a real browser: the
+`web/scripts/` holds nine scripts that open the panel in a real browser: the
 screenshot sweeps (`shot`, `branding-shot`, `structured-shot`, `picker-shot`,
-`preview-shot`) and the two end-to-end checks (`pack-editor-check` drives the
+`preview-shot`) and the three end-to-end checks (`pack-editor-check` drives the
 whole authoring loop to a published build; `upload-check` drives a cache-jar
-upload). They share `scripts/lib/harness.mjs`, which is the only place that
-knows how to launch a browser and sign in -- six of them used to carry their own
-copy, and five of those still typed a token into a form that has answered `410`
-since sign-in became GitHub OAuth.
+upload; `loading-check` measures what the panel does while it is waiting). They
+share `scripts/lib/harness.mjs`, which is the only place that knows how to
+launch a browser and sign in -- six of them used to carry their own copy, and
+five of those still typed a token into a form that has answered `410` since
+sign-in became GitHub OAuth.
+
+`loading-check` needs no particular contents on the mirror: it stubs the listing
+response in front of `fetch` so the wait is long enough to observe, then asserts
+the things a screenshot of a loaded page cannot show -- that a placeholder is
+held back until the wait is worth drawing, that it is the height of the row it
+stands in for, and that a filter acknowledges a keystroke on the frame it
+arrives rather than after its debounce.
 
 They are run by hand, not by `pnpm`, and they need a browser and a session:
 
