@@ -7,7 +7,7 @@
   // and the link is the answer to "which state is 0.1.31?".
   import { api } from '../lib/api';
   import { notifyFail, toasts } from '../lib/toasts.svelte';
-  import { t } from '../lib/i18n.svelte';
+  import { changeWords, t } from '../lib/i18n.svelte';
   import Skeleton from './ui/Skeleton.svelte';
   import { dialogs } from '../lib/dialogs.svelte';
   import { route } from '../lib/route.svelte';
@@ -102,7 +102,7 @@
         const preview = await api.commitDiff(packId, commit.id, 'live');
         const c = tally(preview.changes);
         summary = preview.changes.length
-          ? t('hist.restoreEffect', { add: c.add, remove: c.remove, change: c.change })
+          ? t('hist.restoreEffect', changeWords(c))
           : t('hist.restoreNoop');
       } catch {
         summary = t('hist.restoreUnknown');
@@ -190,7 +190,7 @@
     {:else if diff && diff.changes.length}
       <p class="muted lead">
         {against === 'live'
-          ? t('commit.leadLive', { add: counts.add, remove: counts.remove, change: counts.change })
+          ? t('commit.leadLive', changeWords(counts))
           : diff.from
             ? t('commit.leadParent', { parent: short(diff.from) })
             : t('commit.leadRoot')}

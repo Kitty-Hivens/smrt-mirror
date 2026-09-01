@@ -6,7 +6,7 @@
   // this", and the answer moves as the pack moves.
   import { api } from '../lib/api';
   import { notifyFail, toasts } from '../lib/toasts.svelte';
-  import { t } from '../lib/i18n.svelte';
+  import { changeWords, t } from '../lib/i18n.svelte';
   import Skeleton from './ui/Skeleton.svelte';
   import { dialogs } from '../lib/dialogs.svelte';
   import { route } from '../lib/route.svelte';
@@ -159,7 +159,7 @@
   async function merge() {
     const c = counts;
     const ok = await dialogs.confirm(
-      t('thr.mergeAsk', { add: c.add, remove: c.remove, change: c.change }),
+      t('thr.mergeAsk', changeWords(c)),
       { title: t('thr.merge') },
     );
     if (!ok) return;
@@ -244,7 +244,7 @@
         <h3>{t('thr.offers')}</h3>
         {#if diff && diff.changes.length}
           <p class="muted small">
-            {t('thr.offersLead', { add: counts.add, remove: counts.remove, change: counts.change })}
+            {t('thr.offersLead', changeWords(counts))}
           </p>
           <ChangeList rows={diff.changes} />
         {:else if diff}
