@@ -271,6 +271,47 @@ fn is_loader_dep(target: &str) -> bool {
     )
 }
 
+/// Dependency selectors naming Fabric API, in the spellings one can arrive in:
+/// the Modrinth project a Modrinth-declared edge names, and the id a
+/// `fabric.mod.json` declares. `fabric` on its own is the loader, which
+/// `is_loader_dep` already answers.
+const FABRIC_API: [&str; 2] = ["modrinth:P7dR8mSH", "fabric-api"];
+
+/// Selectors naming Forgified Fabric API: its Modrinth project, and the modid
+/// its jar declares.
+const FORGIFIED_FABRIC_API: [&str; 2] = ["modrinth:Aqlf1Shp", "fabric_api"];
+
+/// Dependency selectors a present mod answers with no edge in the graph saying
+/// so.
+///
+/// A fabric mod carried onto a Forge-family loader by a connector still declares
+/// `fabric-api`, and what answers it on that side is Forgified Fabric API -- a
+/// separate project with its own modid, so nothing joins the two and the
+/// dependency reads as unmet on a pack that runs it perfectly well. The
+/// equivalence belongs to the bridge rather than to any one pack, so it lives
+/// here beside the loader spellings instead of as a row every mirror has to
+/// author for itself.
+///
+/// Deliberately not conditioned on a connector being present: without one the
+/// fabric mod does not load at all, which `loader_mismatch` reports on its own,
+/// and calling its dependency missing on top of that names two problems where
+/// there is one.
+fn bridged_api_provided(
+    conn: &Connection,
+    by_mod_id: &HashMap<i64, usize>,
+) -> Result<HashSet<String>> {
+    let mut provided = HashSet::new();
+    for selector in FORGIFIED_FABRIC_API {
+        if let Some(id) = queries::mod_id_for_selector(conn, selector)?
+            && by_mod_id.contains_key(&id)
+        {
+            provided.extend(FABRIC_API.iter().map(|s| s.to_string()));
+            break;
+        }
+    }
+    Ok(provided)
+}
+
 /// A declared jar mod placed on the graph.
 struct Present {
     filename: String,
@@ -478,6 +519,7 @@ pub fn dependency_fill_plan(conn: &Connection, cfg: &PackConfig) -> Result<DepFi
         by_mod_id.entry(p.mod_id).or_insert(i);
     }
     let loader_provided = queries::loader_provided_capabilities(conn, &cfg.loader.name)?;
+    let bridged_provided = bridged_api_provided(conn, &by_mod_id)?;
     // target-mod classifications, resolved lazily once per mod id
     let mut target_class: HashMap<i64, Classification> = HashMap::new();
     let mut missing: BTreeMap<String, Option<String>> = BTreeMap::new();
@@ -510,6 +552,11 @@ pub fn dependency_fill_plan(conn: &Connection, cfg: &PackConfig) -> Result<DepFi
             // do not record it as an auto-pull candidate (it would pull back a mod
             // the fork makes redundant)
             if loader_provided.contains(e.target.split('@').next().unwrap_or(&e.target)) {
+                continue;
+            }
+            // likewise a fabric-side API the pack answers with its forge-family
+            // port: satisfied, so there is nothing to pull
+            if bridged_provided.contains(e.target.split('@').next().unwrap_or(&e.target)) {
                 continue;
             }
             let target_mod = queries::mod_id_for_selector(conn, &e.target)?;
@@ -792,12 +839,16 @@ pub fn resolve_pack(conn: &Connection, cfg: &PackConfig) -> Result<ResolveReport
     // A required target a present mod `provides` as a capability is satisfied.
     // So is one the loader ships natively -- a modern fork bundling what is a
     // separate mod on Forge (Cleanroom loads mixins, so a MixinBooter dependency
-    // is met with no MixinBooter jar in the pack). The `@version` suffix a
-    // selector may carry is not part of the capability key.
+    // is met with no MixinBooter jar in the pack). So, finally, is a bridged
+    // loader's API the pack answers with its own side's port. The `@version`
+    // suffix a selector may carry is not part of the capability key.
     let loader_provided = queries::loader_provided_capabilities(conn, &cfg.loader.name)?;
+    let bridged_provided = bridged_api_provided(conn, &by_mod_id)?;
     let bare = |t: &str| t.split('@').next().unwrap_or(t).to_string();
     missing.retain(|target, _| {
-        !provides.contains_key(target) && !loader_provided.contains(&bare(target))
+        !provides.contains_key(target)
+            && !loader_provided.contains(&bare(target))
+            && !bridged_provided.contains(&bare(target))
     });
 
     // Loader eligibility (#50). A pack natively runs its own loader and whatever
@@ -1245,6 +1296,108 @@ mod tests {
         assert_eq!(
             rep.loader_bridged[0].bridged_by.as_deref(),
             Some("connector.jar")
+        );
+    }
+
+    // Zoomify is fabric-only and rides Sinytra Connector on a neoforge pack. Its
+    // Modrinth metadata declares Fabric API; what answers that on this side of
+    // the bridge is Forgified Fabric API, a different project with a different
+    // modid. Nothing in the graph joined the two, so the dependency read as unmet
+    // and the pre-publish gate refused a pack that had been running for weeks.
+    #[test]
+    fn fabric_api_is_answered_by_the_forgified_port_across_a_bridge() {
+        use crate::registry::model::Source;
+        let r = Registry::open_in_memory().unwrap();
+        let fab = add_mod_for(&r, "zoomify", "sha_zoom", &["fabric"]);
+        relate(
+            &r,
+            fab,
+            "modrinth:P7dR8mSH",
+            None,
+            RelKind::Requires,
+            None,
+            Source::Modrinth,
+        );
+        let conn_mod = add_mod_for(&r, "connector", "sha_conn", &["forge"]);
+        relate(
+            &r,
+            conn_mod,
+            "loader:fabric",
+            None,
+            RelKind::Provides,
+            None,
+            Source::Authored,
+        );
+        add_mod_for(&r, "fabric_api", "sha_ffapi", &["forge"]);
+        let cfg = config(vec![
+            declared("Zoomify.jar", true, cache("sha_zoom")),
+            declared("connector.jar", true, cache("sha_conn")),
+            declared("forgified-fabric-api.jar", true, cache("sha_ffapi")),
+        ]);
+
+        let rep = r.with_conn(|c| resolve_pack(c, &cfg)).unwrap();
+        assert!(
+            rep.missing.is_empty(),
+            "the forgified port answers it: {:?}",
+            rep.missing
+        );
+
+        // and the fill plan does not offer to pull a dependency already answered
+        let plan = r.with_conn(|c| dependency_fill_plan(c, &cfg)).unwrap();
+        assert!(
+            !plan
+                .missing
+                .iter()
+                .any(|t| t.selector == "modrinth:P7dR8mSH"),
+            "nothing to pull: {:?}",
+            plan.missing.iter().map(|t| &t.selector).collect::<Vec<_>>()
+        );
+    }
+
+    // The equivalence is not blanket. With nothing on this side of the bridge to
+    // answer it, Fabric API is a dependency the pack genuinely does not ship, and
+    // both legs must keep saying so -- otherwise the fix trades a false block for
+    // a silent one.
+    #[test]
+    fn fabric_api_stays_missing_when_nothing_answers_it() {
+        use crate::registry::model::Source;
+        let r = Registry::open_in_memory().unwrap();
+        let fab = add_mod_for(&r, "zoomify", "sha_zoom", &["fabric"]);
+        relate(
+            &r,
+            fab,
+            "modrinth:P7dR8mSH",
+            None,
+            RelKind::Requires,
+            None,
+            Source::Modrinth,
+        );
+        let conn_mod = add_mod_for(&r, "connector", "sha_conn", &["forge"]);
+        relate(
+            &r,
+            conn_mod,
+            "loader:fabric",
+            None,
+            RelKind::Provides,
+            None,
+            Source::Authored,
+        );
+        let cfg = config(vec![
+            declared("Zoomify.jar", true, cache("sha_zoom")),
+            declared("connector.jar", true, cache("sha_conn")),
+        ]);
+
+        let rep = r.with_conn(|c| resolve_pack(c, &cfg)).unwrap();
+        assert_eq!(rep.missing.len(), 1, "{:?}", rep.missing);
+        assert_eq!(rep.missing[0].target, "modrinth:P7dR8mSH");
+
+        let plan = r.with_conn(|c| dependency_fill_plan(c, &cfg)).unwrap();
+        assert!(
+            plan.missing
+                .iter()
+                .any(|t| t.selector == "modrinth:P7dR8mSH"),
+            "still a pull candidate: {:?}",
+            plan.missing.iter().map(|t| &t.selector).collect::<Vec<_>>()
         );
     }
 
