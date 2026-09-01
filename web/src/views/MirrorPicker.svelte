@@ -3,6 +3,7 @@
   import { api, ApiError } from '../lib/api';
   import { t } from '../lib/i18n.svelte';
   import TabStrip from './ui/TabStrip.svelte';
+  import { settle, stagger } from '../lib/motion.svelte';
   import type {
     ModSummary,
     VersionRow,
@@ -327,8 +328,8 @@
         </div>
         {#if modsLoading}<div class="muted s">{t('common.loading')}</div>{/if}
         <div class="hits scroll">
-          {#each mods as m (m.mod_id)}
-            <button class="hit" onclick={() => openMod(m)}>
+          {#each mods as m, i (m.mod_id)}
+            <button class="hit row-in" use:stagger={i} animate:settle onclick={() => openMod(m)}>
               <div class="info">
                 <div class="t">
                   {m.name}

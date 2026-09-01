@@ -4,6 +4,7 @@
   import { t } from '../lib/i18n.svelte';
   import type { ModHit, ModrinthVersion, SourceDecl, VersionRow } from '../lib/types';
   import ModIcon from './ModIcon.svelte';
+  import { settle, stagger } from '../lib/motion.svelte';
 
   // Finding a mod, over both places one can come from. Which of the two holds it
   // is the mirror's problem, not a door to pick before the question (#101): the
@@ -198,9 +199,13 @@
       <div class="list scroll">
         {#if !sel}
           {#if busy && hits.length === 0}<div class="muted s">{t('common.loading')}</div>{/if}
-          {#each hits as h (h.modrinth_project_id ?? h.mod_id ?? h.name)}
+          {#each hits as h, i (h.modrinth_project_id ?? h.mod_id ?? h.name)}
             {@const label = fitLabel(h)}
-            <button class="hit" disabled={inPack(h)} onclick={() => open(h)}>
+            <!-- Results arrive in the order they are read, and a hit that
+                 survives a narrowing query slides to its new place rather than
+                 teleporting: typing one more letter should look like the list
+                 settling, not like a different list. -->
+            <button class="hit row-in" use:stagger={i} animate:settle disabled={inPack(h)} onclick={() => open(h)}>
               <ModIcon
                 name={h.name}
                 iconUrl={h.icon_url ?? null}

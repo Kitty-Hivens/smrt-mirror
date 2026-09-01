@@ -1,6 +1,6 @@
 <script lang="ts">
   import { api, ApiError } from '../lib/api';
-  import { stagger, unroll } from '../lib/motion.svelte';
+  import { settle, stagger, unroll } from '../lib/motion.svelte';
   import { detailOf, notifyFail, toasts } from '../lib/toasts.svelte';
   import { dialogs } from '../lib/dialogs.svelte';
   import { href, plainClick, route } from '../lib/route.svelte';
@@ -428,7 +428,7 @@
 
   <div class="panel modlist">
     {#each mods as m, i (m.mod_id)}
-      <div class="mod row-in" class:open={isOpen(m.mod_id)} use:stagger={i}>
+      <div class="mod row-in" class:open={isOpen(m.mod_id)} use:stagger={i} animate:settle>
         <div
           class="modrow"
           role="button"

@@ -7,7 +7,7 @@
   import { t } from '../lib/i18n.svelte';
   import { advertisesModList } from '../lib/handshake';
   import { assetPath } from '../lib/packassets';
-  import { arrive, stagger } from '../lib/motion.svelte';
+  import { arrive, depart, settle, stagger } from '../lib/motion.svelte';
   import { openPackSession, type PackSession } from '../lib/packsession.svelte';
   import { JAVA_MAJORS, suggestedJava } from '../lib/java';
   import { changedPaths, createTouches } from '../lib/touched.svelte';
@@ -1423,7 +1423,7 @@
 
           <div class="mods">
             {#each cfg.mods as m, i (m)}
-              <div class="modrow row-in" use:stagger={i} animate:flip={{ duration: 200 }}>
+              <div class="modrow row-in" use:stagger={i} animate:settle out:depart>
                 <ModIcon name={m.filename} iconUrl={m.display?.icon_url} source={m.source} size={24} mono />
                 <!-- no room for a caption in this row, so the verdict is the
                      control's own state and its title, which is where a dense

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { api, ApiError } from '../lib/api';
-  import { countUp } from '../lib/motion.svelte';
+  import { countUp, settle } from '../lib/motion.svelte';
   import { notifyFail, toasts } from '../lib/toasts.svelte';
   import { dialogs } from '../lib/dialogs.svelte';
   import { idError, say } from '../lib/validate';
@@ -69,12 +69,12 @@
   // cache, and the diff between them), and a harvest landing or a burst of
   // publishes fires several events in a row. A short quiet window turns a burst
   // into one refresh; a single event still lands in well under a second.
-  let settle: ReturnType<typeof setTimeout> | undefined;
+  let quiet: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
     if (mirror.packs + mirror.registry + mirror.catalog === 0) return;
-    clearTimeout(settle);
-    settle = setTimeout(() => void loadAll(), 400);
-    return () => clearTimeout(settle);
+    clearTimeout(quiet);
+    quiet = setTimeout(() => void loadAll(), 400);
+    return () => clearTimeout(quiet);
   });
 
   // The list behind the editor is stale the moment editing ends, and editing now
@@ -327,22 +327,9 @@
           <input class="tfilter mono" bind:value={packFilter} placeholder={t('packs.filter')} aria-label={t('packs.filter')} />
         </div>
         <div class="panel">
-          <DataTable data={packRows} columns={packColumns} filter={packFilter} row={packRow} empty={packEmpty} />
+          <DataTable data={packRows} columns={packColumns} filter={packFilter} row={packRow} onRow={(r) => route.openPack(r.id)} empty={packEmpty} />
         </div>
         {#snippet packRow(r: PackRow)}
-          <tr
-            class="clickable"
-            role="button"
-            tabindex="0"
-            onclick={() => route.openPack(r.id)}
-            onkeydown={(e) => {
-              if (e.target !== e.currentTarget) return;
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                route.openPack(r.id);
-              }
-            }}
-          >
             <td>
               <!-- the row stays clickable for the mouse, but the name is the real
                    destination: a link the browser can open, copy and announce -->
@@ -379,7 +366,6 @@
                   }}>{sm.visibility === 'published' ? t('packs.unpublish') : t('packs.publish')}</button>
               {/if}
             </td>
-          </tr>
         {/snippet}
         {#snippet packEmpty()}
           <tr><td colspan="7" class="muted">{t('packs.empty')}</td></tr>
@@ -403,22 +389,9 @@
           <button class="primary" onclick={() => (serverEdit = 'new')}>{t('servers.new')}</button>
         </div>
         <div class="panel">
-          <DataTable data={servers} columns={serverColumns} row={serverRow} empty={serverEmpty} />
+          <DataTable data={servers} columns={serverColumns} row={serverRow} onRow={(s) => (serverEdit = s)} empty={serverEmpty} />
         </div>
         {#snippet serverRow(s: ServerEntry)}
-          <tr
-            class="clickable"
-            role="button"
-            tabindex="0"
-            onclick={() => (serverEdit = s)}
-            onkeydown={(e) => {
-              if (e.target !== e.currentTarget) return;
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                serverEdit = s;
-              }
-            }}
-          >
             <td>
               <div>{s.display_name}</div>
               <div class="faint mono">{s.server_id}</div>
@@ -436,7 +409,6 @@
                   delServer(s.server_id);
                 }}>{t('common.delete')}</button>
             </td>
-          </tr>
         {/snippet}
         {#snippet serverEmpty()}
           <tr><td colspan="5" class="muted">{t('servers.empty')}</td></tr>
@@ -460,13 +432,6 @@
   }
   .body {
     min-width: 0;
-  }
-  tr.clickable {
-    cursor: pointer;
-  }
-  tr.clickable:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: -2px;
   }
   .err {
     color: var(--danger);
