@@ -74,7 +74,7 @@
     {#if d?.description}<div class="desc">{d.description}</div>{/if}
   </div>
   {#if depCount > 0}
-    <button class="exp" class:open={expanded} onclick={() => (expanded = !expanded)}>
+    <button class="exp" class:open={expanded} title={t('mr.depsHint')} onclick={() => (expanded = !expanded)}>
       {t('mr.deps', { n: depCount })}<span class="caret"></span>
     </button>
   {/if}

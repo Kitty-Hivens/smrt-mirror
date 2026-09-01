@@ -1495,7 +1495,10 @@
                   <th>{t('pe.dest')}</th>
                   <th style="width:120px">{t('pe.source')}</th>
                   <th>{t('pe.ref')}</th>
-                  <th style="width:60px">{t('pe.req')}</th>
+                  <!-- the column is 60px wide on purpose, so the header is an
+                       abbreviation with the whole phrase behind it rather than a
+                       word with its ending cut off -->
+                  <th style="width:60px" title={t('pe.reqHint')}>{t('pe.req')}</th>
                   <th style="width:44px"></th>
                 </tr>
               </thead>
