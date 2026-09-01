@@ -125,17 +125,26 @@
     err = e instanceof ApiError ? `${e.status} ${e.body}` : String(e);
   }
 
+  // Which search is the current one. The debounce shortens the window but does
+  // not close it: a slow first request can land after a narrower second, and
+  // then the list on screen does not match what is typed above it.
+  let modsGeneration = 0;
+
   async function loadMods() {
+    const mine = ++modsGeneration;
     modsLoading = true;
     err = '';
     try {
-      mods = (
+      const rows = (
         await api.registryMods(q.trim() || undefined, loaderF.trim() || undefined, mcF.trim() || undefined)
       ).rows;
+      if (mine !== modsGeneration) return;
+      mods = rows;
     } catch (e) {
+      if (mine !== modsGeneration) return;
       fail(e);
     } finally {
-      modsLoading = false;
+      if (mine === modsGeneration) modsLoading = false;
     }
   }
   function onModFilter() {
@@ -251,11 +260,16 @@
     }
   }
 
+  // Matched against every filename the jar is used under, not just the first: a
+  // jar three packs ship under three names was only findable by the name the
+  // first of them gave it.
   const rawShown = $derived(
     raw.filter((e) => {
       const n = rawQ.trim().toLowerCase();
       if (!n) return true;
-      return e.sha1.includes(n) || (e.uses[0]?.filename ?? '').toLowerCase().includes(n);
+      return (
+        e.sha1.includes(n) || e.uses.some((u) => u.filename.toLowerCase().includes(n))
+      );
     }),
   );
   const rawName = (e: CacheUsageEntry) => e.uses[0]?.filename ?? '';

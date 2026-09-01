@@ -1,223 +1,185 @@
-// Seed a deliberately rich pack, publish v1, stage a changed v2, then open the
-// pack editor -> Preview split-pane and screenshot the launcher-faithful render
-// (hero, role groups, dep tree, conflicts, libraries, assets, markdown about)
-// plus the version diff. Exercises every Phase 5 code path offline (smrt_cache /
-// smrt_static sources -- no Modrinth network needed).
-import puppeteer from 'puppeteer-core';
+// Seed a pack with something worth looking at, publish it, stage a change, then
+// open the editor's Preview and screenshot the launcher-faithful render.
+//
+// The seeding half used to call `/v1/admin/...` and a `curator` endpoint, and to
+// hand-set `required` on config rows. None of those exist: the admin paths
+// became `/v1/authoring/...`, the curator TOML is gone, and required-ness is
+// derived at build time rather than declared. Rewritten against the API as it
+// is; nothing off this mirror is needed, since every source is a cache jar.
+//
+// Env: the usual (see scripts/lib/harness.mjs), plus PACK (default `Preview`).
 import { createHash } from 'node:crypto';
+import { launch, signedIn, editorTab, clickByText, shoot, sleep, BASE, SESSION }
+  from './lib/harness.mjs';
 
-const EXE = process.env.CHROME;
-const BASE = process.env.BASE ?? 'http://127.0.0.1:9000';
-const TOKEN = process.env.TOKEN ?? 'dev';
-const OUT = process.env.OUT ?? '/tmp';
-const PACK = 'Preview';
-
-const auth = { Authorization: `Bearer ${TOKEN}` };
+const PACK = process.env.PACK ?? 'Preview';
 const sha1 = (s) => createHash('sha1').update(s).digest('hex');
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function putJar(content) {
-  const h = sha1(content);
-  const r = await fetch(`${BASE}/v1/admin/cache/${h.slice(0, 2)}/${h}.jar`, {
-    method: 'PUT',
-    headers: { ...auth, 'Content-Type': 'application/java-archive' },
-    body: content,
-  });
-  if (!r.ok) throw new Error(`putJar ${h}: ${r.status} ${await r.text()}`);
-  return h;
+if (!SESSION) {
+  console.error('SESSION is required: the seeding half writes through the authoring API.');
+  process.exit(1);
 }
 
-async function putStatic(rel, content) {
-  const r = await fetch(`${BASE}/v1/admin/packs/${PACK}/static/${rel}`, {
-    method: 'PUT',
-    headers: { ...auth, 'Content-Type': 'application/octet-stream' },
-    body: content,
+async function api(method, path, body, contentType = 'application/json') {
+  const isJson = contentType === 'application/json';
+  const r = await fetch(`${BASE}${path}`, {
+    method,
+    headers: {
+      Cookie: `smrt_session=${SESSION}`,
+      ...(body === undefined ? {} : { 'Content-Type': contentType }),
+    },
+    body: body === undefined ? undefined : isJson ? JSON.stringify(body) : body,
   });
-  if (!r.ok) throw new Error(`putStatic ${rel}: ${r.status} ${await r.text()}`);
+  if (!r.ok) throw new Error(`${method} ${path}: ${r.status} ${await r.text()}`);
+  return r.status === 204 ? null : r.json().catch(() => null);
 }
 
-async function putConfig(cfg) {
-  const r = await fetch(`${BASE}/v1/admin/packs/${PACK}/config`, {
-    method: 'PUT',
-    headers: { ...auth, 'Content-Type': 'application/json' },
-    body: JSON.stringify(cfg),
+/// A one-entry stored (uncompressed) zip, built by hand so this script needs no
+/// dependency of its own. Real zip bytes, so the harvest reads an identity out
+/// of the jar rather than skipping it as unreadable.
+function zipOf(name, content) {
+  const nameBytes = Buffer.from(name, 'utf8');
+  const data = Buffer.from(content, 'utf8');
+  const table = [...Array(256)].map((_, n) => {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
   });
-  if (!r.ok) throw new Error(`putConfig: ${r.status} ${await r.text()}`);
+  let crc = 0xffffffff;
+  for (const b of data) crc = table[(crc ^ b) & 0xff] ^ (crc >>> 8);
+  crc = (crc ^ 0xffffffff) >>> 0;
+
+  const local = Buffer.alloc(30);
+  local.writeUInt32LE(0x04034b50, 0);
+  local.writeUInt16LE(20, 4);
+  local.writeUInt16LE(0, 8); // stored
+  local.writeUInt32LE(crc, 14);
+  local.writeUInt32LE(data.length, 18);
+  local.writeUInt32LE(data.length, 22);
+  local.writeUInt16LE(nameBytes.length, 26);
+
+  const central = Buffer.alloc(46);
+  central.writeUInt32LE(0x02014b50, 0);
+  central.writeUInt16LE(20, 4);
+  central.writeUInt16LE(20, 6);
+  central.writeUInt16LE(0, 10);
+  central.writeUInt32LE(crc, 16);
+  central.writeUInt32LE(data.length, 20);
+  central.writeUInt32LE(data.length, 24);
+  central.writeUInt16LE(nameBytes.length, 28);
+
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(1, 8);
+  end.writeUInt16LE(1, 10);
+  end.writeUInt32LE(46 + nameBytes.length, 12);
+  end.writeUInt32LE(30 + nameBytes.length + data.length, 16);
+
+  return Buffer.concat([local, nameBytes, data, central, nameBytes, end]);
 }
 
-async function putCurator(toml) {
-  const r = await fetch(`${BASE}/v1/admin/packs/${PACK}/curator`, {
-    method: 'PUT',
-    headers: { ...auth, 'Content-Type': 'text/plain; charset=utf-8' },
-    body: toml,
-  });
-  if (!r.ok) throw new Error(`putCurator: ${r.status} ${await r.text()}`);
+async function putJar(modid, name, version) {
+  const body = zipOf(
+    'mcmod.info',
+    JSON.stringify([{ modid, name, version, description: `${name}, for the preview.` }]),
+  );
+  const hash = sha1(body);
+  await api('PUT', `/v1/cache/${hash.slice(0, 2)}/${hash}.jar`, body, 'application/java-archive');
+  return hash;
 }
 
-async function build(dryRun) {
-  const q = dryRun ? '?dry_run=true' : '';
-  const r = await fetch(`${BASE}/v1/admin/packs/${PACK}/build${q}`, { method: 'POST', headers: auth });
-  const { job_id } = await r.json();
-  for (let i = 0; i < 300; i++) {
-    const s = await (await fetch(`${BASE}/v1/admin/jobs/${job_id}`, { headers: auth })).json();
-    if (s.status !== 'running') return s;
-    await sleep(100);
+const mod = (filename, hash, display) => ({
+  filename,
+  default_enabled: true,
+  source: { type: 'smrt_cache', sha1: hash },
+  ...(display ? { display } : {}),
+  pulled: false,
+});
+
+const config = (mods, note) => ({
+  pack_id: PACK,
+  display_name: 'Preview',
+  tagline: 'What a build looks like before it is one',
+  minecraft_version: '1.12.2',
+  loader: { name: 'forge', version: '14.23.5.2860' },
+  java_major: 8,
+  version: '0.1',
+  tags: ['demo'],
+  featured: false,
+  mods,
+  assets: [],
+  pack_meta: {
+    icon_url: null,
+    banner_url: null,
+    gallery_urls: [],
+    description_md: `# Preview\n\n${note}\n\n- a list item\n- and another`,
+  },
+  owner: 0,
+  tier: 'official',
+  visibility: 'published',
+});
+
+async function buildAndWait(message) {
+  await api('POST', `/v1/authoring/packs/${PACK}/commits`, { message });
+  const { job_id } = await api('POST', `/v1/authoring/packs/${PACK}/build`);
+  for (let i = 0; i < 700; i++) {
+    const s = await api('GET', `/v1/jobs/${job_id}`);
+    if (s.status !== 'running') {
+      if (s.status !== 'done') throw new Error(`build failed:\n  ${s.log.slice(-3).join('\n  ')}`);
+      return s;
+    }
+    await sleep(500);
   }
   throw new Error('build timeout');
 }
 
-const mod = (filename, sha, required, defaultEnabled, display) => ({
-  filename,
-  required,
-  default_enabled: defaultEnabled,
-  source: { type: 'smrt_cache', sha1: sha },
-  display,
-});
-
 // ── seed ────────────────────────────────────────────────────────────────────
-const J = {};
-for (const k of ['JEI', 'JEI2', 'REI', 'JM', 'XA', 'AS', 'MB', 'QK', 'CA', 'CB']) {
-  J[k] = await putJar(`jar:${k}:demo-content`);
-}
-await putStatic('Faithful.zip', 'PK fake resourcepack bytes');
+const jei = await putJar('jei', 'Just Enough Items', '4.16.1');
+const lib = await putJar('codechickenlib', 'CodeChicken Lib', '3.2.3');
+const addon = await putJar('jeiaddon', 'JEI Addon', '1.4.0');
+console.log('seeded three jars');
 
-const baseMods = [
-  mod('JustEnoughItems.jar', J.JEI, true, true, {
-    name: 'Just Enough Items',
-    category: 'interface',
-    role: 'recipe_viewer',
-    description: 'Recipe and usage lookup for every item.',
-  }),
-  mod('RoughlyEnoughItems.jar', J.REI, false, false, {
-    name: 'Roughly Enough Items',
-    category: 'interface',
-    role: 'recipe_viewer',
-    description: 'Alternative recipe viewer.',
-  }),
-  mod('JourneyMap.jar', J.JM, false, true, {
-    name: 'JourneyMap',
-    category: 'map',
-    role: 'minimap',
-    incompatible_with: ['Xaeros.jar'],
-  }),
-  mod('Xaeros.jar', J.XA, false, false, {
-    name: "Xaero's Minimap",
-    category: 'map',
-    role: 'minimap',
-    incompatible_with: ['JourneyMap.jar'],
-  }),
-  mod('AppleSkin.jar', J.AS, true, true, {
-    name: 'AppleSkin',
-    category: 'tweaks',
-    requires: [{ filename: 'Mixinbooter.jar', version_range: '>=8.0' }],
-  }),
-  mod('Mixinbooter.jar', J.MB, true, true, { name: 'MixinBooter', category: 'library' }),
-  mod('Quark.jar', J.QK, true, true, {
-    name: 'Quark',
-    category: 'content',
-    requires: [{ filename: 'AutoRegLib.jar' }], // intentionally missing -> warning
-  }),
-];
+await api(
+  'PUT',
+  `/v1/authoring/packs/${PACK}/config`,
+  config([mod('jei-4.16.1.jar', jei), mod('codechickenlib-3.2.3.jar', lib)], 'The published build.'),
+);
+await buildAndWait('the published build');
+console.log('published v1');
 
-const cfgBase = {
-  pack_id: PACK,
-  display_name: 'Preview Pack',
-  tagline: 'Exercising the launcher-faithful preview.',
-  minecraft_version: '1.12.2',
-  loader: { name: 'forge', version: '14.23.5.2860' },
-  java_major: 8,
-  tags: ['tech', 'demo'],
-  featured: true,
-  mods: baseMods,
-  assets: [
-    {
-      dest: 'resourcepacks/Faithful.zip',
-      required: false,
-      source: { type: 'smrt_static', rel_path: 'Faithful.zip' },
-      display: { name: 'Faithful 32x' },
-    },
-  ],
-};
+// stage a change, so the preview has something to differ from
+await api(
+  'PUT',
+  `/v1/authoring/packs/${PACK}/config`,
+  config(
+    [
+      mod('jei-4.16.1.jar', jei),
+      mod('codechickenlib-3.2.3.jar', lib),
+      mod('jeiaddon-1.4.0.jar', addon, {
+        requires: [{ filename: 'jei-4.16.1.jar', optional: false }],
+      }),
+    ],
+    'One mod more than what is published.',
+  ),
+);
+console.log('staged v2');
 
-await putConfig(cfgBase);
-await putCurator(`[pack_meta]
-description_md = """
-# Preview Pack
-
-A **launcher-faithful** preview, rendered from the resolved manifest.
-
-- role-grouped recipe viewers and minimaps
-- a missing dependency and a dependency *cycle*
-- an incompatible minimap pair
-
-See \`config.json\` for the authored source.
-"""
-`);
-
-console.log('build v1:', (await build(false)).status);
-
-// v2: change JEI's jar (updated) + add a dependency-cycle pair (added).
-const cfgV2 = {
-  ...cfgBase,
-  mods: [
-    mod('JustEnoughItems.jar', J.JEI2, true, true, baseMods[0].display),
-    ...baseMods.slice(1),
-    mod('CycleA.jar', J.CA, false, true, {
-      name: 'Cycle A',
-      requires: [{ filename: 'CycleB.jar' }],
-    }),
-    mod('CycleB.jar', J.CB, false, true, {
-      name: 'Cycle B',
-      requires: [{ filename: 'CycleA.jar' }],
-    }),
-  ],
-};
-await putConfig(cfgV2);
-console.log('seeded; v2 staged (unpublished).');
-
-// ── shot ──────────────────────────────────────────────────────────────────────
-const browser = await puppeteer.launch({
-  executablePath: EXE,
-  headless: true,
-  args: ['--no-sandbox', '--disable-gpu', '--hide-scrollbars'],
-  defaultViewport: { width: 1440, height: 1200, deviceScaleFactor: 2 },
-});
-
+// ── shoot ───────────────────────────────────────────────────────────────────
+const browser = await launch({ width: 1280, height: 1000 });
 try {
-  const page = await browser.newPage();
-  await page.goto(`${BASE}/admin`, { waitUntil: 'networkidle0' });
-  await page.waitForSelector('input[type=password]', { timeout: 6000 });
-  await page.type('input[type=password]', TOKEN);
-  await Promise.all([
-    page.click('button[type=submit]'),
-    page.waitForSelector('.tiles', { timeout: 8000 }),
-  ]);
-  await page.evaluate(() =>
-    [...document.querySelectorAll('.tab')].find((b) => b.textContent.trim() === 'Packs')?.click(),
-  );
+  const page = await signedIn(browser);
+  await page.goto(`${BASE}/packs/${encodeURIComponent(PACK)}`, { waitUntil: 'networkidle0' });
+  await page.waitForSelector('[role=tab]', { timeout: 8000 });
+  await editorTab(page, 'Config');
   await sleep(400);
-  await page.click('td.actions button');
-  await sleep(500);
-  await page.evaluate(() =>
-    [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Preview')?.click(),
-  );
-  await page.waitForSelector('.preview .hero', { timeout: 30000 });
-  await sleep(900);
-  await page.screenshot({ path: `${OUT}/smrt-preview.png`, fullPage: true });
-
-  // Expand every dependency tree + the diff details for a second shot.
-  await page.evaluate(() => {
-    document.querySelectorAll('.preview .exp').forEach((b) => b.click());
-    document.querySelectorAll('.preview .link').forEach((b) => b.click());
-    document.querySelectorAll('.preview .sechead').forEach((b) => b.click());
-  });
-  await sleep(500);
-  await page.screenshot({ path: `${OUT}/smrt-preview-expanded.png`, fullPage: true });
-
-  const sections = await page.$$eval('.preview section', (els) => els.length);
-  const warns = await page.$$eval('.preview .warn-line', (els) => els.map((e) => e.textContent.trim()));
-  console.log('preview sections:', sections);
-  console.log('resolver warnings:', JSON.stringify(warns, null, 2));
+  if (!(await clickByText(page, 'button', 'Preview'))) throw new Error('no Preview button');
+  // the preview is a dry run: resolve, classify, then render what a launcher
+  // would show. It waits out a pending harvest first, so give it room.
+  await page.waitForSelector('.hero, .jl .st.bad', { timeout: 400_000 });
+  await sleep(1500);
+  await shoot(page, 'smrt-preview');
+  const rows = await page.$$eval('.mrow, .modrow, .prow', (els) => els.length);
+  console.log(`preview rendered with ${rows} row(s)`);
 } finally {
   await browser.close();
 }

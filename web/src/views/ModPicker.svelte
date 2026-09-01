@@ -45,20 +45,29 @@
   let upstreamVersions = $state<ModrinthVersion[]>([]);
   let versionsBusy = $state(false);
 
+  // Which search is the current one. The debounce narrows the window; it does
+  // not close it, and a slow first request landing after a narrower second
+  // leaves rows on screen that do not answer what is typed above them.
+  let generation = 0;
+
   async function search() {
     const query = q.trim();
     if (!query) {
       hits = [];
       return;
     }
+    const mine = ++generation;
     busy = true;
     err = '';
     try {
-      hits = await api.searchMods(query, { mc, loader, pack: packId });
+      const found = await api.searchMods(query, { mc, loader, pack: packId });
+      if (mine !== generation) return;
+      hits = found;
     } catch (e) {
+      if (mine !== generation) return;
       err = e instanceof ApiError ? `${e.status} ${e.body}` : String(e);
     } finally {
-      busy = false;
+      if (mine === generation) busy = false;
     }
   }
   function onInput() {
@@ -68,12 +77,19 @@
   // svelte-ignore state_referenced_locally -- fires once for the prefill
   if (q.trim()) void search();
 
-  // A hit is already in the pack when its identity is: the Modrinth project, or
-  // -- for a mirror-only mod -- any of the artifacts the pack declares by hash.
-  // Version is deliberately not part of it: another build of a mod the pack
-  // ships is still that mod.
+  // A hit is already in the pack when its identity is: the Modrinth project,
+  // or -- for a mirror-only mod -- the newest artifact the mirror holds for it,
+  // which is the sha1 the hit carries. Version is deliberately not part of the
+  // Modrinth half: another build of a mod the pack ships is still that mod.
+  //
+  // The hash half is one artifact rather than all of them, because that is what
+  // a search hit carries. So a pack shipping an older build of a mirror-only mod
+  // is not recognised and the mod is offered again. Erring that way on purpose:
+  // a false "already in the pack" disables the button on a mod somebody wants,
+  // which is worse than a duplicate row the editor already refuses on save.
   const inPack = (h: ModHit) =>
-    !!h.modrinth_project_id && presentSet.has(`m:${h.modrinth_project_id}`);
+    (!!h.modrinth_project_id && presentSet.has(`m:${h.modrinth_project_id}`)) ||
+    (!!h.icon_sha1 && presentSet.has(`c:${h.icon_sha1}`));
 
   async function open(h: ModHit) {
     sel = h;

@@ -103,6 +103,48 @@ for the full cascade and for bytecode-only. Re-run it (plus
 signals, edge grading, or metadata extraction; `docs/side-required-audit.md`
 records the accepted baseline and why each disagreement is tolerated.
 
+## Driving the panel headless
+
+`web/scripts/` holds eight scripts that open the panel in a real browser: the
+screenshot sweeps (`shot`, `branding-shot`, `structured-shot`, `picker-shot`,
+`preview-shot`) and the two end-to-end checks (`pack-editor-check` drives the
+whole authoring loop to a published build; `upload-check` drives a cache-jar
+upload). They share `scripts/lib/harness.mjs`, which is the only place that
+knows how to launch a browser and sign in -- six of them used to carry their own
+copy, and five of those still typed a token into a form that has answered `410`
+since sign-in became GitHub OAuth.
+
+They are run by hand, not by `pnpm`, and they need a browser and a session:
+
+```
+cd web
+FIREFOX=/usr/bin/firefox BASE=http://127.0.0.1:9000 SESSION=<cookie> OUT=/tmp/shots \
+  node scripts/shot.mjs
+```
+
+`SESSION` is the `smrt_session` cookie: sign in to the panel in a real browser
+and copy it out of DevTools (Application > Cookies -- it is HttpOnly, so
+`document.cookie` will not show it). Against a throwaway local mirror, minting
+one directly is quicker and needs no OAuth app:
+
+```
+sqlite3 <storage>/accounts.db "
+  INSERT INTO users (github_uid, login, role, created_at, last_login_at)
+  VALUES (1, 'local-operator', 'admin', strftime('%s','now'), strftime('%s','now'));
+  INSERT INTO sessions (id, user_id, created_at, expires_at)
+  VALUES ('localdev', last_insert_rowid(), strftime('%s','now'), strftime('%s','now') + 86400);
+  INSERT INTO terms_acceptance (github_uid, accepted_at) VALUES (1, strftime('%s','now'));"
+```
+
+Then `SESSION=localdev`. Never on a mirror anyone else uses: it is a session
+nobody signed in for.
+
+The scripts drive the panel in English (the harness sets `smrt.locale` before
+the app loads) so the labels they click are deterministic. The locale switch is
+on the login page and in Settings; there is none in the shell, which is what a
+script clicking for one used to miss silently -- and then navigate a Russian
+rail by English labels, screenshotting whatever happened to be on screen.
+
 ## Local run against real data
 
 ```

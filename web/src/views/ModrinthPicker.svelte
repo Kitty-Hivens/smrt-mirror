@@ -60,19 +60,28 @@
     void search();
   }
 
+  // Which search is the current one -- see the same guard in ModPicker: the
+  // debounce shortens the window but a slow request can still land after a
+  // narrower one and answer the wrong query.
+  let generation = 0;
+
   async function search() {
     if (!q.trim()) {
       hits = [];
       return;
     }
+    const mine = ++generation;
     busy = true;
     err = '';
     try {
-      hits = await api.modrinthSearch(q.trim(), mc, projectType);
+      const found = await api.modrinthSearch(q.trim(), mc, projectType);
+      if (mine !== generation) return;
+      hits = found;
     } catch (e) {
+      if (mine !== generation) return;
       err = e instanceof ApiError ? `${e.status} ${e.body}` : String(e);
     } finally {
-      busy = false;
+      if (mine === generation) busy = false;
     }
   }
 
