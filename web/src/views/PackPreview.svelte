@@ -124,21 +124,23 @@
   </div>
 
 
+  <!-- One wait at a time. A preview is a full dry-run build on the mirror, so
+       the moment there is a job to watch, the log is the honest thing to show:
+       it says what is happening, where a placeholder only promises that rows
+       are about to land. The placeholder covers the gap before the job exists,
+       which is one request long. -->
   {#if running && !jobId}
     <div class="note">{t('prev.starting')}</div>
-  {/if}
-  {#if jobId && (running || showLog)}
-    {#key jobId}<JobLog {jobId} onDone={onJobDone} />{/key}
-  {/if}
-
-  {#if running && !manifest}
-    <!-- a preview needs a full dry-run build, so shape the wait as a loading
-         placeholder rather than an empty panel that reads as broken -->
     <div class="skeleton" aria-hidden="true">
       <div class="sk sk-hero"></div>
       <div class="sk sk-row"></div>
       <div class="sk sk-row"></div>
       <div class="sk sk-row"></div>
+    </div>
+  {/if}
+  {#if jobId && (running || showLog)}
+    <div class="wait">
+      {#key jobId}<JobLog {jobId} onDone={onJobDone} />{/key}
     </div>
   {/if}
 
@@ -356,7 +358,9 @@
   .preview {
     --p-bg: #121212;
     --p-surface: #1e1e1e;
-    --p-surface-2: #262626;
+    /* the top of the placeholder sweep. It was #262626, one step too small
+       against #1e1e1e to read as movement on this field. */
+    --p-surface-2: #333333;
     --p-fg: #eeeeee;
     --p-fg-dim: #b0b0b0;
     --p-accent: #bb86fc;
@@ -407,8 +411,21 @@
   }
   .note {
     color: var(--p-fg-dim);
-    margin: 14px 16px;
+    margin: 14px 16px 0;
     font-size: var(--fs-sm);
+  }
+  /* The log is a component, so it does not carry this card's inset the way the
+     blocks written here do. Without this its status word sits against the left
+     edge while everything else lines up 16px in. */
+  .wait {
+    margin: 14px 16px 0;
+  }
+  .wait :global(.jl) {
+    --jl-fg: var(--p-fg-dim);
+    --jl-bg: var(--p-bg);
+    --jl-seam: var(--p-outline);
+    --jl-ok: var(--p-ok);
+    --jl-bad: var(--p-danger);
   }
   .skeleton {
     margin: 14px 16px 0;

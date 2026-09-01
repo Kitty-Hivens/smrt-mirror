@@ -562,6 +562,7 @@ export const ru: Dict = {
   'job.done': 'готово',
   'job.failed': 'ошибка',
   'job.interrupted': '(поток лога прерван)',
+  'job.noOutputYet': 'ждём, что скажет зеркало',
 
   'prev.wouldNotStart': 'Этот пак не запустится:',
   'prev.noted': 'Также замечено:',

@@ -563,6 +563,7 @@ export const en = {
   'job.done': 'done',
   'job.failed': 'failed',
   'job.interrupted': '(log stream interrupted)',
+  'job.noOutputYet': 'waiting for the mirror to say something',
 
   'prev.wouldNotStart': 'This pack would not start:',
   'prev.noted': 'Also noted:',
