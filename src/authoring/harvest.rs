@@ -387,6 +387,11 @@ pub fn read_jar(bytes: &[u8]) -> JarReadout {
         let name = entry.name().to_string();
         let size = entry.size();
         if name.ends_with(".class") {
+            // A jar shipping the runtime classes loose (`scala/...`,
+            // `kotlin/...`) puts that language on the classpath itself.
+            if let Some(lang) = bytecode::runtime_lang(&name) {
+                signals.provided_runtimes.insert(lang.to_string());
+            }
             if let Ok(b) = read_zip_entry(&mut entry, size, &name)
                 && let Some(info) = parse_class(&b)
             {
@@ -425,6 +430,11 @@ pub fn read_jar(bytes: &[u8]) -> JarReadout {
                     let (coremod, tweaker) = bytecode::manifest_markers(&raw);
                     signals.manifest_coremod = coremod;
                     signals.manifest_tweaker = tweaker;
+                    // A coremod carrying the runtime as `ContainedDeps` hands it
+                    // to the classpath at boot -- the Scalar mechanism.
+                    signals
+                        .provided_runtimes
+                        .extend(bytecode::manifest_contained_runtimes(&raw));
                     impl_version = manifest_implementation_version(&raw);
                 }
             }
@@ -2796,6 +2806,54 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["jei"]
         );
+    }
+
+    // Scalar: a coremod whose whole job is to hand Scala to the classpath, which
+    // it carries as `ContainedDeps` rather than as loose classes. The reader has
+    // to read the provider signal off the manifest, because the consumers of
+    // `runtime:scala` are only answerable by a jar that provides it -- and this
+    // reader is the one the harvest uses, so a signal it drops is a relation the
+    // registry never gets.
+    #[test]
+    fn read_jar_reads_a_contained_deps_runtime_provider() {
+        use super::super::classfile::fixtures::{build_class, jar};
+        let cls = build_class(
+            "com/cleanroommc/scalar/ScalarLoadingPlugin",
+            &["scala/Predef"],
+            false,
+            None,
+        );
+        let bytes = jar(&[
+            ("com/cleanroommc/scalar/ScalarLoadingPlugin.class", &cls),
+            ("mcmod.info", br#"[{"modid":"scalar","name":"Scalar"}]"#),
+            (
+                "META-INF/MANIFEST.MF",
+                b"Manifest-Version: 1.0\r\nContainedDeps: scala-library-2.11.1.jar scala-reflect-2.11.1.jar\r\nFMLCorePlugin: com.cleanroommc.scalar.ScalarLoadingPlugin\r\n",
+            ),
+        ]);
+        let r = read_jar(&bytes);
+        assert!(
+            r.bytecode.provides_runtime.contains("scala"),
+            "a ContainedDeps scala-library reads as the provider"
+        );
+        assert!(
+            r.bytecode.needs_runtime.is_empty(),
+            "the provider's own scala reference is not a need"
+        );
+    }
+
+    // The other half of the provider signal: a jar shipping the runtime classes
+    // loose rather than as contained jars.
+    #[test]
+    fn read_jar_reads_loose_runtime_classes_as_a_provider() {
+        use super::super::classfile::fixtures::{build_class, jar};
+        let seq = build_class("scala/collection/Seq", &[], false, None);
+        let bytes = jar(&[
+            ("scala/collection/Seq.class", &seq),
+            ("mcmod.info", br#"[{"modid":"carrier","name":"Carrier"}]"#),
+        ]);
+        let r = read_jar(&bytes);
+        assert!(r.bytecode.provides_runtime.contains("scala"));
     }
 
     // Chisel/HatStand class: a Forge mod shipping no mcmod.info or mods.toml, its

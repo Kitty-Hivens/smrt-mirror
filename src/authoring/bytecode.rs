@@ -335,7 +335,7 @@ pub(crate) fn manifest_markers(raw: &[u8]) -> (bool, bool) {
 /// modern-fork loader does not bundle. `None` for everything else. These sit in
 /// `STOP_PREFIXES` (never a mod identity), so this is the only place they read
 /// as a signal rather than being dropped.
-fn runtime_lang(binary: &str) -> Option<&'static str> {
+pub(crate) fn runtime_lang(binary: &str) -> Option<&'static str> {
     if starts_with_segment(binary, "scala") {
         Some("scala")
     } else if starts_with_segment(binary, "kotlin") {
