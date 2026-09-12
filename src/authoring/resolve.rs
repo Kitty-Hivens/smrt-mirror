@@ -312,6 +312,27 @@ fn bridged_api_provided(
     Ok(provided)
 }
 
+/// The mod a selector names that this pack actually ships, when it ships one,
+/// with its index among the placed mods.
+///
+/// A selector can name several mods: the alias key is unique case-sensitively,
+/// so two eras of one mod each hold their own spelling, and the requirer does
+/// not reliably spell it the way its own era's provider does. The question a
+/// pack answers is whether any of them is here, so every candidate is tried
+/// rather than whichever one a single-row lookup happened to return.
+fn selector_present(
+    conn: &Connection,
+    selector: &str,
+    by_mod_id: &HashMap<i64, usize>,
+) -> Result<Option<(i64, usize)>> {
+    for id in queries::mod_ids_for_selector(conn, selector)? {
+        if let Some(&i) = by_mod_id.get(&id) {
+            return Ok(Some((id, i)));
+        }
+    }
+    Ok(None)
+}
+
 /// A declared jar mod placed on the graph.
 struct Present {
     filename: String,
@@ -534,9 +555,7 @@ pub fn dependency_fill_plan(conn: &Connection, cfg: &PackConfig) -> Result<DepFi
             // a Recommends target the pack lacks is a curator suggestion,
             // never an auto-add
             if e.kind == RelKind::Recommends {
-                let absent = queries::mod_id_for_selector(conn, &e.target)?
-                    .and_then(|id| by_mod_id.get(&id))
-                    .is_none();
+                let absent = selector_present(conn, &e.target, &by_mod_id)?.is_none();
                 if absent && !is_loader_dep(&e.target) {
                     suggested.insert(e.target.clone());
                 }
@@ -559,7 +578,13 @@ pub fn dependency_fill_plan(conn: &Connection, cfg: &PackConfig) -> Result<DepFi
             if bridged_provided.contains(e.target.split('@').next().unwrap_or(&e.target)) {
                 continue;
             }
-            let target_mod = queries::mod_id_for_selector(conn, &e.target)?;
+            // the present candidate decides, and only falls back to a bare
+            // lookup when the pack ships none of them
+            let hit = selector_present(conn, &e.target, &by_mod_id)?;
+            let target_mod = match hit {
+                Some((id, _)) => Some(id),
+                None => queries::mod_id_for_selector(conn, &e.target)?,
+            };
             if let Some(tid) = target_mod {
                 if let std::collections::hash_map::Entry::Vacant(v) = target_class.entry(tid) {
                     v.insert(classify_target_mod(conn, tid)?);
@@ -570,8 +595,8 @@ pub fn dependency_fill_plan(conn: &Connection, cfg: &PackConfig) -> Result<DepFi
                     continue;
                 }
             }
-            match target_mod.and_then(|id| by_mod_id.get(&id)) {
-                Some(&bi) => {
+            match hit {
+                Some((_, bi)) => {
                     requires.push((a.filename.clone(), placed.present[bi].filename.clone()))
                 }
                 None => {
@@ -630,7 +655,9 @@ pub fn pack_graph(conn: &Connection, cfg: &PackConfig) -> Result<GraphData> {
     let mut edges = Vec::new();
     for p in &present {
         for e in queries::relations_for_artifact(conn, p.mod_version_id.unwrap_or(-1), p.mod_id)? {
-            let to = queries::mod_id_for_selector(conn, &e.target)?.filter(|t| in_pack.contains(t));
+            let to = queries::mod_ids_for_selector(conn, &e.target)?
+                .into_iter()
+                .find(|t| in_pack.contains(t));
             edges.push(GraphEdge {
                 from_mod_id: p.mod_id,
                 to_mod_id: to,
@@ -700,7 +727,11 @@ pub fn resolve_pack(conn: &Connection, cfg: &PackConfig) -> Result<ResolveReport
             }
             match e.kind {
                 RelKind::Requires => {
-                    let target_mod = queries::mod_id_for_selector(conn, &e.target)?;
+                    let hit = selector_present(conn, &e.target, &by_mod_id)?;
+                    let target_mod = match hit {
+                        Some((id, _)) => Some(id),
+                        None => queries::mod_id_for_selector(conn, &e.target)?,
+                    };
                     if let Some(tid) = target_mod {
                         if let std::collections::hash_map::Entry::Vacant(v) = class_of.entry(tid) {
                             v.insert(classify_target_mod(conn, tid)?);
@@ -712,7 +743,7 @@ pub fn resolve_pack(conn: &Connection, cfg: &PackConfig) -> Result<ResolveReport
                             continue;
                         }
                     }
-                    let tgt_present = target_mod.and_then(|id| by_mod_id.get(&id).copied());
+                    let tgt_present = hit.map(|(_, i)| i);
                     match tgt_present {
                         Some(bi) => {
                             let b = &present[bi];
@@ -790,9 +821,7 @@ pub fn resolve_pack(conn: &Connection, cfg: &PackConfig) -> Result<ResolveReport
                     }
                 }
                 RelKind::Conflicts => {
-                    if let Some(bi) = queries::mod_id_for_selector(conn, &e.target)?
-                        .and_then(|id| by_mod_id.get(&id).copied())
-                    {
+                    if let Some((_, bi)) = selector_present(conn, &e.target, &by_mod_id)? {
                         let pair = if ai < bi { (ai, bi) } else { (bi, ai) };
                         if conflict_seen.insert(pair) {
                             let c = ActiveConflict {
@@ -822,9 +851,7 @@ pub fn resolve_pack(conn: &Connection, cfg: &PackConfig) -> Result<ResolveReport
                 }
                 // a Recommends target the pack lacks is a curator suggestion
                 RelKind::Recommends => {
-                    let absent = queries::mod_id_for_selector(conn, &e.target)?
-                        .and_then(|id| by_mod_id.get(&id))
-                        .is_none();
+                    let absent = selector_present(conn, &e.target, &by_mod_id)?.is_none();
                     if absent && !is_loader_dep(&e.target) {
                         suggestions.insert(e.target.clone());
                     }
@@ -1117,6 +1144,80 @@ mod tests {
             Ok(id)
         })
         .unwrap()
+    }
+
+    // Two eras of one mod each hold their own spelling of the modid, and a
+    // requirer does not reliably use its own era's. A pack that ships the
+    // provider must be told the dependency is met whichever way either side
+    // spelled it: picking one row by lookup order told one era its own mods
+    // were missing, and picking the exact spelling only moved that to the
+    // other era.
+    #[test]
+    fn a_dependency_is_met_whichever_case_either_side_spelled_it() {
+        for (declared_by_provider, named_by_requirer) in
+            [("cofhcore", "CoFHCore"), ("CoFHCore", "cofhcore")]
+        {
+            let r = Registry::open_in_memory().unwrap();
+            // the other era's row exists and is NOT in the pack
+            add_mod(&r, named_by_requirer, "1.0", &"e".repeat(40));
+            let provider = add_mod(&r, declared_by_provider, "1.0", &"a".repeat(40));
+            let requirer = add_mod(&r, "thermalfoundation", "1.0", &"b".repeat(40));
+            relate(
+                &r,
+                requirer,
+                named_by_requirer,
+                None,
+                RelKind::Requires,
+                None,
+                crate::registry::model::Source::JarMeta,
+            );
+            let _ = provider;
+
+            let cfg = config(vec![
+                declared("ThermalFoundation.jar", true, cache(&"b".repeat(40))),
+                declared("CoFHCore.jar", true, cache(&"a".repeat(40))),
+            ]);
+            let report = r.with_conn(|c| resolve_pack(c, &cfg)).unwrap();
+            assert!(
+                report.missing.is_empty(),
+                "provider declares {declared_by_provider}, requirer names \
+                 {named_by_requirer}, pack ships it: {:?}",
+                report.missing.iter().map(|m| &m.target).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    // The other half of the same rule: a target nothing in the pack provides is
+    // still missing, however it is spelled.
+    #[test]
+    fn a_target_no_present_mod_provides_is_still_missing() {
+        let r = Registry::open_in_memory().unwrap();
+        add_mod(&r, "CoFHCore", "1.0", &"e".repeat(40));
+        let requirer = add_mod(&r, "thermalfoundation", "1.0", &"b".repeat(40));
+        relate(
+            &r,
+            requirer,
+            "cofhcore",
+            None,
+            RelKind::Requires,
+            None,
+            crate::registry::model::Source::JarMeta,
+        );
+        let cfg = config(vec![declared(
+            "ThermalFoundation.jar",
+            true,
+            cache(&"b".repeat(40)),
+        )]);
+        let report = r.with_conn(|c| resolve_pack(c, &cfg)).unwrap();
+        assert_eq!(
+            report
+                .missing
+                .iter()
+                .map(|m| m.target.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cofhcore"],
+            "nothing in the pack answers it, so it stays missing"
+        );
     }
 
     // A pre-build check must recognise a valid Modrinth pin: litematica depends on

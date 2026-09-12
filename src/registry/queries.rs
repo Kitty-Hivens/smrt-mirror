@@ -372,20 +372,48 @@ pub fn mod_id_for_selector(conn: &Connection, selector: &str) -> Result<Option<i
         // wrong row, and a dependency the pack plainly shipped read as missing.
         // Honouring an exact spelling gives each era the row it named, and leaves
         // the insensitive pass to do what it was added for.
-        None => {
-            if let Some(id) = mod_id_for_alias(conn, "modid", selector)? {
-                return Ok(Some(id));
-            }
-            Ok(conn
-                .query_row(
-                    "SELECT mod_id FROM mod_alias
-                     WHERE source = 'modid' AND external_key = ?1 COLLATE NOCASE",
-                    params![selector],
-                    |r| r.get::<_, i64>(0),
-                )
-                .optional()?)
+        None => Ok(mod_ids_for_selector(conn, selector)?.first().copied()),
+    }
+}
+
+/// Every mod a bare modid selector could name, the exact spelling first.
+///
+/// One selector can name several mods because the alias key is unique
+/// case-sensitively: a 1.7.10-era mod declares `CoFHCore` and its 1.12.2
+/// successor declares `cofhcore`, and both rows live. Neither spelling is
+/// authoritative -- the requirer and the provider of one era do not always
+/// agree on it either -- so asking whether a pack satisfies a dependency means
+/// asking about all of them, not about whichever the index happened to yield.
+///
+/// Ordered so a caller that can only take one gets the exact match when there
+/// is one. Callers that know which mods a pack actually ships should pick from
+/// the whole list instead; see `resolve::selector_present`.
+pub fn mod_ids_for_selector(conn: &Connection, selector: &str) -> Result<Vec<i64>> {
+    let selector = selector.split('@').next().unwrap_or(selector);
+    // A Modrinth project id is case-sensitive and names one project, so that
+    // branch has nothing to widen: answer with what it resolves to, if anything.
+    if let Some(pid) = selector.strip_prefix("modrinth:") {
+        return Ok(mod_id_for_alias(conn, "modrinth", pid)?
+            .into_iter()
+            .collect());
+    }
+    let mut out: Vec<i64> = Vec::new();
+    if let Some(exact) = mod_id_for_alias(conn, "modid", selector)? {
+        out.push(exact);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT mod_id FROM mod_alias
+         WHERE source = 'modid' AND external_key = ?1 COLLATE NOCASE
+         ORDER BY mod_id",
+    )?;
+    let rows = stmt.query_map(params![selector], |r| r.get::<_, i64>(0))?;
+    for id in rows {
+        let id = id?;
+        if !out.contains(&id) {
+            out.push(id);
         }
     }
+    Ok(out)
 }
 
 /// Cached human names for Modrinth project ids -- the display cache behind the
