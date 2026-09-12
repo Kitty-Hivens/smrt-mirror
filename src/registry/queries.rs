@@ -363,14 +363,28 @@ pub fn mod_id_for_selector(conn: &Connection, selector: &str) -> Result<Option<i
         // A Forge modid is lowercase by spec, but a dependency string routinely
         // names it in display case (`JEI` for modid `jei`), so a dep would miss its
         // present provider on case alone. Match the modid alias case-insensitively.
-        None => Ok(conn
-            .query_row(
-                "SELECT mod_id FROM mod_alias
-                 WHERE source = 'modid' AND external_key = ?1 COLLATE NOCASE",
-                params![selector],
-                |r| r.get::<_, i64>(0),
-            )
-            .optional()?),
+        //
+        // Exactly first, though. The alias key is unique case-sensitively, so one
+        // mod can be known as `cofhcore` and another as `CoFHCore` -- which is what
+        // a 1.7.10-era mod and its 1.12.2 successor actually declare. A purely
+        // case-insensitive match sees both and returns whichever the index yields,
+        // so every pack sharing the mirror with the other era resolved the same
+        // wrong row, and a dependency the pack plainly shipped read as missing.
+        // Honouring an exact spelling gives each era the row it named, and leaves
+        // the insensitive pass to do what it was added for.
+        None => {
+            if let Some(id) = mod_id_for_alias(conn, "modid", selector)? {
+                return Ok(Some(id));
+            }
+            Ok(conn
+                .query_row(
+                    "SELECT mod_id FROM mod_alias
+                     WHERE source = 'modid' AND external_key = ?1 COLLATE NOCASE",
+                    params![selector],
+                    |r| r.get::<_, i64>(0),
+                )
+                .optional()?)
+        }
     }
 }
 
@@ -1743,6 +1757,40 @@ mod tests {
             Ok(id)
         })
         .unwrap()
+    }
+
+    // Two eras of one mod declare their modid in different case, and the alias
+    // key is unique case-sensitively, so both rows exist. A purely insensitive
+    // match answered every spelling with the same row, which is how a 1.12.2
+    // pack came to be told the CoFH Core it ships is missing.
+    #[test]
+    fn an_exact_modid_spelling_beats_a_case_insensitive_one() {
+        let r = Registry::open_in_memory().unwrap();
+        let modern = a_mod(&r, "cofhcore", Some("CoFH Core"));
+        let legacy = a_mod(&r, "CoFHCore", Some("CoFH Core"));
+        assert_ne!(modern, legacy, "the two spellings are two rows");
+
+        r.with_conn(|c| {
+            assert_eq!(mod_id_for_selector(c, "cofhcore")?, Some(modern));
+            assert_eq!(mod_id_for_selector(c, "CoFHCore")?, Some(legacy));
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    // The case the insensitive match was added for still holds: a dependency
+    // naming a mod in display case finds the provider that declares it lower,
+    // when nothing claims that spelling exactly.
+    #[test]
+    fn a_display_case_selector_still_finds_the_lowercase_provider() {
+        let r = Registry::open_in_memory().unwrap();
+        let jei = a_mod(&r, "jei", Some("Just Enough Items"));
+        r.with_conn(|c| {
+            assert_eq!(mod_id_for_selector(c, "JEI")?, Some(jei));
+            assert_eq!(mod_id_for_selector(c, "nosuchmod")?, None);
+            Ok(())
+        })
+        .unwrap();
     }
 
     /// The listing a reader sees is alphabetical by the name on the row. A mod
