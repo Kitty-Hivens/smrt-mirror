@@ -20,8 +20,15 @@ export type Provenance = {
 };
 
 /**
- * `modHasVerified` is whether any artifact of the owning mod is Modrinth's own,
- * which is what makes a sibling that is not look like a repackage.
+ * `publisherCarriesMod` is whether any artifact of the owning mod was matched at
+ * either registry. That is the thing a lone unmatched file has to be read
+ * against: if the publisher ships this mod and did not ship these bytes,
+ * somebody else built them.
+ *
+ * Asking only about Modrinth made the finding depend on what else the mirror
+ * happened to hold. A relabel of a CurseForge-only mod fell silently into
+ * "published nowhere" beside our own GitHub mods, which is where seven of them
+ * were sitting.
  *
  * Order is deliberate. A file either publisher serves is theirs and that is the
  * end of it. Only once neither does can it be a repackage, and only once
@@ -34,7 +41,7 @@ export type Provenance = {
  * build and a recompile against a changed API all land here too -- but it is
  * the only state worth stopping on, so nothing else competes for the colour.
  */
-export function fileProvenance(f: VersionRow, modHasVerified: boolean): Provenance {
+export function fileProvenance(f: VersionRow, publisherCarriesMod: boolean): Provenance {
   if (f.modrinth_version_id) {
     return { key: 'mm.verified', cls: 'verified' };
   }
@@ -56,7 +63,7 @@ export function fileProvenance(f: VersionRow, modHasVerified: boolean): Provenan
   if (!cf) {
     return { key: 'mm.unasked', hintKey: 'mm.unaskedHint' };
   }
-  if (modHasVerified) {
+  if (publisherCarriesMod) {
     return { key: 'mm.notPublisher', hintKey: 'mm.notPublisherHint', cls: 'repack' };
   }
   return { key: 'mm.unpublished', hintKey: 'mm.unpublishedHint' };

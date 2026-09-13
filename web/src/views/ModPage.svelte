@@ -48,10 +48,16 @@
       });
   });
 
-  // a mod with any Modrinth-verified file: a self-hosted sibling under it reads as
-  // a likely repackage (the same signal the registry management view uses)
-  const modHasVerified = $derived(
+  // The diff compares against the genuine Modrinth build, so it needs one of
+  // those; the chip asks the wider question of whether the publisher carries
+  // this mod at either registry. Same split as the registry management view.
+  const hasModrinthSibling = $derived(
     detail?.releases.some((r) => r.files.some((f) => f.modrinth_version_id)) ?? false,
+  );
+  const publisherCarriesMod = $derived(
+    detail?.releases.some((r) =>
+      r.files.some((f) => f.modrinth_version_id || f.curseforge?.project_id),
+    ) ?? false,
   );
 
   // header icon source: a Modrinth project icon when known, else the first cached
@@ -172,7 +178,7 @@
               <span class="faint mono">{t('mm.filesN', { n: rel.files.length })}</span>
             </div>
             {#each rel.files as f (f.sha1)}
-              {@const prov = fileProvenance(f, modHasVerified)}
+              {@const prov = fileProvenance(f, publisherCarriesMod)}
               <div class="file">
                 <ModIcon
                   name={f.filename ?? detail.name}
@@ -191,7 +197,7 @@
                   class="chip {prov.cls ?? ''}"
                   title={prov.hintKey ? t(prov.hintKey, { name: prov.name ?? '' }) : undefined}
                   >{t(prov.key)}</span>
-                {#if canDebug && !f.modrinth_version_id && modHasVerified && f.cached}
+                {#if canDebug && !f.modrinth_version_id && hasModrinthSibling && f.cached}
                   <button
                     class="link"
                     class:active={diffFor === f.sha1}

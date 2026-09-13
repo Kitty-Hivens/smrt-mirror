@@ -789,7 +789,7 @@ export const en = {
   'mm.takedownHint': 'Block this jar (copyright / policy); reversible from the removed list',
   'mm.notPublisher': "not the publisher's",
   'mm.notPublisherHint':
-    'Modrinth carries this mod but not these bytes, which is what a repackaged jar looks like',
+    'the publisher carries this mod but not these bytes, which is what a repackaged or rebuilt jar looks like',
   'mm.diff': 'diff',
   'mm.diffClasses': { one: '{n} class', other: '{n} classes' },
   'mm.diffResources': { one: '{n} resource', other: '{n} resources' },
