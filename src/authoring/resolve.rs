@@ -42,6 +42,12 @@ pub struct ResolveReport {
     pub resolved_mods: usize,
     /// A hard dependency no present mod satisfies -- the pack would crash.
     pub missing: Vec<MissingDep>,
+    /// One mod pinned twice, through two sources that look unrelated in the
+    /// config. Two builds of a mod in one instance is a crash, and the config's
+    /// own uniqueness check cannot see this one: it compares sources, and a
+    /// Modrinth project, a CurseForge project and a cached hash are three
+    /// different strings for the same mod. Only the registry knows they are.
+    pub duplicate_mods: Vec<DuplicateMod>,
     /// Two present mods the graph says cannot run together, both in the default
     /// install -- a live conflict the pack ships with.
     pub conflicts: Vec<ActiveConflict>,
@@ -106,6 +112,16 @@ pub struct ResolveReport {
     /// `Recommends` targets absent from the pack -- curator suggestions with a
     /// manual add action, never auto-added.
     pub suggestions: Vec<String>,
+}
+
+/// One mod a pack pinned twice through two different sources.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "bindings/")]
+pub struct DuplicateMod {
+    /// The mod as the registry names it.
+    pub name: String,
+    /// Every row that pinned it, in declaration order.
+    pub filenames: Vec<String>,
 }
 
 /// One Modrinth-vs-bytecode side conflict on a declared mod.
@@ -377,11 +393,18 @@ fn place_mods(conn: &Connection, cfg: &PackConfig) -> Result<PlacedMods> {
                     continue;
                 }
             },
-            // Nothing is held locally and nothing was harvested, so there is
-            // no identity to check here. The build resolves it against
-            // CurseForge, the same way an unharvested Modrinth pin resolves
-            // against Modrinth, so it is not an unidentified mod.
-            SourceDecl::CurseForge { .. } => continue,
+            // The mirror may already hold another file of this project, which
+            // is enough to know which mod it is -- and that is what makes a
+            // CurseForge pin comparable with the pack's other pins. When it
+            // holds none, the pin is still valid (the build fetches it), so
+            // this is a skip rather than an unidentified mod, the same as an
+            // unharvested Modrinth pin.
+            SourceDecl::CurseForge { project_id, .. } => {
+                match queries::mod_id_for_curseforge_project(conn, *project_id)? {
+                    Some(id) => (id, None, None, None),
+                    None => continue,
+                }
+            }
             SourceDecl::Modrinth {
                 project_id,
                 version_id,
@@ -689,12 +712,32 @@ pub fn resolve_pack(conn: &Connection, cfg: &PackConfig) -> Result<ResolveReport
     // `modrinth:<project>` dependency they cover is satisfied (present at build).
     let pinned: HashSet<&str> = pinned_projects.iter().map(String::as_str).collect();
 
-    // first declaration of a mod_id wins the index (a pack rarely ships one mod
-    // twice; if it does, the earlier row is the one findings point at)
+    // First declaration of a mod_id wins the index, so findings point at the
+    // earlier row. That a second row exists at all is itself a finding: the
+    // config's uniqueness check compares sources, and one mod reachable through
+    // Modrinth, CurseForge and our own cache has three unrelated-looking source
+    // strings. This is the only place that can tell they are one mod.
     let mut by_mod_id: HashMap<i64, usize> = HashMap::new();
+    let mut rows_per_mod: HashMap<i64, Vec<String>> = HashMap::new();
     for (i, p) in present.iter().enumerate() {
         by_mod_id.entry(p.mod_id).or_insert(i);
+        rows_per_mod
+            .entry(p.mod_id)
+            .or_default()
+            .push(p.filename.clone());
     }
+    let mut duplicate_mods: Vec<DuplicateMod> = rows_per_mod
+        .into_iter()
+        .filter(|(_, rows)| rows.len() > 1)
+        .map(|(mod_id, filenames)| DuplicateMod {
+            name: queries::mod_display_name(conn, mod_id)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| format!("#{mod_id}")),
+            filenames,
+        })
+        .collect();
+    duplicate_mods.sort_by(|a, b| a.name.cmp(&b.name));
 
     // Classification per mod id: the present mods' artifacts up front, absent
     // edge targets lazily as the walk reaches them.
@@ -1033,6 +1076,7 @@ pub fn resolve_pack(conn: &Connection, cfg: &PackConfig) -> Result<ResolveReport
     mixin_gaps.sort_by(|x, y| (&x.filename, &x.needed).cmp(&(&y.filename, &y.needed)));
 
     Ok(ResolveReport {
+        duplicate_mods,
         declared_mods: cfg.mods.len(),
         // a Modrinth pin the mirror has not harvested is resolved too -- it is a
         // valid declaration the build will fetch, not an unidentified mod
@@ -1122,6 +1166,97 @@ mod tests {
             Ok(id)
         })
         .unwrap()
+    }
+
+    /// The config's own uniqueness check compares source strings, so one mod
+    /// reached through two publishers passes it: a Modrinth project id, a
+    /// CurseForge project id and a cached hash have nothing in common to
+    /// compare. Only the registry knows they name one mod, and two builds of a
+    /// mod in one instance is a crash at load.
+    #[test]
+    fn one_mod_pinned_through_two_publishers_is_caught_here_and_nowhere_else() {
+        let r = Registry::open_in_memory().unwrap();
+        let sha = "j".repeat(40);
+        let mod_id = add_mod(&r, "jei", "4.16.1", &sha);
+        r.with_conn_mut(|c| {
+            // the mod is catalogued on Modrinth, which is what makes a Modrinth
+            // pin resolve to it rather than read as an unharvested project
+            upsert::upsert_mod_by_alias(c, &[("modid", "jei"), ("modrinth", "u6dRKJwZ")], NOW)?;
+            upsert::set_mod_version_modrinth(c, &sha, Some("MR_VERSION"), NOW)?;
+            // another file of the same mod, published on CurseForge
+            let other = "k".repeat(40);
+            upsert::upsert_mod_version(
+                c,
+                mod_id,
+                "4.16.0",
+                &["forge"],
+                &other,
+                10,
+                None,
+                None,
+                NOW,
+            )?;
+            upsert::set_curseforge_file(
+                c,
+                &other,
+                7,
+                Some(&crate::authoring::curseforge::Match {
+                    project_id: 238222,
+                    file_id: 3043174,
+                    display_name: "JEI 4.16.0".into(),
+                    file_name: "jei.jar".into(),
+                    download_url: Some("https://edge.forgecdn.net/x.jar".into()),
+                    game_versions: vec!["1.12.2".into()],
+                }),
+                NOW,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let cfg = config(vec![
+            declared(
+                "jei.jar",
+                true,
+                SourceDecl::Modrinth {
+                    project_id: "u6dRKJwZ".into(),
+                    version_id: "MR_VERSION".into(),
+                },
+            ),
+            declared(
+                "jei-again.jar",
+                true,
+                SourceDecl::CurseForge {
+                    project_id: 238222,
+                    file_id: 3043174,
+                },
+            ),
+        ]);
+
+        // the config check sees two unrelated source strings and two filenames
+        assert!(
+            cfg.duplicate_declaration().is_none(),
+            "nothing in the config itself says these are one mod"
+        );
+
+        let report = r.with_conn(|c| resolve_pack(c, &cfg)).unwrap();
+        assert_eq!(
+            report.duplicate_mods.len(),
+            1,
+            "{:?}",
+            report.duplicate_mods
+        );
+        let d = &report.duplicate_mods[0];
+        assert_eq!(d.filenames.len(), 2);
+        assert!(d.filenames.contains(&"jei.jar".to_string()));
+        assert!(d.filenames.contains(&"jei-again.jar".to_string()));
+
+        let checks = super::super::gate::check(&report);
+        assert!(
+            checks.blocking.iter().any(|l| l.contains("pinned 2 times")),
+            "it blocks the build: {:?}",
+            checks.blocking
+        );
     }
 
     fn relate(

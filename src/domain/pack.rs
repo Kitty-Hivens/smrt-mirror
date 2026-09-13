@@ -334,10 +334,9 @@ impl PackConfig {
                 SourceDecl::Modrinth { project_id, .. } => {
                     format!("modrinth project {project_id}")
                 }
-                SourceDecl::CurseForge {
-                    project_id,
-                    file_id,
-                } => format!("curseforge file {project_id}/{file_id}"),
+                SourceDecl::CurseForge { project_id, .. } => {
+                    format!("curseforge project {project_id}")
+                }
                 SourceDecl::SmrtCache { sha1 } => format!("cache jar {sha1}"),
                 SourceDecl::SmrtStatic { rel_path } => format!("static file {rel_path}"),
             };

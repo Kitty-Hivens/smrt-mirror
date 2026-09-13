@@ -1791,6 +1791,42 @@ fn curseforge_from_row(row: &rusqlite::Row<'_>, base: usize) -> Result<Option<Cu
     }))
 }
 
+/// The name to put in front of a person for one mod: whatever it is catalogued
+/// under, else its slug, else its modid. `None` only when the id is unknown.
+pub fn mod_display_name(conn: &Connection, mod_id: i64) -> Result<Option<String>> {
+    let row: Option<(Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT canonical_name, slug FROM mods WHERE id = ?1",
+            params![mod_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((canonical, slug)) = row else {
+        return Ok(None);
+    };
+    Ok(canonical.or(slug).or(modid_for_mod(conn, mod_id)?))
+}
+
+/// The mod a CurseForge project belongs to, where the mirror holds any file of
+/// it.
+///
+/// There is no alias row for this: the fingerprint leg records what CurseForge
+/// said about a jar's bytes, so the link runs through an artifact rather than
+/// through the project. Enough to answer the question that matters, which is
+/// whether a CurseForge pin and some other pin are the same mod.
+pub fn mod_id_for_curseforge_project(conn: &Connection, project_id: i64) -> Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT mv.mod_id FROM curseforge_file cf
+               JOIN mod_version mv ON mv.sha1 = cf.sha1
+              WHERE cf.project_id = ?1
+              LIMIT 1",
+            params![project_id],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
 /// What CurseForge said about one artifact, read back on its own.
 ///
 /// Every view reaches the answer through [`curseforge_from_row`], as part of the

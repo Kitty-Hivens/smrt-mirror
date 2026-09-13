@@ -81,6 +81,17 @@ pub fn check(report: &ResolveReport) -> BuildChecks {
         }
     }
 
+    // Two builds of one mod in an instance is a crash at load, not a risk to
+    // weigh, so this blocks for the same reason a missing hard dependency does.
+    for d in &report.duplicate_mods {
+        blocking.push(format!(
+            "{} is pinned {} times, as {} -- one instance cannot hold two builds of a mod",
+            d.name,
+            d.filenames.len(),
+            d.filenames.join(" and "),
+        ));
+    }
+
     for l in &report.loader_mismatch {
         blocking.push(format!(
             "{} is built for {} -- this pack runs {} and nothing present bridges it",
@@ -170,6 +181,7 @@ mod tests {
 
     fn empty() -> ResolveReport {
         ResolveReport {
+            duplicate_mods: Vec::new(),
             declared_mods: 0,
             resolved_mods: 0,
             missing: vec![],
