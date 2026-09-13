@@ -20,6 +20,7 @@ use super::classfile::parse_class;
 use super::curator::{
     JarFacts, McModInfo, clean_mc_version, mcmod_hard_deps, mcmod_modids, parse_mcmod_info,
 };
+use super::curseforge::{self, CurseForge};
 use super::mixinscan;
 use super::modmeta;
 use super::modrinth::{Modrinth, Project};
@@ -137,6 +138,10 @@ pub struct PackSeed {
 pub struct ScanData {
     pub jars: Vec<JarSeed>,
     pub packs: Vec<PackSeed>,
+    /// `sha1 -> (fingerprint, what CurseForge said)`, for the cached jars this
+    /// scan put the question to. An entry whose match is `None` is the useful
+    /// negative: asked, published nowhere. Absent means not asked this run.
+    pub curseforge: HashMap<String, (u32, Option<curseforge::Match>)>,
     /// Forge modids learned this scan by fetching a Modrinth re-upload's jar (a
     /// mod present only via Modrinth, whose bytes are not in the local cache).
     pub modrinth_modids_learned: usize,
@@ -557,6 +562,9 @@ pub fn write_scan(conn: &Connection, scan: &ScanData, now: &str) -> Result<Harve
                 filename: jar.filename.as_deref(),
             },
         )?;
+        if let Some((fingerprint, found)) = scan.curseforge.get(&jar.sha1) {
+            upsert::set_curseforge_file(conn, &jar.sha1, *fingerprint, found.as_ref(), now)?;
+        }
         if let Some(kind) = jar.kind.as_deref() {
             upsert::set_jar_class(
                 conn,
@@ -1130,6 +1138,8 @@ pub async fn scan(
     known_modid_projects: &HashSet<String>,
     known_project_aliases: &HashSet<String>,
     envless_project_aliases: &HashSet<String>,
+    curseforge: Option<&CurseForge>,
+    awaiting_curseforge: &HashSet<String>,
 ) -> Result<ScanData> {
     let inventory = storage.list_cache_inventory().await.map_err(ae)?;
     let mut size_by_sha: HashMap<String, i64> = inventory
@@ -1164,6 +1174,7 @@ pub async fn scan(
         modmeta_by_sha,
         extra_modids_by_sha,
         readout_by_sha,
+        fingerprint_by_sha,
     ) = tokio::task::spawn_blocking(move || {
         let mut mcmod: HashMap<String, McModInfo> = HashMap::new();
         let mut facts: HashMap<String, JarFacts> = HashMap::new();
@@ -1171,10 +1182,15 @@ pub async fn scan(
         let mut mm: HashMap<String, modmeta::ModMeta> = HashMap::new();
         let mut extra: HashMap<String, Vec<String>> = HashMap::new();
         let mut readouts: HashMap<String, MixinReadout> = HashMap::new();
+        // The CurseForge fingerprint is another pass over bytes this loop has
+        // already paid to read, so it is taken here rather than by reopening
+        // every jar later.
+        let mut fingerprints: HashMap<String, u32> = HashMap::new();
         for (sha, path) in jar_paths {
             let Ok(bytes) = std::fs::read(&path) else {
                 continue;
             };
+            fingerprints.insert(sha.clone(), curseforge::fingerprint(&bytes));
             let r = read_jar(&bytes);
             readouts.insert(
                 sha.clone(),
@@ -1196,7 +1212,7 @@ pub async fn scan(
                 mcmod.insert(sha.clone(), info);
             }
         }
-        (mcmod, facts, bc, mm, extra, readouts)
+        (mcmod, facts, bc, mm, extra, readouts, fingerprints)
     })
     .await
     .map_err(|e| anyhow::anyhow!("jar scan task: {e}"))?;
@@ -1285,6 +1301,35 @@ pub async fn scan(
             (HashMap::new(), false)
         }
     };
+
+    // The second identity leg. Only the jars that still owe an answer are put
+    // to it: a match is about bytes that cannot change, so it is asked once and
+    // kept, and asking again would send the fingerprint of a jar this mirror
+    // holds to a third party for nothing. Skipped entirely with no key, and a
+    // failure degrades to an empty map the way the Modrinth leg does.
+    let mut curseforge_answers: HashMap<String, (u32, Option<curseforge::Match>)> = HashMap::new();
+    if let Some(cf) = curseforge {
+        let asking: Vec<(String, u32)> = fingerprint_by_sha
+            .iter()
+            .filter(|(sha, _)| awaiting_curseforge.contains(sha.as_str()))
+            .map(|(sha, fp)| (sha.clone(), *fp))
+            .collect();
+        if !asking.is_empty() {
+            let fps: Vec<u32> = asking.iter().map(|(_, fp)| *fp).collect();
+            match cf.files_by_fingerprint(&fps).await {
+                Ok(found) => {
+                    for (sha, fp) in asking {
+                        curseforge_answers.insert(sha, (fp, found.get(&fp).cloned()));
+                    }
+                }
+                Err(e) => {
+                    // nothing is recorded on a failed call: an empty answer
+                    // written as "published nowhere" would be a lie that sticks
+                    tracing::warn!(error = %e, "curseforge lookup failed; leaving those jars unasked");
+                }
+            }
+        }
+    }
 
     // enrich metadata for Modrinth-identified jars: one batched project lookup
     // (title, slug, team, environment flags), then one batched team lookup for
@@ -1565,6 +1610,7 @@ pub async fn scan(
     Ok(ScanData {
         jars,
         packs,
+        curseforge: curseforge_answers,
         modrinth_modids_learned,
         dep_project_slugs,
         project_envs,
@@ -1576,29 +1622,35 @@ pub async fn scan(
 pub async fn run_harvest(
     storage: &Storage,
     modrinth: &Modrinth,
+    curseforge: Option<&CurseForge>,
     registry: Arc<Registry>,
 ) -> Result<HarvestReport> {
     // Modrinth projects whose mod already carries a forge modid alias -- their jar
     // was read once before, so the scan skips re-fetching it (the one-time cost).
     let reg = registry.clone();
-    let (known_modid_projects, known_project_aliases, envless_project_aliases) =
+    let asked_before = upsert::now_rfc3339();
+    let (known_modid_projects, known_project_aliases, envless_project_aliases, awaiting_curseforge) =
         tokio::task::spawn_blocking(move || {
             reg.with_conn(|c| {
                 Ok((
                     queries::modrinth_projects_with_modid(c)?,
                     queries::modrinth_project_aliases(c)?,
                     queries::modrinth_aliases_without_env(c)?,
+                    queries::shas_awaiting_curseforge(c, &asked_before)?,
                 ))
             })
         })
         .await
         .map_err(|e| anyhow::anyhow!("known-modid query task: {e}"))??;
+    let awaiting_curseforge: HashSet<String> = awaiting_curseforge.into_iter().collect();
     let scan = scan(
         storage,
         modrinth,
         &known_modid_projects,
         &known_project_aliases,
         &envless_project_aliases,
+        curseforge,
+        &awaiting_curseforge,
     )
     .await?;
     let now = upsert::now_rfc3339();
@@ -1734,6 +1786,7 @@ mod tests {
                 ],
                 conflicts: vec![("sha_a".into(), "sha_b".into())],
             }],
+            curseforge: HashMap::new(),
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
@@ -1846,6 +1899,7 @@ mod tests {
         let scan = ScanData {
             jars: vec![ic2, addon],
             packs: vec![],
+            curseforge: HashMap::new(),
             modrinth_modids_learned: 1,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
@@ -1886,6 +1940,7 @@ mod tests {
                 vec!["forge".into()],
             )],
             packs: vec![],
+            curseforge: HashMap::new(),
             modrinth_modids_learned: 0,
             dep_project_slugs: HashMap::from([("NvZ9ZhwE".to_string(), "autoreglib".to_string())]),
             project_envs: Default::default(),
@@ -1920,6 +1975,7 @@ mod tests {
         let scan = ScanData {
             jars: vec![cache, twin],
             packs: vec![],
+            curseforge: HashMap::new(),
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
@@ -1960,6 +2016,7 @@ mod tests {
                 vec!["forge".into()],
             )],
             packs: vec![],
+            curseforge: HashMap::new(),
             modrinth_modids_learned: 0,
             dep_project_slugs: HashMap::from([("NvZ9ZhwE".to_string(), "autoreglib".to_string())]),
             project_envs: Default::default(),
@@ -2054,6 +2111,7 @@ mod tests {
         let scan = ScanData {
             jars: vec![fmp],
             packs: vec![],
+            curseforge: HashMap::new(),
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
@@ -2187,6 +2245,7 @@ mod tests {
             // u58R1TMW is the seeded Sinytra Connector project
             jars: vec![mseed("sha_conn", "connector", "u58R1TMW", &[])],
             packs: vec![],
+            curseforge: HashMap::new(),
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
@@ -2215,6 +2274,7 @@ mod tests {
         let plain = ScanData {
             jars: vec![mseed("sha_plain", "plain", "SOMEPROJ", &[])],
             packs: vec![],
+            curseforge: HashMap::new(),
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
@@ -2246,6 +2306,7 @@ mod tests {
         let scan = ScanData {
             jars: vec![needer, carrier],
             packs: vec![],
+            curseforge: HashMap::new(),
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
@@ -2319,6 +2380,7 @@ mod tests {
                 ),
             ],
             packs: vec![],
+            curseforge: HashMap::new(),
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
@@ -2411,6 +2473,7 @@ mod tests {
                 ),
             ],
             packs: vec![],
+            curseforge: HashMap::new(),
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
@@ -2464,6 +2527,7 @@ mod tests {
                 dseed("sha_c", "modc", &["modc/core"], &["org/shaded"], &[], None),
             ],
             packs: vec![],
+            curseforge: HashMap::new(),
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
@@ -2501,6 +2565,7 @@ mod tests {
                 dseed("sha_ae2", "ae2", &["appeng/api"], &[], &[], None),
             ],
             packs: vec![],
+            curseforge: HashMap::new(),
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
@@ -2592,6 +2657,7 @@ mod tests {
         let scan = ScanData {
             jars: vec![host, npc],
             packs: vec![],
+            curseforge: HashMap::new(),
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
@@ -2635,6 +2701,7 @@ mod tests {
                 ],
             )],
             packs: vec![],
+            curseforge: HashMap::new(),
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
@@ -2700,6 +2767,7 @@ mod tests {
         let scan = ScanData {
             jars: vec![a, dseed("sha_ae2", "ae2", &["appeng/api"], &[], &[], None)],
             packs: vec![],
+            curseforge: HashMap::new(),
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
@@ -2744,6 +2812,7 @@ mod tests {
                 dseed("sha_ae2", "ae2", &["appeng/api"], &[], &[], None),
             ],
             packs: vec![],
+            curseforge: HashMap::new(),
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
@@ -2891,6 +2960,7 @@ mod tests {
                 jar("sha_y", "dup", None, vec!["forge".into()]),
             ],
             packs: vec![],
+            curseforge: HashMap::new(),
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
@@ -2923,6 +2993,7 @@ mod tests {
                 jar("sha_any", "tweak", Some("1"), vec![]),
             ],
             packs: vec![],
+            curseforge: HashMap::new(),
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
@@ -2945,6 +3016,7 @@ mod tests {
         let scan2 = ScanData {
             jars: vec![jar("sha_multi", "multi", Some("1"), vec!["forge".into()])],
             packs: vec![],
+            curseforge: HashMap::new(),
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
@@ -2972,6 +3044,7 @@ mod tests {
                 vec!["forge".into(), "fabric".into()],
             )],
             packs: vec![],
+            curseforge: HashMap::new(),
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
@@ -2991,6 +3064,7 @@ mod tests {
         let scan2 = ScanData {
             jars: vec![jar("sha_p", "pmod", Some("1"), vec!["forge".into()])],
             packs: vec![],
+            curseforge: HashMap::new(),
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
@@ -3024,6 +3098,7 @@ mod tests {
         let scan_with = |envs: &[(&str, &str, &str)]| ScanData {
             jars: vec![a.clone()],
             packs: vec![],
+            curseforge: HashMap::new(),
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: envs
@@ -3088,6 +3163,7 @@ mod tests {
                 vec!["forge".into()],
             )],
             packs: vec![],
+            curseforge: HashMap::new(),
             modrinth_modids_learned: 0,
             dep_project_slugs: HashMap::from([("NvZ9ZhwE".to_string(), "autoreglib".to_string())]),
             project_envs: HashMap::from([(
@@ -3123,6 +3199,7 @@ mod tests {
         let scan = ScanData {
             jars: vec![a],
             packs: vec![],
+            curseforge: HashMap::new(),
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),

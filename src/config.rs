@@ -28,6 +28,10 @@ pub struct Config {
     /// GitHub numeric user ids granted the debug role on sign-in -- the rung above
     /// admin (#39). A uid here outranks the admin allowlist.
     pub debug_github_uids: Vec<u64>,
+    /// Key for the CurseForge metadata API, used server side only to ask whose
+    /// file a cached jar is. Absent leaves the harvest with the Modrinth
+    /// identity leg alone, which is what it had before.
+    pub curseforge_api_key: Option<String>,
 }
 
 impl Config {
@@ -66,6 +70,7 @@ impl Config {
         let admin_github_uids = parse_uids("SMRT_ADMIN_GITHUB_UIDS");
         let debug_github_uids = parse_uids("SMRT_DEBUG_GITHUB_UIDS");
         let debug_token = std::env::var("SMRT_DEBUG_TOKEN").ok();
+        let curseforge_api_key = nonempty("SMRT_CURSEFORGE_API_KEY");
 
         Ok(Self {
             bind_addr,
@@ -78,6 +83,7 @@ impl Config {
             admin_github_uids,
             debug_token,
             debug_github_uids,
+            curseforge_api_key,
         })
     }
 }

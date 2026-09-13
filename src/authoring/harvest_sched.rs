@@ -5,6 +5,7 @@
 //! harvest runs at a time since the worker is a single task. The manual
 //! `/registry/harvest` endpoint stays as an immediate force-refresh.
 
+use super::curseforge::CurseForge;
 use super::harvest;
 use super::harvest::HarvestReport;
 use super::modrinth::Modrinth;
@@ -42,6 +43,9 @@ pub struct HarvestStatus {
 pub struct HarvestScheduler {
     storage: Arc<Storage>,
     modrinth: Arc<Modrinth>,
+    /// Absent when no CurseForge key is configured. The harvest then runs with
+    /// the Modrinth identity leg alone, which is what it did before this existed.
+    curseforge: Option<Arc<CurseForge>>,
     registry: Arc<Registry>,
     /// Announced to when a run rewrites the index, so a registry view learns it
     /// went stale instead of finding out on its next refresh.
@@ -61,12 +65,14 @@ impl HarvestScheduler {
     pub fn new(
         storage: Arc<Storage>,
         modrinth: Arc<Modrinth>,
+        curseforge: Option<Arc<CurseForge>>,
         registry: Arc<Registry>,
         events: Arc<MirrorEvents>,
     ) -> Arc<Self> {
         Arc::new(Self {
             storage,
             modrinth,
+            curseforge,
             registry,
             events,
             wake: Notify::new(),
@@ -154,13 +160,14 @@ impl HarvestScheduler {
                 // Run in a child task so a panic deep in harvest is isolated and
                 // logged instead of killing this loop and silently stopping all
                 // auto-harvests for the rest of the process.
-                let (storage, modrinth, registry) = (
+                let (storage, modrinth, curseforge, registry) = (
                     self.storage.clone(),
                     self.modrinth.clone(),
+                    self.curseforge.clone(),
                     self.registry.clone(),
                 );
                 let run = tokio::spawn(async move {
-                    harvest::run_harvest(&storage, &modrinth, registry).await
+                    harvest::run_harvest(&storage, &modrinth, curseforge.as_deref(), registry).await
                 });
                 let result = run.await;
                 let mut harvested = false;
@@ -211,6 +218,7 @@ mod tests {
         HarvestScheduler::new(
             Arc::new(Storage::new(std::env::temp_dir().join("smrt-sched-test"))),
             Arc::new(Modrinth::with_base("http://127.0.0.1:9").unwrap()),
+            None,
             Arc::new(Registry::open_in_memory().unwrap()),
             Arc::new(MirrorEvents::default()),
         )

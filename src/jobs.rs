@@ -692,6 +692,7 @@ mod tests {
             admin_github_uids: Vec::new(),
             debug_token: None,
             debug_github_uids: Vec::new(),
+            curseforge_api_key: None,
         }
     }
 
