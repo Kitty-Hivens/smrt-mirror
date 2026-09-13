@@ -520,6 +520,7 @@ fn identity(m: &DeclaredMod) -> String {
 fn pin(source: &SourceDecl) -> String {
     match source {
         SourceDecl::Modrinth { version_id, .. } => version_id.clone(),
+        SourceDecl::CurseForge { file_id, .. } => file_id.to_string(),
         SourceDecl::SmrtCache { sha1 } => sha1.clone(),
         SourceDecl::SmrtStatic { rel_path } => rel_path.clone(),
     }

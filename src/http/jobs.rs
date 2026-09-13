@@ -137,6 +137,7 @@ async fn build_pack(
             registry: state.registry.clone(),
             accounts: state.accounts.clone(),
             modrinth: state.modrinth.clone(),
+            curseforge: state.curseforge.clone(),
             harvest: Some(state.harvest.clone()),
             events: state.events.clone(),
         },

@@ -907,6 +907,7 @@
   // ── mods ──
   function blankSource(type: SourceDecl['type']): SourceDecl {
     if (type === 'modrinth') return { type, project_id: '', version_id: '' };
+    if (type === 'curseforge') return { type, project_id: 0, file_id: 0 };
     if (type === 'smrt_cache') return { type, sha1: '' };
     return { type, rel_path: '' };
   }
@@ -1018,6 +1019,9 @@
   function sourceKey(s: SourceDecl): string {
     if (s.type === 'smrt_cache') return `c:${s.sha1}`;
     if (s.type === 'modrinth') return `m:${s.project_id}`;
+    // the project, not the file: another file of the same project is a re-pin
+    // of this row, the same way another Modrinth version is
+    if (s.type === 'curseforge') return `cf:${s.project_id}`;
     return `s:${s.rel_path}`;
   }
 
@@ -1455,6 +1459,9 @@
                   {:else if m.source.type === 'modrinth'}
                     <button class="sm" onclick={() => (pick = { src: 'modrinth', row: i })}>{t('pe.choose')}</button>
                     <span class="refval mono faint">{m.source.project_id || t('pe.unset')}</span>
+                  {:else if m.source.type === 'curseforge'}
+                    <input class="mono num" type="number" bind:value={m.source.project_id} placeholder="project_id" aria-label={t('pe.projectId')} />
+                    <input class="mono num" type="number" bind:value={m.source.file_id} placeholder="file_id" aria-label={t('pe.fileId')} />
                   {:else}
                     <input class="mono" bind:value={m.source.rel_path} placeholder="rel_path" aria-label={t('pe.relPath')} />
                   {/if}
@@ -1531,6 +1538,8 @@
                         <input class="mono" bind:value={a.source.version_id} placeholder="version_id" aria-label={t('pe.versionId')} />
                       {:else if a.source.type === 'smrt_cache'}
                         <input class="mono" bind:value={a.source.sha1} placeholder="sha1" aria-label={t('pe.sha1')} />
+                      {:else if a.source.type === 'curseforge'}
+                        <span class="faint">{t('pe.cfAssetsUnsupported')}</span>
                       {:else}
                         <input class="mono" bind:value={a.source.rel_path} placeholder="rel_path" aria-label={t('pe.relPath')} />
                       {/if}

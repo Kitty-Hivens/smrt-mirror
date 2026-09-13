@@ -334,6 +334,7 @@ pub async fn preview_fill(
                 filename: m.filename.clone(),
                 source: match &m.source {
                     SourceDecl::Modrinth { .. } => "modrinth".to_string(),
+                    SourceDecl::CurseForge { .. } => "curseforge".to_string(),
                     SourceDecl::SmrtCache { .. } => "cache".to_string(),
                     SourceDecl::SmrtStatic { .. } => "static".to_string(),
                 },
@@ -349,6 +350,7 @@ pub async fn preview_fill(
 fn source_identity(s: &SourceDecl) -> String {
     match s {
         SourceDecl::Modrinth { project_id, .. } => format!("m:{project_id}"),
+        SourceDecl::CurseForge { project_id, .. } => format!("cf:{project_id}"),
         SourceDecl::SmrtCache { sha1 } => format!("c:{sha1}"),
         SourceDecl::SmrtStatic { rel_path } => format!("s:{rel_path}"),
     }
@@ -600,6 +602,9 @@ fn already_present(cfg: &PackConfig, decl: &DeclaredMod) -> bool {
             .mods
             .iter()
             .any(|m| matches!(&m.source, SourceDecl::SmrtCache { sha1: s } if s == sha1)),
+        SourceDecl::CurseForge { project_id, .. } => cfg.mods.iter().any(
+            |m| matches!(&m.source, SourceDecl::CurseForge { project_id: p, .. } if p == project_id),
+        ),
         SourceDecl::SmrtStatic { .. } => false,
     }
 }

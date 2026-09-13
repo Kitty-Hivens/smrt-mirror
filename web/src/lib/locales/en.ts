@@ -302,6 +302,8 @@ export const en = {
   'pe.sortHint': 'Sort mods by filename',
   'pe.dest': 'destination',
   'pe.relPath': 'path in the pack static tree',
+  'pe.fileId': 'file id',
+  'pe.cfAssetsUnsupported': 'CurseForge files are mods, not pack assets',
   'pe.projectId': 'Modrinth project id',
   'pe.versionId': 'Modrinth version id',
   'pe.sha1': 'jar sha1',

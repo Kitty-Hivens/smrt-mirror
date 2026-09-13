@@ -2,8 +2,9 @@
 //! `PackManifest`, and derive the `PackSummary` card. Pure compute -- reads
 //! cache jars + Modrinth, writes nothing; the caller persists via `Storage`.
 
+use super::curseforge::CurseForge;
 use super::modrinth::Modrinth;
-use super::sources::{ModrinthCache, resolve_asset, resolve_mod, sha1_hex};
+use super::sources::{ModrinthCache, Upstream, resolve_asset, resolve_mod, sha1_hex};
 use crate::domain::{
     AssetEntry, Display, JavaSpec, LoaderSpec, MatchPolicy, MinecraftSpec, ModEntry, PackConfig,
     PackManifest, PackSummary, PresenceClass, SCHEMA_VERSION, SideClass, VersionChannel,
@@ -51,6 +52,9 @@ pub async fn build_manifest(
     classifications: &HashMap<String, Classification>,
     registry: &Arc<Registry>,
     modrinth: &Modrinth,
+    // Absent when the mirror has no CurseForge key: a pack pinning nothing
+    // there builds as before, and one that does says what is missing.
+    curseforge: Option<&CurseForge>,
 ) -> Result<Built> {
     let pack_version = match pack_version {
         Some(v) => {
@@ -87,8 +91,11 @@ pub async fn build_manifest(
             m,
             storage,
             mirror_base,
-            modrinth,
-            &modrinth_cache,
+            &Upstream {
+                modrinth,
+                modrinth_cache: &modrinth_cache,
+                curseforge,
+            },
             registry,
             &mut fell_back,
         )
@@ -604,6 +611,7 @@ mod tests {
             &HashMap::new(),
             &registry,
             &modrinth,
+            None,
         )
         .await
         .expect_err("neither jar exists");

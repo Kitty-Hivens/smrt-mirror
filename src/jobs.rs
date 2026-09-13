@@ -5,6 +5,7 @@
 //! line.
 
 use crate::accounts::{Accounts, Identity};
+use crate::authoring::curseforge::CurseForge;
 use crate::authoring::{
     self, BootstrapArgs, HarvestScheduler, Modrinth, build_manifest, enrich_from_mcmod_info, gate,
     infer_requires_from_mcmod_info, make_pack_summary,
@@ -87,6 +88,10 @@ pub struct BuildDeps {
     /// pools connections and remembers the project lookups it has already made,
     /// and both are thrown away by a client that lives for one build.
     pub modrinth: Arc<Modrinth>,
+    /// The CurseForge client, where the mirror has a key. A pack that pins no
+    /// CurseForge file never needs it; one that does fails the build with what
+    /// is missing rather than silently resolving to nothing.
+    pub curseforge: Option<Arc<CurseForge>>,
     /// The harvester to wait on (and poke afterwards), where one is running.
     pub harvest: Option<Arc<HarvestScheduler>>,
     /// Where a publish is announced, so a catalog stops being stale the moment
@@ -267,6 +272,7 @@ impl JobRegistry {
             registry,
             accounts,
             modrinth,
+            curseforge,
             harvest,
             events,
         } = deps;
@@ -298,7 +304,14 @@ impl JobRegistry {
                 }
             }
             match run_build(
-                &handle, &storage, &config, &registry, &accounts, &modrinth, req,
+                &handle,
+                &storage,
+                &config,
+                &registry,
+                &accounts,
+                &modrinth,
+                curseforge.as_ref(),
+                req,
             )
             .await
             {
@@ -361,6 +374,7 @@ async fn run_build(
     registry: &Arc<Registry>,
     accounts: &Arc<Accounts>,
     modrinth: &Arc<Modrinth>,
+    curseforge: Option<&Arc<CurseForge>>,
     req: BuildRequest,
 ) -> Result<(), String> {
     let pack_id = job.pack_id.clone();
@@ -467,7 +481,7 @@ async fn run_build(
         }
     }
 
-    job.line("resolving sources (Modrinth lookups + cache reads)");
+    job.line("resolving sources (Modrinth and CurseForge lookups + cache reads)");
     let built = build_manifest(
         &cfg,
         storage.root(),
@@ -479,6 +493,7 @@ async fn run_build(
         &classifications,
         registry,
         modrinth,
+        curseforge.map(|c| c.as_ref()),
     )
     .await
     .map_err(|e| format!("resolve failed: {e:#}"))?;
@@ -728,6 +743,7 @@ mod tests {
             registry: registry.unwrap_or_else(|| Arc::new(Registry::open_in_memory().unwrap())),
             accounts: accounts(),
             modrinth: Arc::new(crate::authoring::Modrinth::new().unwrap()),
+            curseforge: None,
             harvest: None,
             events: Arc::new(MirrorEvents::default()),
         }

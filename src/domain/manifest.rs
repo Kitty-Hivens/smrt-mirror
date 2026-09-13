@@ -287,6 +287,23 @@ pub enum Source {
         project_id: String,
         version_id: String,
     },
+    /// A published CurseForge file, resolved at build time.
+    ///
+    /// The ids are kept beside the url because they are the provenance: they say
+    /// whose file this is in a form that survives the link expiring, and they are
+    /// what the mirror would re-resolve against. `url` is absent exactly when the
+    /// project's author has disabled third-party distribution, and a launcher
+    /// meeting that has to send the player to the project page rather than
+    /// fetching anything.
+    #[serde(rename = "curseforge")]
+    CurseForge {
+        #[ts(type = "number")]
+        project_id: i64,
+        #[ts(type = "number")]
+        file_id: i64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+    },
     SmrtCache {
         url: String,
     },

@@ -133,6 +133,7 @@ fn artifact_key(source: &SourceDecl) -> Option<String> {
     match source {
         SourceDecl::SmrtCache { sha1 } => Some(sha1.clone()),
         SourceDecl::Modrinth { version_id, .. } => Some(format!("modrinth:{version_id}")),
+        SourceDecl::CurseForge { file_id, .. } => Some(format!("curseforge:{file_id}")),
         SourceDecl::SmrtStatic { .. } => None, // not a jar
     }
 }
@@ -210,6 +211,10 @@ async fn read_artifacts(
                 SourceDecl::Modrinth { version_id, .. } => {
                     Target::Remote(urls.get(version_id).cloned())
                 }
+                // Reading one needs a download url, and getting that needs the
+                // mirror's key, so what a CurseForge pin declares is read at
+                // build time rather than here.
+                SourceDecl::CurseForge { .. } => continue,
                 SourceDecl::SmrtStatic { .. } => continue,
             };
             set.spawn(async move {

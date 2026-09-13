@@ -334,6 +334,10 @@ impl PackConfig {
                 SourceDecl::Modrinth { project_id, .. } => {
                     format!("modrinth project {project_id}")
                 }
+                SourceDecl::CurseForge {
+                    project_id,
+                    file_id,
+                } => format!("curseforge file {project_id}/{file_id}"),
                 SourceDecl::SmrtCache { sha1 } => format!("cache jar {sha1}"),
                 SourceDecl::SmrtStatic { rel_path } => format!("static file {rel_path}"),
             };
@@ -426,6 +430,19 @@ pub enum SourceDecl {
     Modrinth {
         project_id: String,
         version_id: String,
+    },
+    /// A published CurseForge file, named by the two ids a pin can carry.
+    ///
+    /// No url here on purpose: resolving a file id to a download link needs the
+    /// mirror's API key, so the build does it and the manifest carries the
+    /// result. A launcher never talks to CurseForge, the same way it never needs
+    /// a key of its own.
+    #[serde(rename = "curseforge")]
+    CurseForge {
+        #[ts(type = "number")]
+        project_id: i64,
+        #[ts(type = "number")]
+        file_id: i64,
     },
     SmrtCache {
         sha1: String,

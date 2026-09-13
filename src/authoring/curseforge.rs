@@ -177,6 +177,103 @@ impl CurseForge {
     }
 }
 
+/// One published file, as the build needs it: what to download, how big it is,
+/// and what it should hash to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileInfo {
+    pub project_id: i64,
+    pub file_id: i64,
+    pub display_name: String,
+    pub file_name: String,
+    pub size_bytes: u64,
+    /// Lowercase hex, from CurseForge's own hash list. Absent when the project
+    /// publishes no sha1 for the file, which a caller has to treat as "cannot
+    /// verify" rather than as a mismatch.
+    pub sha1: Option<String>,
+    /// Absent exactly when the author has turned off third-party distribution.
+    /// The file may still be named; it may not be served.
+    pub download_url: Option<String>,
+}
+
+impl CurseForge {
+    /// One file by project and id, which is what a pin names.
+    ///
+    /// Separate from the fingerprint lookup because it answers the opposite
+    /// question: that one asks who owns bytes we already hold, this one asks
+    /// where to get bytes we do not.
+    pub async fn file(&self, project_id: i64, file_id: i64) -> Result<FileInfo> {
+        let resp = self
+            .http
+            .get(format!(
+                "{}/v1/mods/{project_id}/files/{file_id}",
+                self.base
+            ))
+            .header("x-api-key", &self.key)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .timeout(METADATA_TIMEOUT)
+            .send()
+            .await
+            .context("curseforge file get")?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(anyhow!(
+                "curseforge has no file {file_id} under project {project_id}"
+            ));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("curseforge file HTTP {status}: {body}"));
+        }
+        let parsed: FileResponse = resp.json().await.context("decode curseforge file")?;
+        let f = parsed.data;
+        if f.mod_id != project_id {
+            return Err(anyhow!(
+                "curseforge file {file_id} belongs to project {}, not {project_id}",
+                f.mod_id
+            ));
+        }
+        Ok(FileInfo {
+            project_id,
+            file_id: f.id,
+            display_name: f.display_name,
+            file_name: f.file_name,
+            size_bytes: f.file_length,
+            // algo 1 is sha1 in CurseForge's hash list; 2 is md5.
+            sha1: f
+                .hashes
+                .into_iter()
+                .find(|h| h.algo == 1)
+                .map(|h| h.value.to_ascii_lowercase()),
+            download_url: f.download_url,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct FileResponse {
+    data: FileData,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileData {
+    id: i64,
+    mod_id: i64,
+    display_name: String,
+    file_name: String,
+    file_length: u64,
+    #[serde(default)]
+    download_url: Option<String>,
+    #[serde(default)]
+    hashes: Vec<FileHash>,
+}
+
+#[derive(Deserialize)]
+struct FileHash {
+    value: String,
+    algo: i64,
+}
+
 #[derive(serde::Serialize)]
 struct FingerprintsRequest<'a> {
     fingerprints: &'a [u32],
@@ -216,6 +313,52 @@ struct MatchFile {
     game_versions: Vec<String>,
 }
 
+/// A one-route HTTP stub, the same shape the dependency-fill tests use, so
+/// these exercise the real client over a real socket without a mock-server
+/// dependency and without touching CurseForge.
+#[cfg(test)]
+pub(super) async fn stub(routes: Vec<(String, String)>) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let routes = routes.clone();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = vec![0u8; 4096];
+                let Ok(n) = sock.read(&mut buf).await else {
+                    return;
+                };
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let path = req
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or_default()
+                    .to_string();
+                let body = routes
+                    .iter()
+                    .find(|(p, _)| path.starts_with(p.as_str()))
+                    .map(|(_, b)| b.clone());
+                let resp = match body {
+                    Some(b) => format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{b}",
+                        b.len()
+                    ),
+                    None => {
+                        "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                            .to_string()
+                    }
+                };
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    base
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,5 +394,84 @@ mod tests {
     #[test]
     fn a_key_that_is_blank_is_refused_rather_than_sent() {
         assert!(CurseForge::new("   ".to_string()).is_err());
+    }
+
+    fn file_json(mod_id: i64, url: &str, sha1: Option<&str>) -> String {
+        let hashes = match sha1 {
+            // algo 2 is md5 and comes first on purpose: the reader has to pick
+            // by algorithm rather than by position.
+            Some(s) => format!(r#"[{{"value":"d41d8cd9","algo":2}},{{"value":"{s}","algo":1}}]"#),
+            None => r#"[{"value":"d41d8cd9","algo":2}]"#.to_string(),
+        };
+        format!(
+            r#"{{"data":{{"id":4242,"modId":{mod_id},"displayName":"Railcraft 12.0.0",
+               "fileName":"railcraft-12.0.0.jar","fileLength":9876,
+               "downloadUrl":{url},"hashes":{hashes}}}}}"#
+        )
+    }
+
+    #[tokio::test]
+    async fn a_file_lookup_reads_the_sha1_by_algorithm_not_by_position() {
+        let base = stub(vec![(
+            "/v1/mods/51195/files/4242".into(),
+            file_json(
+                51195,
+                r#""https://edge.forgecdn.net/x.jar""#,
+                Some("abc123"),
+            ),
+        )])
+        .await;
+        let cf = CurseForge::with_base(&base, "k".into()).unwrap();
+        let f = cf.file(51195, 4242).await.unwrap();
+        assert_eq!(f.sha1.as_deref(), Some("abc123"));
+        assert_eq!(f.size_bytes, 9876);
+        assert_eq!(
+            f.download_url.as_deref(),
+            Some("https://edge.forgecdn.net/x.jar")
+        );
+        assert_eq!(f.file_name, "railcraft-12.0.0.jar");
+    }
+
+    /// The one case where naming a file and serving it come apart.
+    #[tokio::test]
+    async fn a_file_the_author_will_not_let_us_serve_comes_back_named_but_unlinked() {
+        let base = stub(vec![(
+            "/v1/mods/300585/files/4242".into(),
+            file_json(300585, "null", Some("abc123")),
+        )])
+        .await;
+        let cf = CurseForge::with_base(&base, "k".into()).unwrap();
+        let f = cf.file(300585, 4242).await.unwrap();
+        assert!(f.download_url.is_none(), "distribution is disallowed");
+        assert_eq!(
+            f.display_name, "Railcraft 12.0.0",
+            "but it can still be named"
+        );
+    }
+
+    /// A file id is not scoped to a project, so the pair has to be checked
+    /// rather than assumed: otherwise a mistyped project would silently pin
+    /// whatever that id happens to be.
+    #[tokio::test]
+    async fn a_file_belonging_to_another_project_is_refused() {
+        let base = stub(vec![(
+            "/v1/mods/51195/files/4242".into(),
+            file_json(999, r#""https://edge.forgecdn.net/x.jar""#, Some("abc123")),
+        )])
+        .await;
+        let cf = CurseForge::with_base(&base, "k".into()).unwrap();
+        let err = cf.file(51195, 4242).await.unwrap_err().to_string();
+        assert!(
+            err.contains("999"),
+            "names the project it really belongs to: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_file_curseforge_does_not_have_says_which_one() {
+        let base = stub(vec![]).await;
+        let cf = CurseForge::with_base(&base, "k".into()).unwrap();
+        let err = cf.file(51195, 4242).await.unwrap_err().to_string();
+        assert!(err.contains("4242"), "{err}");
     }
 }

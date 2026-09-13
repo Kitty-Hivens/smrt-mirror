@@ -3,6 +3,7 @@
 //! the cache/static read-write-URL helpers the build and bootstrap passes
 //! share. Internal to the authoring layer.
 
+use super::curseforge::CurseForge;
 use super::modrinth::{Modrinth, Version as MrVersion};
 use crate::domain::{AssetEntry, DeclaredAsset, DeclaredMod, ModEntry, Source, SourceDecl};
 use crate::registry::{Registry, queries};
@@ -41,12 +42,22 @@ impl ModrinthCache {
     }
 }
 
+/// The publishers a build may have to ask, in one parameter.
+///
+/// Grouped rather than passed loose because they belong together: a pin names
+/// one of them, and a build that cannot reach the one it names has to say which
+/// it was. `curseforge` is absent when the mirror holds no key.
+pub(super) struct Upstream<'a> {
+    pub modrinth: &'a Modrinth,
+    pub modrinth_cache: &'a ModrinthCache,
+    pub curseforge: Option<&'a CurseForge>,
+}
+
 pub(super) async fn resolve_mod(
     decl: &DeclaredMod,
     storage: &Path,
     mirror_base: &str,
-    modrinth: &Modrinth,
-    cache: &ModrinthCache,
+    up: &Upstream<'_>,
     registry: &Arc<Registry>,
     fell_back: &mut Vec<String>,
 ) -> Result<ModEntry> {
@@ -72,7 +83,11 @@ pub(super) async fn resolve_mod(
             // the build would have downloaded. A pack that has been built before
             // therefore keeps building through an outage (#57); one naming a
             // version the mirror has never seen still fails, and says so.
-            match cache.get_or_fetch(modrinth, project_id, version_id).await {
+            match up
+                .modrinth_cache
+                .get_or_fetch(up.modrinth, project_id, version_id)
+                .await
+            {
                 Ok(v) => {
                     let f = v.primary_file().ok_or_else(|| {
                         anyhow!(
@@ -118,6 +133,69 @@ pub(super) async fn resolve_mod(
                 }
             }
         }
+        SourceDecl::CurseForge {
+            project_id,
+            file_id,
+        } => {
+            let Some(cf) = up.curseforge else {
+                bail!(
+                    "mod {} is pinned to CurseForge file {project_id}/{file_id}, and this mirror \
+                     has no CurseForge key configured, so it cannot resolve one. Set \
+                     SMRT_CURSEFORGE_API_KEY, or pin the file from the mirror's own cache.",
+                    decl.filename
+                );
+            };
+            let info = cf
+                .file(*project_id, *file_id)
+                .await
+                .with_context(|| format!("resolving CurseForge mod {}", decl.filename))?;
+
+            // No sha1 means the launcher would have nothing to verify the
+            // download against, which is the one thing the manifest is for.
+            let Some(sha1) = info.sha1 else {
+                bail!(
+                    "CurseForge publishes no sha1 for {}/{} ({}), so a manifest entry for mod {} \
+                     could not be verified after download",
+                    project_id,
+                    file_id,
+                    info.display_name,
+                    decl.filename
+                );
+            };
+
+            // Distribution disabled: the file may be named and must not be
+            // served. Naming it is only honest if the pack says whose it is and
+            // where to get it, so the attribution is required rather than
+            // encouraged -- a launcher has nothing else to send a player to.
+            if info.download_url.is_none() {
+                let display = decl.display.as_ref();
+                let named = display
+                    .and_then(|d| d.name.as_deref())
+                    .is_some_and(|s| !s.trim().is_empty());
+                let linked = display
+                    .and_then(|d| d.url.as_deref())
+                    .is_some_and(|s| !s.trim().is_empty());
+                if !named || !linked {
+                    bail!(
+                        "the author of CurseForge project {project_id} does not allow third-party \
+                         distribution, so mod {} cannot be served and must be named instead: give \
+                         it display.name and display.url so a player is told whose file it is and \
+                         where to get it",
+                        decl.filename
+                    );
+                }
+            }
+
+            (
+                sha1,
+                info.size_bytes,
+                Source::CurseForge {
+                    project_id: *project_id,
+                    file_id: *file_id,
+                    url: info.download_url,
+                },
+            )
+        }
         SourceDecl::SmrtCache { sha1 } => {
             let path = cache_jar_path(storage, sha1)?;
             let meta = tokio::fs::metadata(&path).await.with_context(|| {
@@ -137,7 +215,7 @@ pub(super) async fn resolve_mod(
         }
         SourceDecl::SmrtStatic { .. } => {
             bail!(
-                "mod {} uses smrt_static source -- mods must be modrinth or smrt_cache",
+                "mod {} uses smrt_static source -- mods must be modrinth, curseforge or smrt_cache",
                 decl.filename
             );
         }
@@ -194,6 +272,12 @@ pub(super) async fn resolve_asset(
                     version_id: version_id.clone(),
                 },
             )
+        }
+        SourceDecl::CurseForge { .. } => {
+            bail!(
+                "asset {} uses a curseforge source -- assets must be modrinth or smrt_static",
+                decl.dest
+            );
         }
         SourceDecl::SmrtStatic { rel_path } => {
             let path = static_asset_path(storage, pack_id, rel_path)?;
@@ -378,6 +462,141 @@ pub(super) fn sha1_hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    fn cf_decl(
+        project_id: i64,
+        file_id: i64,
+        display: Option<crate::domain::Display>,
+    ) -> DeclaredMod {
+        DeclaredMod {
+            filename: "ffe.jar".into(),
+            default_enabled: true,
+            source: SourceDecl::CurseForge {
+                project_id,
+                file_id,
+            },
+            display,
+            slug: None,
+            pulled: false,
+        }
+    }
+
+    async fn resolve_cf(
+        decl: &DeclaredMod,
+        cf: Option<&CurseForge>,
+    ) -> Result<crate::domain::ModEntry> {
+        let dir = tempfile::tempdir().unwrap();
+        let r = Arc::new(Registry::open_in_memory().unwrap());
+        let modrinth = Modrinth::with_base("http://127.0.0.1:1").unwrap();
+        let mut fell_back = Vec::new();
+        resolve_mod(
+            decl,
+            dir.path(),
+            "https://mirror.example",
+            &Upstream {
+                modrinth: &modrinth,
+                modrinth_cache: &ModrinthCache::default(),
+                curseforge: cf,
+            },
+            &r,
+            &mut fell_back,
+        )
+        .await
+    }
+
+    fn cf_file_json(mod_id: i64, url: &str) -> String {
+        format!(
+            r#"{{"data":{{"id":7,"modId":{mod_id},"displayName":"FFEnchants 1.1.5",
+               "fileName":"ffe-1.1.5.jar","fileLength":1234,"downloadUrl":{url},
+               "hashes":[{{"value":"beef","algo":1}}]}}}}"#
+        )
+    }
+
+    /// The pin is valid and the mirror simply cannot act on it, so the failure
+    /// has to say which of the two is missing rather than reading as a bad pin.
+    #[tokio::test]
+    async fn a_curseforge_pin_on_a_mirror_with_no_key_says_what_is_missing() {
+        let err = resolve_cf(&cf_decl(300585, 7, None), None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("SMRT_CURSEFORGE_API_KEY"), "{err}");
+    }
+
+    /// Naming a file we may not serve is allowed; naming it without telling the
+    /// player whose it is and where to get it is not, because the manifest is
+    /// then the only thing standing between them and a mod that never arrives.
+    #[tokio::test]
+    async fn a_file_that_may_not_be_redistributed_has_to_be_attributed() {
+        let base = super::super::curseforge::stub(vec![(
+            "/v1/mods/300585/files/7".into(),
+            cf_file_json(300585, "null"),
+        )])
+        .await;
+        let cf = CurseForge::with_base(&base, "k".into()).unwrap();
+
+        let err = resolve_cf(&cf_decl(300585, 7, None), Some(&cf))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("display.name"), "asks for the name: {err}");
+        assert!(err.contains("display.url"), "and for the link: {err}");
+
+        // a name with no link is still half an answer
+        let half = crate::domain::Display {
+            name: Some("FFEnchants".into()),
+            ..Default::default()
+        };
+        assert!(
+            resolve_cf(&cf_decl(300585, 7, Some(half)), Some(&cf))
+                .await
+                .is_err(),
+            "a name without a link does not tell a player where to go"
+        );
+
+        let full = crate::domain::Display {
+            name: Some("FFEnchants".into()),
+            url: Some("https://www.curseforge.com/minecraft/mc-mods/ffe".into()),
+            ..Default::default()
+        };
+        let entry = resolve_cf(&cf_decl(300585, 7, Some(full)), Some(&cf))
+            .await
+            .expect("attributed, so it may be named");
+        assert_eq!(entry.sha1, "beef");
+        match entry.source {
+            Source::CurseForge {
+                project_id,
+                file_id,
+                url,
+            } => {
+                assert_eq!((project_id, file_id), (300585, 7));
+                assert!(url.is_none(), "named, and deliberately not served");
+            }
+            other => panic!("wrong source: {other:?}"),
+        }
+    }
+
+    /// The ordinary case: the author allows it, so the manifest carries a link
+    /// and the launcher needs no key of its own.
+    #[tokio::test]
+    async fn a_distributable_file_lands_in_the_manifest_with_its_url() {
+        let base = super::super::curseforge::stub(vec![(
+            "/v1/mods/51195/files/7".into(),
+            cf_file_json(51195, r#""https://edge.forgecdn.net/x.jar""#),
+        )])
+        .await;
+        let cf = CurseForge::with_base(&base, "k".into()).unwrap();
+        let entry = resolve_cf(&cf_decl(51195, 7, None), Some(&cf))
+            .await
+            .expect("nothing to attribute when it may be served");
+        assert_eq!(entry.size_bytes, 1234);
+        match entry.source {
+            Source::CurseForge { url, .. } => {
+                assert_eq!(url.as_deref(), Some("https://edge.forgecdn.net/x.jar"));
+            }
+            other => panic!("wrong source: {other:?}"),
+        }
+    }
+
     // A build must not die because Modrinth is down. The harvest already recorded
     // the sha1 and size of every version the mirror has seen, so the registry can
     // answer for a pinned version the network cannot -- and the build says it did
@@ -424,8 +643,11 @@ mod tests {
             &decl,
             dir.path(),
             "https://mirror.example",
-            &modrinth,
-            &ModrinthCache::default(),
+            &Upstream {
+                modrinth: &modrinth,
+                modrinth_cache: &ModrinthCache::default(),
+                curseforge: None,
+            },
             &r,
             &mut fell_back,
         )
@@ -452,8 +674,11 @@ mod tests {
             &unknown,
             dir.path(),
             "https://mirror.example",
-            &modrinth,
-            &ModrinthCache::default(),
+            &Upstream {
+                modrinth: &modrinth,
+                modrinth_cache: &ModrinthCache::default(),
+                curseforge: None,
+            },
             &r,
             &mut fell_back,
         )
