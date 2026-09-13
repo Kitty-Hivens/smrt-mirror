@@ -45,18 +45,26 @@ pub fn fingerprint(bytes: &[u8]) -> u32 {
         .collect();
 
     let mut h: u32 = 1 ^ (filtered.len() as u32);
-    let mut chunks = filtered.chunks_exact(4);
-
-    for c in chunks.by_ref() {
-        let mut k = u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+    // Walked by hand rather than through a chunking iterator: the shape of this
+    // loop is the published algorithm's, and keeping it that way is worth more
+    // here than a tidier expression of it.
+    let mut i = 0usize;
+    while i + 4 <= filtered.len() {
+        let mut k = u32::from_le_bytes([
+            filtered[i],
+            filtered[i + 1],
+            filtered[i + 2],
+            filtered[i + 3],
+        ]);
         k = k.wrapping_mul(M);
         k ^= k >> R;
         k = k.wrapping_mul(M);
         h = h.wrapping_mul(M);
         h ^= k;
+        i += 4;
     }
 
-    let tail = chunks.remainder();
+    let tail = &filtered[i..];
     if tail.len() == 3 {
         h ^= u32::from(tail[2]) << 16;
     }
