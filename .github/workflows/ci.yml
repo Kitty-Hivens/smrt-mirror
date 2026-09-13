@@ -158,6 +158,37 @@ jobs:
               target/release/smrt-pack \
               "${{ secrets.SMRT_DEPLOY_HOST }}:/usr/local/bin/smrt-pack.new"
 
+      - name: install the CurseForge key on the VPS
+        # The identity leg needs a key, and the service reads it from its
+        # environment. Written by the deploy rather than set once by hand on the
+        # box, because a value living only on the VPS is lost to a rebuild or a
+        # restore and the failure is silent: the leg stops answering and the
+        # field simply goes null. Declared here it shows up in a diff and comes
+        # back with the next deploy.
+        #
+        # A drop-in, so nothing already in the unit is rewritten and systemd
+        # merges it. The key travels on stdin and is read remotely with `cat`,
+        # so it appears in no command line, no process list and no script body,
+        # and no character in it can end a quote and run as script. An empty
+        # secret removes the file rather than installing a blank key.
+        env:
+          CF_KEY: ${{ secrets.SMRT_CURSEFORGE_API_KEY }}
+        run: |
+          printf '%s' "$CF_KEY" | ssh "${{ secrets.SMRT_DEPLOY_HOST }}" '
+            set -euo pipefail
+            key="$(cat)"
+            dir=/etc/systemd/system/smrt.service.d
+            conf="$dir/10-curseforge.conf"
+            if [ -z "$key" ]; then
+              rm -f "$conf"
+            else
+              install -d -m 755 "$dir"
+              umask 077
+              printf "[Service]\nEnvironment=SMRT_CURSEFORGE_API_KEY=%s\n" "$key" > "$conf"
+            fi
+            systemctl daemon-reload
+          '
+
       - name: swap binaries + restart service + verify
         run: |
           ssh "${{ secrets.SMRT_DEPLOY_HOST }}" 'bash -se' <<'REMOTE'
