@@ -5,13 +5,14 @@
 // every jar from CurseForge, and every jar nobody had asked about yet, landed
 // in the same bucket as a genuinely unpublished one.
 
+import type { MsgKey } from './i18n.svelte';
 import type { VersionRow } from './bindings/VersionRow';
 
 export type Provenance = {
   /** Locale key for the chip text. */
-  key: string;
+  key: MsgKey;
   /** Locale key for its title, when there is something to add. */
-  hintKey?: string;
+  hintKey?: MsgKey;
   /** Interpolated into the hint: the name the publisher gave the file. */
   name?: string;
   /** Chip modifier class, matching the existing `verified` / `repack`. */
