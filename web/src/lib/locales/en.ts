@@ -781,15 +781,15 @@ export const en = {
   'mm.curseforgeNoDist': 'CurseForge, no redistribution',
   'mm.curseforgeNoDistHint':
     'published on CurseForge ({name}), but the author disallows third-party distribution: it may be named, not served',
-  'mm.selfhost': 'self-hosted',
-  'mm.selfhostHint': 'neither Modrinth nor CurseForge publishes these bytes',
+  'mm.unpublished': 'published nowhere',
+  'mm.unpublishedHint': 'neither Modrinth nor CurseForge carries this mod',
   'mm.unasked': 'not asked',
   'mm.unaskedHint': 'CurseForge has not been asked about this file yet',
   'mm.takedown': 'Take down',
   'mm.takedownHint': 'Block this jar (copyright / policy); reversible from the removed list',
-  'mm.repack': 'repack?',
-  'mm.repackHint':
-    'self-hosted jar under a mod that also has a Modrinth-verified file — likely a repackage',
+  'mm.notPublisher': "not the publisher's",
+  'mm.notPublisherHint':
+    'Modrinth carries this mod but not these bytes, which is what a repackaged jar looks like',
   'mm.diff': 'diff',
   'mm.diffClasses': { one: '{n} class', other: '{n} classes' },
   'mm.diffResources': { one: '{n} resource', other: '{n} resources' },
