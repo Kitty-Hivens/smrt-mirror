@@ -544,6 +544,19 @@ async fn run_build(
     }
 
     let modrinth = Modrinth::new()?;
+    // The CLI builds the same packs the panel does, so a CurseForge pin has to
+    // resolve here too. Built from the environment rather than passed in: this
+    // binary has no AppState to carry one.
+    let curseforge = match std::env::var("SMRT_CURSEFORGE_API_KEY") {
+        Ok(k) if !k.trim().is_empty() => match authoring::curseforge::CurseForge::new(k) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                warn!(error = %e, "curseforge client not built; a curseforge pin will fail");
+                None
+            }
+        },
+        _ => None,
+    };
     let built = authoring::build_manifest(
         &cfg,
         storage,
@@ -557,6 +570,7 @@ async fn run_build(
         &classifications,
         &registry,
         &modrinth,
+        curseforge.as_ref(),
     )
     .await?;
     let mut manifest = built.manifest;

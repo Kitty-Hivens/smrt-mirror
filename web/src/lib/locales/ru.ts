@@ -299,6 +299,8 @@ export const ru: Dict = {
   'pe.sortHint': 'Сортировать моды по имени файла',
   'pe.dest': 'назначение',
   'pe.relPath': 'путь в static паке',
+  'pe.fileId': 'id файла',
+  'pe.cfAssetsUnsupported': 'файлы CurseForge это моды, а не ассеты сборки',
   'pe.projectId': 'id проекта Modrinth',
   'pe.versionId': 'id версии Modrinth',
   'pe.sha1': 'sha1 jar-файла',

@@ -368,6 +368,9 @@ pub fn enrich_from_mcmod_info(
                 report.mods_skipped_modrinth += 1;
                 continue;
             }
+            // The mirror does not hold these bytes, so there is no jar here to
+            // read a name or a description out of.
+            SourceDecl::CurseForge { .. } => continue,
             SourceDecl::SmrtStatic { .. } => continue,
         };
 

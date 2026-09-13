@@ -73,6 +73,14 @@ fn source_decl(source: &Source, sha1: &str) -> SourceDecl {
             project_id: project_id.clone(),
             version_id: version_id.clone(),
         },
+        Source::CurseForge {
+            project_id,
+            file_id,
+            ..
+        } => SourceDecl::CurseForge {
+            project_id: *project_id,
+            file_id: *file_id,
+        },
         Source::SmrtCache { .. } => SourceDecl::SmrtCache {
             sha1: sha1.to_string(),
         },

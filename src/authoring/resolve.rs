@@ -377,6 +377,11 @@ fn place_mods(conn: &Connection, cfg: &PackConfig) -> Result<PlacedMods> {
                     continue;
                 }
             },
+            // Nothing is held locally and nothing was harvested, so there is
+            // no identity to check here. The build resolves it against
+            // CurseForge, the same way an unharvested Modrinth pin resolves
+            // against Modrinth, so it is not an unidentified mod.
+            SourceDecl::CurseForge { .. } => continue,
             SourceDecl::Modrinth {
                 project_id,
                 version_id,
