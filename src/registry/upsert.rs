@@ -687,3 +687,47 @@ pub fn link_build_mod(
     )?;
     Ok(())
 }
+
+/// Record what CurseForge said about a jar, including when it said nothing.
+///
+/// A row without a `project_id` is the useful negative: asked, matched nowhere.
+/// Writing it is the only way a later run can tell that from never having
+/// asked, and it is what keeps the question from being put again on every
+/// harvest for the same few hundred jars.
+///
+/// A match is final, because a jar's bytes do not change. A miss is not:
+/// CurseForge builds its fingerprint index lazily and a file can be published
+/// after the fact, so `asked_at` moves on every write and the caller decides
+/// how stale a miss has to be before it is worth asking again.
+pub fn set_curseforge_file(
+    conn: &Connection,
+    sha1: &str,
+    fingerprint: u32,
+    found: Option<&crate::authoring::curseforge::Match>,
+    now: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO curseforge_file
+             (sha1, fingerprint, project_id, file_id, display_name, file_name, download_url, asked_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(sha1) DO UPDATE SET
+           fingerprint  = excluded.fingerprint,
+           project_id   = excluded.project_id,
+           file_id      = excluded.file_id,
+           display_name = excluded.display_name,
+           file_name    = excluded.file_name,
+           download_url = excluded.download_url,
+           asked_at     = excluded.asked_at",
+        rusqlite::params![
+            sha1,
+            fingerprint,
+            found.map(|m| m.project_id),
+            found.map(|m| m.file_id),
+            found.map(|m| m.display_name.as_str()),
+            found.map(|m| m.file_name.as_str()),
+            found.and_then(|m| m.download_url.as_deref()),
+            now,
+        ],
+    )?;
+    Ok(())
+}

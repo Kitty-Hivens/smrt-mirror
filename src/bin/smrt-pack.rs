@@ -361,8 +361,15 @@ async fn main() -> Result<()> {
 async fn run_registry_harvest(storage: &Path) -> Result<()> {
     let store = Storage::new(storage.to_path_buf());
     let modrinth = Modrinth::new()?;
+    // The CLI harvest gets the second identity leg on the same terms the server
+    // does: only when a key is in the environment, and never fatally.
+    let curseforge = std::env::var("SMRT_CURSEFORGE_API_KEY")
+        .ok()
+        .filter(|k| !k.trim().is_empty())
+        .and_then(|k| authoring::curseforge::CurseForge::new(k).ok());
     let registry = Arc::new(Registry::open(storage.join("registry.db"))?);
-    let report = authoring::harvest::run_harvest(&store, &modrinth, registry).await?;
+    let report =
+        authoring::harvest::run_harvest(&store, &modrinth, curseforge.as_ref(), registry).await?;
     info!(
         jars = report.jars_scanned,
         no_identity = report.jars_no_identity,

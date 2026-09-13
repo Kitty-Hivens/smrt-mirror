@@ -1072,6 +1072,7 @@ pub fn file_detail(conn: &Connection, sha1: &str) -> Result<Option<FileDetail>> 
                 version_number: rel.version_number,
                 channel: rel.channel,
                 file: f.clone(),
+                curseforge: curseforge_identity(conn, sha1)?,
             }));
         }
     }
@@ -1759,6 +1760,53 @@ pub fn stats(conn: &Connection) -> Result<RegistryStats> {
              WHERE pbm.build_id IS NULL",
         )?,
     })
+}
+
+/// What CurseForge said about one artifact, for the file page.
+pub fn curseforge_identity(conn: &Connection, sha1: &str) -> Result<Option<CurseForgeIdentity>> {
+    Ok(conn
+        .query_row(
+            "SELECT fingerprint, project_id, file_id, display_name, file_name, download_url
+               FROM curseforge_file WHERE sha1 = ?1",
+            params![sha1],
+            |r| {
+                let url: Option<String> = r.get(5)?;
+                Ok(CurseForgeIdentity {
+                    fingerprint: r.get::<_, i64>(0)? as u32,
+                    project_id: r.get(1)?,
+                    file_id: r.get(2)?,
+                    display_name: r.get(3)?,
+                    file_name: r.get(4)?,
+                    distributable: url.is_some(),
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// Scanned jars that still owe a CurseForge answer: never asked, or asked and
+/// matched nothing long enough ago to be worth asking again.
+///
+/// Driven from `jar_read` rather than from `mod_version` on purpose. `jar_read`
+/// holds a row for every jar the harvest opened, written before the identity
+/// gate, while a jar nothing could identify may have no `mod_version` row at
+/// all -- and that is precisely the population this leg exists to name.
+///
+/// A matched row is never returned. Its answer cannot change, because the
+/// question is about bytes that cannot change.
+pub fn shas_awaiting_curseforge(conn: &Connection, retry_before: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT j.sha1 FROM jar_read j
+          LEFT JOIN curseforge_file cf ON cf.sha1 = j.sha1
+          WHERE cf.sha1 IS NULL
+             OR (cf.project_id IS NULL AND cf.asked_at < ?1)",
+    )?;
+    let rows = stmt.query_map(params![retry_before], |r| r.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

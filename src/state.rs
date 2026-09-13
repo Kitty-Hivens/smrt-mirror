@@ -1,4 +1,5 @@
 use crate::accounts::Accounts;
+use crate::authoring::curseforge::CurseForge;
 use crate::authoring::{HarvestScheduler, Modrinth};
 use crate::authoring::{PackDocs, PackStream};
 use crate::config::Config;
@@ -16,6 +17,9 @@ pub struct AppState {
     /// One shared Modrinth client (pooled connections) for the admin proxy
     /// handlers, instead of a fresh TLS handshake per request.
     pub modrinth: Arc<Modrinth>,
+    /// The second identity leg, present only when a key is configured. Server
+    /// side by construction: no client is ever told that CurseForge is involved.
+    pub curseforge: Option<Arc<CurseForge>>,
     /// Mod-identity registry (embedded SQLite under the storage root).
     pub registry: Arc<Registry>,
     /// Coalescing background harvester. Construction only wires the deps; call
@@ -45,16 +49,28 @@ impl AppState {
         let registry = Arc::new(Registry::open(config.storage_dir.join("registry.db"))?);
         let accounts = Arc::new(Accounts::open(config.storage_dir.join("accounts.db"))?);
         let modrinth = Arc::new(Modrinth::new()?);
+        let curseforge = match config.curseforge_api_key.clone() {
+            Some(key) => match CurseForge::new(key) {
+                Ok(c) => Some(Arc::new(c)),
+                Err(e) => {
+                    tracing::warn!(error = %e, "curseforge client not built; identity leg disabled");
+                    None
+                }
+            },
+            None => None,
+        };
         let events = Arc::new(MirrorEvents::default());
         let harvest = HarvestScheduler::new(
             storage.clone(),
             modrinth.clone(),
+            curseforge.clone(),
             registry.clone(),
             events.clone(),
         );
         Ok(Self {
             storage,
             modrinth,
+            curseforge,
             registry,
             harvest,
             config: Arc::new(config),

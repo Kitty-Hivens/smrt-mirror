@@ -96,6 +96,10 @@ const MIGRATIONS: &[(u32, Migration)] = &[
         24,
         Migration::Sql(include_str!("schema/0024_artifact_loader_req.sql")),
     ),
+    (
+        25,
+        Migration::Sql(include_str!("schema/0025_curseforge_file.sql")),
+    ),
 ];
 
 /// Apply every migration newer than the recorded schema version, each in its

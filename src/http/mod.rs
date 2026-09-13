@@ -198,6 +198,7 @@ mod tests {
             admin_github_uids: Vec::new(),
             debug_token: None,
             debug_github_uids: Vec::new(),
+            curseforge_api_key: None,
         };
         AppState::new(config).unwrap()
     }
@@ -1284,6 +1285,7 @@ mod tests {
             admin_github_uids: Vec::new(),
             debug_token: None,
             debug_github_uids: Vec::new(),
+            curseforge_api_key: None,
         };
         let app = router(AppState::new(config).unwrap());
 
@@ -1445,6 +1447,7 @@ mod tests {
             admin_github_uids: Vec::new(),
             debug_token: None,
             debug_github_uids: Vec::new(),
+            curseforge_api_key: None,
         };
         let state = AppState::new(config).unwrap();
         let _ = router(state);

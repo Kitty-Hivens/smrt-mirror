@@ -100,6 +100,85 @@ mod tests {
         .unwrap();
     }
 
+    /// The negative is the point. "Asked, and CurseForge does not know it" is
+    /// the answer that narrows a self-hosted jar down to a forgery, and it is
+    /// indistinguishable from "never asked" unless it is written down.
+    #[test]
+    fn a_curseforge_miss_is_recorded_and_not_asked_again_while_a_hit_is_final() {
+        use crate::authoring::curseforge::Match;
+        let r = Registry::open_in_memory().unwrap();
+        let hit = "a".repeat(40);
+        let miss = "b".repeat(40);
+        let never = "c".repeat(40);
+        let found = Match {
+            project_id: 243_121,
+            file_id: 2_924_091,
+            display_name: "Quark-r1.6-179.jar".into(),
+            file_name: "Quark-r1.6-179.jar".into(),
+            download_url: Some("https://example.invalid/quark.jar".into()),
+            game_versions: vec!["1.12.2".into()],
+        };
+        r.with_conn_mut(|c| {
+            // jar_read is what the leg is driven from: a jar nobody could
+            // identify has a row here and none in mod_version, and it is the
+            // one most worth asking CurseForge about.
+            for sha in [&hit, &miss, &never] {
+                upsert::set_jar_read(
+                    c,
+                    sha,
+                    &upsert::JarRead {
+                        modid: None,
+                        name: None,
+                        version: None,
+                        loaders: &[],
+                        mc: &[],
+                        filename: None,
+                    },
+                )?;
+            }
+            upsert::set_curseforge_file(
+                c,
+                &hit,
+                2_910_837_341,
+                Some(&found),
+                "2026-01-01T00:00:00Z",
+            )?;
+            upsert::set_curseforge_file(c, &miss, 1, None, "2026-01-01T00:00:00Z")?;
+            Ok(())
+        })
+        .unwrap();
+
+        r.with_conn(|c| {
+            let h = queries::curseforge_identity(c, &hit)?.expect("the hit was recorded");
+            assert_eq!(h.project_id, Some(243_121));
+            assert!(h.distributable, "a download url means it may be served");
+
+            let m = queries::curseforge_identity(c, &miss)?.expect("the miss was recorded too");
+            assert_eq!(
+                m.project_id, None,
+                "recorded, and recorded as knowing nothing"
+            );
+            assert!(!m.distributable);
+
+            // Later than both rows: the miss is due another attempt, the hit
+            // never is, and the jar nobody asked about is always due one.
+            let awaiting = queries::shas_awaiting_curseforge(c, "2026-06-01T00:00:00Z")?;
+            assert!(awaiting.contains(&miss), "a miss can become a hit later");
+            assert!(awaiting.contains(&never), "never asked is always due");
+            assert!(
+                !awaiting.contains(&hit),
+                "a match is about bytes that cannot change, so it is never re-asked"
+            );
+
+            // Earlier than the rows: the miss is not yet stale.
+            let fresh = queries::shas_awaiting_curseforge(c, "2025-01-01T00:00:00Z")?;
+            assert!(!fresh.contains(&miss));
+            assert!(fresh.contains(&never));
+            Ok(())
+        })
+        .unwrap();
+    }
+
     #[test]
     fn a_jar_the_harvest_could_not_identify_still_says_what_it_is() {
         let r = Registry::open_in_memory().unwrap();

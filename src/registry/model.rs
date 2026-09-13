@@ -471,6 +471,35 @@ pub struct FileDetail {
     pub version_number: String,
     pub channel: String,
     pub file: VersionRow,
+    /// What CurseForge says this artifact is, once it has been asked. `None`
+    /// means the question has not been put yet, which is not the same as
+    /// CurseForge not knowing it: that answers with a present value whose
+    /// `project_id` is absent.
+    pub curseforge: Option<CurseForgeIdentity>,
+}
+
+/// The outside voice on a jar's identity, for artifacts Modrinth does not
+/// carry. Keyed by content, so a rewritten version string inside the jar does
+/// not move it.
+#[derive(Debug, Clone, Serialize, TS, ToSchema)]
+#[ts(export, export_to = "bindings/")]
+pub struct CurseForgeIdentity {
+    #[ts(type = "number")]
+    pub fingerprint: u32,
+    /// Absent when the fingerprint matched nothing, which is the answer worth
+    /// having: this file is published neither here nor on Modrinth.
+    #[ts(type = "number | null")]
+    pub project_id: Option<i64>,
+    #[ts(type = "number | null")]
+    pub file_id: Option<i64>,
+    /// The name the publisher gave the file, to be believed over the version
+    /// string inside the jar.
+    pub display_name: Option<String>,
+    pub file_name: Option<String>,
+    /// False when the project's author has turned off third-party
+    /// distribution. The file can still be named, but the mirror must not
+    /// serve it on CurseForge's behalf.
+    pub distributable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]

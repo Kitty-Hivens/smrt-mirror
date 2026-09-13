@@ -15,6 +15,7 @@ pub mod classfile;
 pub mod commits;
 pub mod configdiff;
 pub mod curator;
+pub mod curseforge;
 pub mod depfill;
 pub mod gate;
 pub mod harvest;
