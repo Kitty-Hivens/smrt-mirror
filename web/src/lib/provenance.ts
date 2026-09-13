@@ -49,11 +49,15 @@ export function fileProvenance(f: VersionRow, modHasVerified: boolean): Provenan
       ? { key: 'mm.curseforge', hintKey: 'mm.curseforgeHint', name, cls: 'verified' }
       : { key: 'mm.curseforgeNoDist', hintKey: 'mm.curseforgeNoDistHint', name, cls: 'verified' };
   }
+  // Both registries have to have answered before anything is said about the
+  // file. A jar the mirror does not hold cannot be fingerprinted, so CurseForge
+  // was never asked about it, and Modrinth's "no" alone would put the warning on
+  // half the evidence: the genuine Ender IO 5.2.61 sits exactly here.
+  if (!cf) {
+    return { key: 'mm.unasked', hintKey: 'mm.unaskedHint' };
+  }
   if (modHasVerified) {
     return { key: 'mm.notPublisher', hintKey: 'mm.notPublisherHint', cls: 'repack' };
   }
-  if (cf) {
-    return { key: 'mm.unpublished', hintKey: 'mm.unpublishedHint' };
-  }
-  return { key: 'mm.unasked', hintKey: 'mm.unaskedHint' };
+  return { key: 'mm.unpublished', hintKey: 'mm.unpublishedHint' };
 }
