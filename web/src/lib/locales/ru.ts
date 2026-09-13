@@ -775,15 +775,15 @@ export const ru: Dict = {
   'mm.curseforgeNoDist': 'CurseForge, без раздачи',
   'mm.curseforgeNoDistHint':
     'издан на CurseForge ({name}), но автор запретил стороннюю раздачу — называть можно, отдавать нельзя',
-  'mm.selfhost': 'самохост',
-  'mm.selfhostHint': 'ни Modrinth, ни CurseForge этих байтов не издавали',
+  'mm.unpublished': 'нигде не издан',
+  'mm.unpublishedHint': 'ни Modrinth, ни CurseForge этот мод не выкладывают',
   'mm.unasked': 'не опрошен',
   'mm.unaskedHint': 'у CurseForge про этот файл ещё не спрашивали',
   'mm.takedown': 'Заблокировать',
   'mm.takedownHint': 'Заблокировать jar (копирайт / политика); обратимо из списка удалённых',
-  'mm.repack': 'репак?',
-  'mm.repackHint':
-    'самохостный jar под модом, у которого есть и Modrinth-версия — вероятно, репак',
+  'mm.notPublisher': 'не от издателя',
+  'mm.notPublisherHint':
+    'мод издан на Modrinth, но эти байты — нет: обычно так выглядит переупакованный jar',
   'mm.diff': 'diff',
   'mm.diffClasses': 'классов: {n}',
   'mm.diffResources': 'ресурсов: {n}',

@@ -40,10 +40,10 @@ export function fileProvenance(f: VersionRow, modHasVerified: boolean): Provenan
       : { key: 'mm.curseforgeNoDist', hintKey: 'mm.curseforgeNoDistHint', name, cls: 'repack' };
   }
   if (modHasVerified) {
-    return { key: 'mm.repack', hintKey: 'mm.repackHint', cls: 'repack' };
+    return { key: 'mm.notPublisher', hintKey: 'mm.notPublisherHint', cls: 'repack' };
   }
   if (cf) {
-    return { key: 'mm.selfhost', hintKey: 'mm.selfhostHint' };
+    return { key: 'mm.unpublished', hintKey: 'mm.unpublishedHint' };
   }
   return { key: 'mm.unasked', hintKey: 'mm.unaskedHint' };
 }
