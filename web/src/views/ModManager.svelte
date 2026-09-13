@@ -7,6 +7,7 @@
   import { t } from '../lib/i18n.svelte';
   import { mirror } from '../lib/mirror.svelte';
   import { isDebug, isOperator } from '../lib/roles';
+  import { fileProvenance } from '../lib/provenance';
   import type {
     JarDiff,
     ModSummary,
@@ -531,6 +532,7 @@
                   {/if}
                 </div>
                 {#each rel.files as f (f.sha1)}
+                  {@const prov = fileProvenance(f, hasVerified(m.mod_id))}
                   <div class="file">
                     <!-- the file's own embedded icon when the mirror holds the
                          jar; otherwise the mod's, because an uncached build has
@@ -550,13 +552,10 @@
                         · {fmtBytes(f.size_bytes)}{#if !f.cached} · {t('mm.uncached')}{/if}
                       </div>
                     </div>
-                    {#if f.modrinth_version_id}
-                      <span class="chip verified" title="Modrinth-verified">{t('mm.verified')}</span>
-                    {:else if hasVerified(m.mod_id)}
-                      <span class="chip repack" title={t('mm.repackHint')}>{t('mm.repack')}</span>
-                    {:else}
-                      <span class="chip">{t('mm.selfhost')}</span>
-                    {/if}
+                    <span
+                      class="chip {prov.cls ?? ''}"
+                      title={prov.hintKey ? t(prov.hintKey, { name: prov.name ?? '' }) : undefined}
+                      >{t(prov.key)}</span>
                     {#if canOperate}
                       <div class="factions">
                         {#if !f.modrinth_version_id && hasVerified(m.mod_id) && f.cached}

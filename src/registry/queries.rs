@@ -1072,7 +1072,6 @@ pub fn file_detail(conn: &Connection, sha1: &str) -> Result<Option<FileDetail>> 
                 version_number: rel.version_number,
                 channel: rel.channel,
                 file: f.clone(),
-                curseforge: curseforge_identity(conn, sha1)?,
             }));
         }
     }
@@ -1262,8 +1261,11 @@ pub fn versions_of_mod_by_id(conn: &Connection, mod_id: i64) -> Result<Vec<Versi
         "SELECT mv.id, mv.version, mv.sha1, mv.size_bytes, mv.source, mv.filename,
                 mv.mc_versions, mv.modrinth_version_id,
                 (SELECT external_key FROM mod_alias WHERE mod_id = mv.mod_id AND source = 'modrinth' LIMIT 1) AS mr_project,
+                cf.fingerprint, cf.project_id, cf.file_id, cf.display_name,
+                cf.file_name, cf.download_url,
                 mvt.target
          FROM mod_version mv
+         LEFT JOIN curseforge_file cf ON cf.sha1 = mv.sha1
          LEFT JOIN mod_version_target mvt ON mvt.mod_version_id = mv.id
          WHERE mv.mod_id = ?1
          ORDER BY mv.version, mv.id, mvt.target",
@@ -1274,7 +1276,7 @@ pub fn versions_of_mod_by_id(conn: &Connection, mod_id: i64) -> Result<Vec<Versi
     let mut rows = stmt.query(params![mod_id])?;
     while let Some(r) = rows.next()? {
         let id: i64 = r.get(0)?;
-        let target: Option<String> = r.get(9)?;
+        let target: Option<String> = r.get(15)?;
         if cur_id != Some(id) {
             cur_id = Some(id);
             out.push(VersionRow {
@@ -1288,6 +1290,7 @@ pub fn versions_of_mod_by_id(conn: &Connection, mod_id: i64) -> Result<Vec<Versi
                 cached: false, // set by the handler against the live cache
                 modrinth_version_id: r.get(7)?,
                 modrinth_project_id: r.get(8)?,
+                curseforge: curseforge_from_row(r, 9)?,
             });
         }
         if let Some(t) = target {
@@ -1308,9 +1311,12 @@ pub fn releases_of_mod_by_id(conn: &Connection, mod_id: i64) -> Result<Vec<Relea
                 mv.id, mv.version, mv.sha1, mv.size_bytes, mv.source, mv.filename,
                 mv.mc_versions, mv.modrinth_version_id,
                 (SELECT external_key FROM mod_alias WHERE mod_id = mv.mod_id AND source = 'modrinth' LIMIT 1) AS mr_project,
+                cf.fingerprint, cf.project_id, cf.file_id, cf.display_name,
+                cf.file_name, cf.download_url,
                 mvt.target
          FROM mod_version mv
          JOIN mod_release r ON r.id = mv.release_id
+         LEFT JOIN curseforge_file cf ON cf.sha1 = mv.sha1
          LEFT JOIN mod_version_target mvt ON mvt.mod_version_id = mv.id
          WHERE mv.mod_id = ?1
          ORDER BY r.channel, r.version_number, r.id, mv.id, mvt.target",
@@ -1323,7 +1329,7 @@ pub fn releases_of_mod_by_id(conn: &Connection, mod_id: i64) -> Result<Vec<Relea
     while let Some(row) = rows.next()? {
         let rid: i64 = row.get(0)?;
         let fid: i64 = row.get(4)?;
-        let target: Option<String> = row.get(13)?;
+        let target: Option<String> = row.get(19)?;
         if cur_rel != Some(rid) {
             cur_rel = Some(rid);
             cur_file = None;
@@ -1348,6 +1354,7 @@ pub fn releases_of_mod_by_id(conn: &Connection, mod_id: i64) -> Result<Vec<Relea
                 cached: false, // set by the handler against the live cache
                 modrinth_version_id: row.get(11)?,
                 modrinth_project_id: row.get(12)?,
+                curseforge: curseforge_from_row(row, 13)?,
             });
         }
         if let Some(t) = target {
@@ -1762,8 +1769,39 @@ pub fn stats(conn: &Connection) -> Result<RegistryStats> {
     })
 }
 
-/// What CurseForge said about one artifact, for the file page.
-pub fn curseforge_identity(conn: &Connection, sha1: &str) -> Result<Option<CurseForgeIdentity>> {
+/// Read a `curseforge_file` row out of six columns of a wider select, starting
+/// at `base` in the order the table declares them.
+///
+/// `fingerprint` is the presence test because it is the one column the table
+/// requires, so a NULL there is the outer join finding nothing rather than a
+/// row that answered with nothing. The difference is the whole point of the
+/// table: "never asked" and "asked, published nowhere" are different answers.
+fn curseforge_from_row(row: &rusqlite::Row<'_>, base: usize) -> Result<Option<CurseForgeIdentity>> {
+    let Some(fingerprint) = row.get::<_, Option<i64>>(base)? else {
+        return Ok(None);
+    };
+    let download_url: Option<String> = row.get(base + 5)?;
+    Ok(Some(CurseForgeIdentity {
+        fingerprint: fingerprint as u32,
+        project_id: row.get(base + 1)?,
+        file_id: row.get(base + 2)?,
+        display_name: row.get(base + 3)?,
+        file_name: row.get(base + 4)?,
+        distributable: download_url.is_some(),
+    }))
+}
+
+/// What CurseForge said about one artifact, read back on its own.
+///
+/// Every view reaches the answer through [`curseforge_from_row`], as part of the
+/// select that fetches the file, so nothing in the running mirror needs this.
+/// It is kept for the upsert's tests, which are about whether a row was written
+/// and would otherwise have to stand up a mod and a release to read one back.
+#[cfg(test)]
+pub(crate) fn curseforge_identity(
+    conn: &Connection,
+    sha1: &str,
+) -> Result<Option<CurseForgeIdentity>> {
     Ok(conn
         .query_row(
             "SELECT fingerprint, project_id, file_id, display_name, file_name, download_url

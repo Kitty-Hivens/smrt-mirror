@@ -4,6 +4,7 @@
   import { route } from '../lib/route.svelte';
   import { t } from '../lib/i18n.svelte';
   import { isDebug } from '../lib/roles';
+  import { fileProvenance } from '../lib/provenance';
   import type { JarDiff, ModDetail, ModEdge, Source, VersionRow } from '../lib/types';
   import ModIcon from './ModIcon.svelte';
   import Section from './ui/Section.svelte';
@@ -171,6 +172,7 @@
               <span class="faint mono">{t('mm.filesN', { n: rel.files.length })}</span>
             </div>
             {#each rel.files as f (f.sha1)}
+              {@const prov = fileProvenance(f, modHasVerified)}
               <div class="file">
                 <ModIcon
                   name={f.filename ?? detail.name}
@@ -185,13 +187,10 @@
                     &middot; {fmtBytes(f.size_bytes)}{#if !f.cached} &middot; {t('mm.uncached')}{/if}
                   </div>
                 </div>
-                {#if f.modrinth_version_id}
-                  <span class="chip verified" title="Modrinth-verified">{t('mm.verified')}</span>
-                {:else if modHasVerified}
-                  <span class="chip repack" title={t('mm.repackHint')}>{t('mm.repack')}</span>
-                {:else}
-                  <span class="chip">{t('mm.selfhost')}</span>
-                {/if}
+                <span
+                  class="chip {prov.cls ?? ''}"
+                  title={prov.hintKey ? t(prov.hintKey, { name: prov.name ?? '' }) : undefined}
+                  >{t(prov.key)}</span>
                 {#if canDebug && !f.modrinth_version_id && modHasVerified && f.cached}
                   <button
                     class="link"

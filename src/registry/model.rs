@@ -197,6 +197,18 @@ pub struct VersionRow {
     /// not-locally-cached Modrinth mod as a real Modrinth source.
     pub modrinth_project_id: Option<String>,
     pub modrinth_version_id: Option<String>,
+    /// What CurseForge says this artifact is, once it has been asked. `None`
+    /// means the question has not been put yet, which is not the same as
+    /// CurseForge not knowing it: that answers with a present value whose
+    /// `project_id` is absent.
+    ///
+    /// It rides on the file rather than beside it because a listing needs it as
+    /// much as a single lookup does. Without it every artifact Modrinth does not
+    /// carry reads as self-hosted, which is the `else` of a two-way question and
+    /// says nothing about whether anyone publishes the bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub curseforge: Option<CurseForgeIdentity>,
 }
 
 /// One release (version node) of a mod for the management view: its version
@@ -470,12 +482,9 @@ pub struct FileDetail {
     pub slug: Option<String>,
     pub version_number: String,
     pub channel: String,
+    /// Carries the CurseForge identity itself, so this view has one home for it
+    /// rather than a copy beside the file it describes.
     pub file: VersionRow,
-    /// What CurseForge says this artifact is, once it has been asked. `None`
-    /// means the question has not been put yet, which is not the same as
-    /// CurseForge not knowing it: that answers with a present value whose
-    /// `project_id` is absent.
-    pub curseforge: Option<CurseForgeIdentity>,
 }
 
 /// The outside voice on a jar's identity, for artifacts Modrinth does not
