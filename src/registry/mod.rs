@@ -679,6 +679,61 @@ mod tests {
         .unwrap();
     }
 
+    /// The panel draws its provenance chip from the listing, not from a
+    /// per-file lookup, so an identity that only `GET /v1/files/{sha1}` can see
+    /// is one the panel cannot use: every CurseForge jar reads as self-hosted,
+    /// which is the `else` of a question that was never asked here.
+    #[test]
+    fn a_files_listing_carries_what_curseforge_said() {
+        let r = fixture();
+        let found = crate::authoring::curseforge::Match {
+            project_id: 243_121,
+            file_id: 4_520_594,
+            display_name: "AppleSkin 2.5.1".into(),
+            file_name: "appleskin-2.5.1.jar".into(),
+            download_url: Some("https://edge.forgecdn.net/x.jar".into()),
+            game_versions: vec!["1.12.2".into()],
+        };
+        r.with_conn_mut(|c| {
+            upsert::set_curseforge_file(c, "sha_apple", 2_910_837_341, Some(&found), NOW)?;
+            // asked, and published nowhere: a different answer to "never asked",
+            // and the only one that earns the self-hosted chip
+            upsert::set_curseforge_file(c, "sha_jei", 7, None, NOW)?;
+            Ok(())
+        })
+        .unwrap();
+
+        r.with_conn(|c| {
+            let apple = queries::mod_id_for_alias(c, "modid", "appleskin")?.unwrap();
+            let cf = queries::releases_of_mod_by_id(c, apple)?[0].files[0]
+                .curseforge
+                .clone()
+                .expect("the listing carries the identity, not just the file page");
+            assert_eq!(cf.project_id, Some(243_121));
+            assert_eq!(cf.display_name.as_deref(), Some("AppleSkin 2.5.1"));
+            assert!(cf.distributable, "a download url means it may be served");
+
+            let jei = queries::mod_id_for_alias(c, "modid", "jei")?.unwrap();
+            let miss = queries::releases_of_mod_by_id(c, jei)?[0].files[0]
+                .curseforge
+                .clone()
+                .expect("a miss is an answer and has to survive the join");
+            assert_eq!(miss.project_id, None);
+            assert!(!miss.distributable);
+
+            // Never asked stays absent, so the panel can say so rather than
+            // calling it unpublished.
+            let multi = queries::mod_id_for_alias(c, "modid", "multimod")?.unwrap();
+            assert!(
+                queries::releases_of_mod_by_id(c, multi)?[0].files[0]
+                    .curseforge
+                    .is_none()
+            );
+            Ok(())
+        })
+        .unwrap();
+    }
+
     #[test]
     fn q4_family_reachability_is_directional() {
         let r = fixture();
