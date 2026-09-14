@@ -1869,7 +1869,17 @@ pub fn sha1_for_curseforge_file(
 /// A row here says the fetch already happened, so it happens once per artifact
 /// rather than once per harvest.
 pub fn shas_read(conn: &Connection) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare("SELECT sha1 FROM jar_read")?;
+    // Read AND pinned. Reading a borrowed jar has two purposes -- learning what
+    // it declares and recording which published file it is -- and a row in
+    // jar_read only settles the first. Gating on that alone strands a jar that
+    // was read before the pin was recorded: it is never fetched again, so the
+    // fingerprint is never taken, so the pin row is never written, and the pack
+    // that points at it resolves to nothing for good.
+    let mut stmt = conn.prepare(
+        "SELECT j.sha1 FROM jar_read j
+           JOIN curseforge_file cf ON cf.sha1 = j.sha1
+          WHERE cf.project_id IS NOT NULL",
+    )?;
     let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
     let mut out = Vec::new();
     for row in rows {
