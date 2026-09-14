@@ -1131,25 +1131,6 @@ pub fn write_scan(conn: &Connection, scan: &ScanData, now: &str) -> Result<Harve
     })
 }
 
-/// Scan the storage tree + Modrinth into a [ScanData]. Async (FS reads + one
-/// batched Modrinth lookup); does not touch the registry.
-/// Fetch, once, the jars a pack pins from a publisher rather than from us.
-///
-/// A CurseForge pin names a file the mirror never holds: the build reads its
-/// hash and size from the API and the launcher downloads it from the publisher,
-/// so no pass over our cache can ever see what it declares. Nothing then knows
-/// its modid, which means every dependency keyed on that modid goes unmet and
-/// the mod itself never appears as resolved -- a repin silently blinds the
-/// pre-publish check for the mod it moved.
-///
-/// The bytes are read and dropped. Keeping them would put a copy in a cache
-/// that is served wholesale, which is both the thing a repin exists to stop and,
-/// for a project whose author has turned third-party distribution off, a
-/// redistribution they refused. That case is skipped rather than worked around:
-/// no download url means no read, and the mod stays unidentified honestly.
-///
-/// Gated on `jar_read`, so it is one fetch per artifact for the life of the
-/// mirror rather than one per harvest.
 /// Whether a pinned file has to be fetched to be read, and where from.
 ///
 /// Four reasons not to, and only one of them is about us having the bytes
@@ -1170,13 +1151,30 @@ fn needs_reading(
     Some((sha1, url))
 }
 
+/// Fetch, once, the jars a pack pins from a publisher rather than from us.
+///
+/// A CurseForge pin names a file the mirror never holds: the build reads its
+/// hash and size from the API and the launcher downloads it from the publisher,
+/// so no pass over our cache can ever see what it declares. Nothing then knows
+/// its modid, which means every dependency keyed on that modid goes unmet and
+/// the mod itself never appears as resolved -- a repin silently blinds the
+/// pre-publish check for the mod it moved.
+///
+/// The bytes are read and dropped. Keeping them would put a copy in a cache
+/// that is served wholesale, which is both the thing a repin exists to stop and,
+/// for a project whose author has turned third-party distribution off, a
+/// redistribution they refused. That case is skipped rather than worked around:
+/// no download url means no read, and the mod stays unidentified honestly.
+///
+/// Gated on `jar_read`, so it is one fetch per artifact for the life of the
+/// mirror rather than one per harvest.
 async fn borrowed_jars(
     storage: &Storage,
     modrinth: &Modrinth,
     curseforge: Option<&CurseForge>,
     cache_shas: &HashSet<String>,
     already_read: &HashSet<String>,
-) -> Vec<(String, u64, Vec<u8>)> {
+) -> Vec<(String, FileInfo, Vec<u8>)> {
     let Some(cf) = curseforge else {
         return Vec::new();
     };
@@ -1218,6 +1216,10 @@ async fn borrowed_jars(
         let Some((sha1, url)) = needs_reading(&info, cache_shas, already_read) else {
             continue;
         };
+        let info = FileInfo {
+            sha1: Some(sha1.clone()),
+            ..info
+        };
         let bytes = match modrinth.fetch_bytes(&url).await {
             Ok(b) => b,
             Err(e) => {
@@ -1235,7 +1237,7 @@ async fn borrowed_jars(
             tracing::warn!(project_id, file_id, expected = %sha1, got = %got, "borrowed jar hash mismatch; not read");
             continue;
         }
-        out.push((sha1, info.size_bytes, bytes));
+        out.push((sha1, info, bytes));
     }
     if !out.is_empty() {
         tracing::info!(jars = out.len(), "read jars pinned from a publisher");
@@ -1258,6 +1260,8 @@ pub struct Known<'a> {
     pub already_read: &'a HashSet<String>,
 }
 
+/// Scan the storage tree + Modrinth into a [ScanData]. Async (FS reads + one
+/// batched Modrinth lookup); does not touch the registry.
 pub async fn scan(
     storage: &Storage,
     modrinth: &Modrinth,
@@ -1304,8 +1308,21 @@ pub async fn scan(
     // dropped, exactly as the Modrinth leg below does for a re-upload: what is
     // wanted is what the file says about itself, not a copy of it.
     let borrowed = borrowed_jars(storage, modrinth, curseforge, &cache_shas, already_read).await;
-    for (sha, size, _) in &borrowed {
-        size_by_sha.entry(sha.clone()).or_insert(*size as i64);
+    // What the pack said this file is, kept for after the read. A pin states
+    // the project and the file outright, which is better evidence than asking
+    // the fingerprint index whose bytes these are, and it is the only way the
+    // row gets written at all: the fingerprint leg is driven off `jar_read`,
+    // so a jar being read for the first time is never in the set it asks about,
+    // and by the next harvest it is no longer fetched. Two gates computed from
+    // one table, consumed in opposite directions, and the file falls between.
+    let borrowed_pins: HashMap<String, FileInfo> = borrowed
+        .iter()
+        .map(|(sha, info, _)| (sha.clone(), info.clone()))
+        .collect();
+    for (sha, info, _) in &borrowed {
+        size_by_sha
+            .entry(sha.clone())
+            .or_insert(info.size_bytes as i64);
         all_shas.insert(sha.clone());
     }
 
@@ -1451,6 +1468,25 @@ pub async fn scan(
     // holds to a third party for nothing. Skipped entirely with no key, and a
     // failure degrades to an empty map the way the Modrinth leg does.
     let mut curseforge_answers: HashMap<String, (u32, Option<curseforge::Match>)> = HashMap::new();
+    for (sha, info) in &borrowed_pins {
+        let Some(fp) = fingerprint_by_sha.get(sha) else {
+            continue; // the read failed, so there is nothing to attach it to
+        };
+        curseforge_answers.insert(
+            sha.clone(),
+            (
+                *fp,
+                Some(curseforge::Match {
+                    project_id: info.project_id,
+                    file_id: info.file_id,
+                    display_name: info.display_name.clone(),
+                    file_name: info.file_name.clone(),
+                    download_url: info.download_url.clone(),
+                    game_versions: Vec::new(),
+                }),
+            ),
+        );
+    }
     if let Some(cf) = curseforge {
         let asking: Vec<(String, u32)> = fingerprint_by_sha
             .iter()
@@ -1828,6 +1864,54 @@ mod tests {
             sha1: sha1.map(str::to_string),
             download_url: url.map(str::to_string),
         }
+    }
+
+    // The join a repinned pack depends on: a borrowed jar's pin has to land in
+    // curseforge_file, or the resolve looks the pin up, finds nothing and skips
+    // the mod. It cannot come from the fingerprint leg, which only asks about
+    // jars that already have a jar_read row: on the harvest that first reads a
+    // borrowed jar there is no such row, and by the next one the jar is no
+    // longer fetched. The pin itself is the evidence.
+    #[test]
+    fn a_borrowed_jars_pin_is_written_where_the_resolve_looks_for_it() {
+        let r = Registry::open_in_memory().unwrap();
+        let scan = ScanData {
+            jars: vec![jar(
+                "sha_cofh",
+                "cofhcore",
+                Some("4.6.6.1"),
+                vec!["forge".into()],
+            )],
+            packs: vec![],
+            curseforge: HashMap::from([(
+                "sha_cofh".to_string(),
+                (
+                    1234u32,
+                    Some(curseforge::Match {
+                        project_id: 69162,
+                        file_id: 2920433,
+                        display_name: "CoFHCore 4.6.6.1".into(),
+                        file_name: "CoFHCore-1.12.2-4.6.6.1-universal.jar".into(),
+                        download_url: Some("https://example.invalid/x.jar".into()),
+                        game_versions: vec![],
+                    }),
+                ),
+            )]),
+            modrinth_modids_learned: 0,
+            dep_project_slugs: Default::default(),
+            project_envs: Default::default(),
+            modrinth_leg_ok: true,
+        };
+        r.with_txn(|c| write_scan(c, &scan, "T0")).unwrap();
+        r.with_conn(|c| {
+            assert_eq!(
+                queries::sha1_for_curseforge_file(c, 69162, 2920433)?,
+                Some("sha_cofh".to_string()),
+                "the pin resolves back to the bytes it named"
+            );
+            Ok(())
+        })
+        .unwrap();
     }
 
     // The point of the gate: a pin to somebody else's copy is fetched once so
