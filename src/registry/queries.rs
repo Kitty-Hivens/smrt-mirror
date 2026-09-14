@@ -1832,6 +1832,22 @@ pub(crate) fn curseforge_identity(
 ///
 /// A matched row is never returned. Its answer cannot change, because the
 /// question is about bytes that cannot change.
+/// Every sha1 the harvest has already opened and read.
+///
+/// The one-time gate for jars whose bytes are not ours: a pack may pin a file
+/// published elsewhere, and learning what that file declares means fetching it.
+/// A row here says the fetch already happened, so it happens once per artifact
+/// rather than once per harvest.
+pub fn shas_read(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT sha1 FROM jar_read")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 pub fn shas_awaiting_curseforge(conn: &Connection, retry_before: &str) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT j.sha1 FROM jar_read j

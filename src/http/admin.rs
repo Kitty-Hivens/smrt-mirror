@@ -1671,6 +1671,15 @@ async fn store_edited_config(
     if let Err(e) = state.storage.note_pending_author(pack_id, by).await {
         tracing::warn!(pack_id = %pack_id, error = %e, "could not note the pending commit author");
     }
+    // A changed declaration can name a file the mirror has never read -- a pin
+    // to somebody else's published copy carries no bytes here -- and until one
+    // is read it declares no modid, so a build checked before then reports
+    // every dependency on it as unmet. The harvest debounces, so this costs a
+    // wake rather than a fetch, and the fetch it eventually makes is once per
+    // artifact.
+    if fill {
+        state.harvest.poke();
+    }
     // the revision of what was just stored, so the client that saved it edits
     // on from there without a re-read
     let rev = rev_of(&cfg)?;

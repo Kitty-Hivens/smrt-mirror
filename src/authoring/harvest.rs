@@ -20,7 +20,7 @@ use super::classfile::parse_class;
 use super::curator::{
     JarFacts, McModInfo, clean_mc_version, mcmod_hard_deps, mcmod_modids, parse_mcmod_info,
 };
-use super::curseforge::{self, CurseForge};
+use super::curseforge::{self, CurseForge, FileInfo};
 use super::mixinscan;
 use super::modmeta;
 use super::modrinth::{Modrinth, Project};
@@ -30,6 +30,7 @@ use crate::storage::Storage;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
+use sha1::{Digest, Sha1};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -1132,15 +1133,144 @@ pub fn write_scan(conn: &Connection, scan: &ScanData, now: &str) -> Result<Harve
 
 /// Scan the storage tree + Modrinth into a [ScanData]. Async (FS reads + one
 /// batched Modrinth lookup); does not touch the registry.
+/// Fetch, once, the jars a pack pins from a publisher rather than from us.
+///
+/// A CurseForge pin names a file the mirror never holds: the build reads its
+/// hash and size from the API and the launcher downloads it from the publisher,
+/// so no pass over our cache can ever see what it declares. Nothing then knows
+/// its modid, which means every dependency keyed on that modid goes unmet and
+/// the mod itself never appears as resolved -- a repin silently blinds the
+/// pre-publish check for the mod it moved.
+///
+/// The bytes are read and dropped. Keeping them would put a copy in a cache
+/// that is served wholesale, which is both the thing a repin exists to stop and,
+/// for a project whose author has turned third-party distribution off, a
+/// redistribution they refused. That case is skipped rather than worked around:
+/// no download url means no read, and the mod stays unidentified honestly.
+///
+/// Gated on `jar_read`, so it is one fetch per artifact for the life of the
+/// mirror rather than one per harvest.
+/// Whether a pinned file has to be fetched to be read, and where from.
+///
+/// Four reasons not to, and only one of them is about us having the bytes
+/// already. A file with no published sha1 cannot be checked against what a
+/// launcher will verify, and a file with no download url is one whose author
+/// turned third-party distribution off: fetching it anyway would be taking a
+/// copy they refused, so it stays unidentified instead.
+fn needs_reading(
+    info: &FileInfo,
+    cache_shas: &HashSet<String>,
+    already_read: &HashSet<String>,
+) -> Option<(String, String)> {
+    let sha1 = info.sha1.clone()?;
+    if cache_shas.contains(&sha1) || already_read.contains(&sha1) {
+        return None;
+    }
+    let url = info.download_url.clone()?;
+    Some((sha1, url))
+}
+
+async fn borrowed_jars(
+    storage: &Storage,
+    modrinth: &Modrinth,
+    curseforge: Option<&CurseForge>,
+    cache_shas: &HashSet<String>,
+    already_read: &HashSet<String>,
+) -> Vec<(String, u64, Vec<u8>)> {
+    let Some(cf) = curseforge else {
+        return Vec::new();
+    };
+    // Configs rather than built manifests: a pin that has just been edited is
+    // exactly the one the next build will be checked against, and waiting for a
+    // build to learn it would mean the first build after every repin is wrong.
+    let mut pins: HashSet<(i64, i64)> = HashSet::new();
+    let packs = match storage.list_authoring_packs().await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "listing packs for borrowed-jar reads failed");
+            return Vec::new();
+        }
+    };
+    for pid in packs {
+        let Ok(cfg) = storage.load_pack_config(&pid).await else {
+            continue; // a pack with no config yet
+        };
+        for m in &cfg.mods {
+            if let crate::domain::SourceDecl::CurseForge {
+                project_id,
+                file_id,
+            } = &m.source
+            {
+                pins.insert((*project_id, *file_id));
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    for (project_id, file_id) in pins {
+        let info = match cf.file(project_id, file_id).await {
+            Ok(i) => i,
+            Err(e) => {
+                tracing::warn!(project_id, file_id, error = %format!("{e:#}"), "curseforge file lookup failed; that pin stays unread");
+                continue;
+            }
+        };
+        let Some((sha1, url)) = needs_reading(&info, cache_shas, already_read) else {
+            continue;
+        };
+        let bytes = match modrinth.fetch_bytes(&url).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(url = %url, error = %format!("{e:#}"), "borrowed jar fetch failed");
+                continue;
+            }
+        };
+        // The hash CurseForge published is what the manifest will tell a
+        // launcher to verify against, so bytes that do not match it are not the
+        // file this pin names and must not be read as if they were.
+        let mut hasher = Sha1::new();
+        hasher.update(&bytes);
+        let got = hex::encode(hasher.finalize());
+        if got != sha1 {
+            tracing::warn!(project_id, file_id, expected = %sha1, got = %got, "borrowed jar hash mismatch; not read");
+            continue;
+        }
+        out.push((sha1, info.size_bytes, bytes));
+    }
+    if !out.is_empty() {
+        tracing::info!(jars = out.len(), "read jars pinned from a publisher");
+    }
+    out
+}
+
+/// What the registry already knows, so a scan can skip the work of learning it
+/// again. Grouped because each field answers the same question about a
+/// different leg, and passing five sets positionally is how one ends up in the
+/// wrong slot.
+pub struct Known<'a> {
+    /// Modrinth projects whose mod already carries a forge modid alias.
+    pub modid_projects: &'a HashSet<String>,
+    pub project_aliases: &'a HashSet<String>,
+    pub envless_project_aliases: &'a HashSet<String>,
+    /// Cached jars that still owe CurseForge an identity answer.
+    pub awaiting_curseforge: &'a HashSet<String>,
+    /// Every sha1 a harvest has opened, cached or borrowed.
+    pub already_read: &'a HashSet<String>,
+}
+
 pub async fn scan(
     storage: &Storage,
     modrinth: &Modrinth,
-    known_modid_projects: &HashSet<String>,
-    known_project_aliases: &HashSet<String>,
-    envless_project_aliases: &HashSet<String>,
     curseforge: Option<&CurseForge>,
-    awaiting_curseforge: &HashSet<String>,
+    known: &Known<'_>,
 ) -> Result<ScanData> {
+    let Known {
+        modid_projects: known_modid_projects,
+        project_aliases: known_project_aliases,
+        envless_project_aliases,
+        awaiting_curseforge,
+        already_read,
+    } = known;
     let inventory = storage.list_cache_inventory().await.map_err(ae)?;
     let mut size_by_sha: HashMap<String, i64> = inventory
         .iter()
@@ -1167,6 +1297,18 @@ pub async fn scan(
                 .map(|p| (e.sha1.clone(), p))
         })
         .collect();
+    // Jars a pack pins from CurseForge. Their bytes are never ours -- the
+    // launcher fetches them from the publisher -- so nothing above sees them,
+    // and a mod nobody has read declares no modid, satisfies nobody's
+    // dependency and drops out of the resolve. Fetched here to be read and
+    // dropped, exactly as the Modrinth leg below does for a re-upload: what is
+    // wanted is what the file says about itself, not a copy of it.
+    let borrowed = borrowed_jars(storage, modrinth, curseforge, &cache_shas, already_read).await;
+    for (sha, size, _) in &borrowed {
+        size_by_sha.entry(sha.clone()).or_insert(*size as i64);
+        all_shas.insert(sha.clone());
+    }
+
     let (
         mcmod_by_sha,
         facts_by_sha,
@@ -1186,10 +1328,11 @@ pub async fn scan(
         // already paid to read, so it is taken here rather than by reopening
         // every jar later.
         let mut fingerprints: HashMap<String, u32> = HashMap::new();
-        for (sha, path) in jar_paths {
-            let Ok(bytes) = std::fs::read(&path) else {
-                continue;
-            };
+        let from_cache = jar_paths
+            .into_iter()
+            .filter_map(|(sha, path)| std::fs::read(&path).ok().map(|b| (sha, b)));
+        let from_publisher = borrowed.into_iter().map(|(sha, _, bytes)| (sha, bytes));
+        for (sha, bytes) in from_cache.chain(from_publisher) {
             fingerprints.insert(sha.clone(), curseforge::fingerprint(&bytes));
             let r = read_jar(&bytes);
             readouts.insert(
@@ -1629,28 +1772,38 @@ pub async fn run_harvest(
     // was read once before, so the scan skips re-fetching it (the one-time cost).
     let reg = registry.clone();
     let asked_before = upsert::now_rfc3339();
-    let (known_modid_projects, known_project_aliases, envless_project_aliases, awaiting_curseforge) =
-        tokio::task::spawn_blocking(move || {
-            reg.with_conn(|c| {
-                Ok((
-                    queries::modrinth_projects_with_modid(c)?,
-                    queries::modrinth_project_aliases(c)?,
-                    queries::modrinth_aliases_without_env(c)?,
-                    queries::shas_awaiting_curseforge(c, &asked_before)?,
-                ))
-            })
+    let (
+        known_modid_projects,
+        known_project_aliases,
+        envless_project_aliases,
+        awaiting_curseforge,
+        already_read,
+    ) = tokio::task::spawn_blocking(move || {
+        reg.with_conn(|c| {
+            Ok((
+                queries::modrinth_projects_with_modid(c)?,
+                queries::modrinth_project_aliases(c)?,
+                queries::modrinth_aliases_without_env(c)?,
+                queries::shas_awaiting_curseforge(c, &asked_before)?,
+                queries::shas_read(c)?,
+            ))
         })
-        .await
-        .map_err(|e| anyhow::anyhow!("known-modid query task: {e}"))??;
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("known-modid query task: {e}"))??;
     let awaiting_curseforge: HashSet<String> = awaiting_curseforge.into_iter().collect();
+    let already_read: HashSet<String> = already_read.into_iter().collect();
     let scan = scan(
         storage,
         modrinth,
-        &known_modid_projects,
-        &known_project_aliases,
-        &envless_project_aliases,
         curseforge,
-        &awaiting_curseforge,
+        &Known {
+            modid_projects: &known_modid_projects,
+            project_aliases: &known_project_aliases,
+            envless_project_aliases: &envless_project_aliases,
+            awaiting_curseforge: &awaiting_curseforge,
+            already_read: &already_read,
+        },
     )
     .await?;
     let now = upsert::now_rfc3339();
@@ -1664,6 +1817,52 @@ pub async fn run_harvest(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pinned(sha1: Option<&str>, url: Option<&str>) -> FileInfo {
+        FileInfo {
+            project_id: 1,
+            file_id: 2,
+            display_name: "x".into(),
+            file_name: "x.jar".into(),
+            size_bytes: 10,
+            sha1: sha1.map(str::to_string),
+            download_url: url.map(str::to_string),
+        }
+    }
+
+    // The point of the gate: a pin to somebody else's copy is fetched once so
+    // the mirror learns what it declares, and never again.
+    #[test]
+    fn a_pinned_file_is_read_once_and_only_when_it_may_be() {
+        let none: HashSet<String> = HashSet::new();
+        let held: HashSet<String> = HashSet::from(["abc".to_string()]);
+
+        assert_eq!(
+            needs_reading(&pinned(Some("abc"), Some("http://x/x.jar")), &none, &none),
+            Some(("abc".to_string(), "http://x/x.jar".to_string())),
+            "unknown bytes with a link: read them"
+        );
+        assert_eq!(
+            needs_reading(&pinned(Some("abc"), Some("http://x/x.jar")), &held, &none),
+            None,
+            "already in the cache, so the ordinary scan reads it"
+        );
+        assert_eq!(
+            needs_reading(&pinned(Some("abc"), Some("http://x/x.jar")), &none, &held),
+            None,
+            "read by an earlier harvest: one fetch per artifact, not per run"
+        );
+        assert_eq!(
+            needs_reading(&pinned(Some("abc"), None), &none, &none),
+            None,
+            "no download url means the author disallows third-party distribution"
+        );
+        assert_eq!(
+            needs_reading(&pinned(None, Some("http://x/x.jar")), &none, &none),
+            None,
+            "no published sha1 leaves nothing to check the bytes against"
+        );
+    }
 
     fn sample() -> ScanData {
         ScanData {
