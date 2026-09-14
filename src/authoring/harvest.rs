@@ -1166,8 +1166,8 @@ fn needs_reading(
 /// redistribution they refused. That case is skipped rather than worked around:
 /// no download url means no read, and the mod stays unidentified honestly.
 ///
-/// Gated on `jar_read`, so it is one fetch per artifact for the life of the
-/// mirror rather than one per harvest.
+/// Gated on a jar being both read and pinned, so it is one fetch per artifact
+/// for the life of the mirror rather than one per harvest.
 async fn borrowed_jars(
     storage: &Storage,
     modrinth: &Modrinth,
@@ -1256,7 +1256,9 @@ pub struct Known<'a> {
     pub envless_project_aliases: &'a HashSet<String>,
     /// Cached jars that still owe CurseForge an identity answer.
     pub awaiting_curseforge: &'a HashSet<String>,
-    /// Every sha1 a harvest has opened, cached or borrowed.
+    /// Every sha1 a harvest has opened AND recorded a published file for. A
+    /// borrowed jar is fetched until both are true, since either one alone
+    /// leaves a pack pointing at something the resolve cannot place.
     pub already_read: &'a HashSet<String>,
 }
 
@@ -1934,7 +1936,7 @@ mod tests {
         assert_eq!(
             needs_reading(&pinned(Some("abc"), Some("http://x/x.jar")), &none, &held),
             None,
-            "read by an earlier harvest: one fetch per artifact, not per run"
+            "read and pinned by an earlier harvest: one fetch per artifact, not per run"
         );
         assert_eq!(
             needs_reading(&pinned(Some("abc"), None), &none, &none),
