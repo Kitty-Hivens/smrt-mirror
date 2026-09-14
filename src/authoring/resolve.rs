@@ -357,31 +357,84 @@ struct Present {
 /// landed plus the filenames that could not be identified. A `SmrtStatic` source
 /// is not a mod (a config/asset file) and is skipped; a jar with no registry
 /// identity cannot be reasoned about and is reported unresolved.
+/// Which mod an entry turned out to be, and the rows behind it.
+struct Placed {
+    mod_id: i64,
+    version: Option<String>,
+    mod_version_id: Option<i64>,
+    sha1: Option<String>,
+}
+
+/// Place one artifact by its content hash, recording why it could not be placed.
+///
+/// Shared by the two declarations that name bytes: one holds them, the other
+/// points at a publisher that does. A jar with no mod identity is not
+/// necessarily a failure, since the harvest may have read it and classified it
+/// as something other than a mod (a bare coremod or ASM library), and that is
+/// reported as what it is rather than as unresolved.
+fn by_sha1(
+    conn: &Connection,
+    sha1: &str,
+    filename: &str,
+    unresolved: &mut Vec<String>,
+    non_mods: &mut Vec<String>,
+) -> Result<Option<Placed>> {
+    match queries::artifact_by_sha1(conn, sha1)? {
+        Some((mv_id, id, ver)) => Ok(Some(Placed {
+            mod_id: id,
+            version: Some(ver),
+            mod_version_id: Some(mv_id),
+            sha1: Some(sha1.to_string()),
+        })),
+        None => {
+            match queries::jar_class_for_sha1(conn, sha1)? {
+                Some(jc) if jc.kind != "mod" => non_mods.push(filename.to_string()),
+                _ => unresolved.push(filename.to_string()),
+            }
+            Ok(None)
+        }
+    }
+}
+
 fn place_mods(conn: &Connection, cfg: &PackConfig) -> Result<PlacedMods> {
     let mut present: Vec<Present> = Vec::new();
     let mut unresolved: Vec<String> = Vec::new();
     let mut non_mods: Vec<String> = Vec::new();
     let mut pinned_projects: Vec<String> = Vec::new();
     for m in &cfg.mods {
-        let (mod_id, version, mod_version_id, sha1) = match &m.source {
-            SourceDecl::SmrtCache { sha1 } => match queries::artifact_by_sha1(conn, sha1)? {
-                Some((mv_id, id, ver)) => (id, Some(ver), Some(mv_id), Some(sha1.clone())),
-                None => {
-                    // No identity, but the harvest may still have read the jar:
-                    // a bare coremod/ASM library (ChickenASM-class) is exactly
-                    // that, and it is classified, not "unresolved".
-                    match queries::jar_class_for_sha1(conn, sha1)? {
-                        Some(jc) if jc.kind != "mod" => non_mods.push(m.filename.clone()),
-                        _ => unresolved.push(m.filename.clone()),
-                    }
-                    continue;
+        let Placed {
+            mod_id,
+            version,
+            mod_version_id,
+            sha1,
+        } = match &m.source {
+            SourceDecl::SmrtCache { sha1 } => {
+                match by_sha1(conn, sha1, &m.filename, &mut unresolved, &mut non_mods)? {
+                    Some(found) => found,
+                    None => continue,
                 }
+            }
+            // A pin to a published file the mirror has met before is the same
+            // mod it was when we served it: the bytes did not change, only who
+            // hands them over. Read the hash back out of the fingerprint row
+            // and place it exactly as a cached jar, so moving a mod off
+            // self-hosting does not cost the pack its identity and everything
+            // that depends on it.
+            SourceDecl::CurseForge {
+                project_id,
+                file_id,
+            } => match queries::sha1_for_curseforge_file(conn, *project_id, *file_id)? {
+                Some(sha1) => {
+                    match by_sha1(conn, &sha1, &m.filename, &mut unresolved, &mut non_mods)? {
+                        Some(found) => found,
+                        None => continue,
+                    }
+                }
+                // Bytes this mirror has never met. The build resolves it
+                // against CurseForge, the same way an unharvested Modrinth pin
+                // resolves against Modrinth, so it is not an unidentified mod.
+                None => continue,
             },
-            // Nothing is held locally and nothing was harvested, so there is
-            // no identity to check here. The build resolves it against
-            // CurseForge, the same way an unharvested Modrinth pin resolves
-            // against Modrinth, so it is not an unidentified mod.
-            SourceDecl::CurseForge { .. } => continue,
             SourceDecl::Modrinth {
                 project_id,
                 version_id,
@@ -392,12 +445,12 @@ fn place_mods(conn: &Connection, cfg: &PackConfig) -> Result<PlacedMods> {
                         Some(mv) => queries::sha1_for_mod_version(conn, mv)?,
                         None => None,
                     };
-                    (
-                        id,
-                        queries::version_by_modrinth_version_id(conn, version_id)?,
-                        mv_id,
-                        sha,
-                    )
+                    Placed {
+                        mod_id: id,
+                        version: queries::version_by_modrinth_version_id(conn, version_id)?,
+                        mod_version_id: mv_id,
+                        sha1: sha,
+                    }
                 }
                 // A Modrinth pin the mirror has not harvested yet is still valid: a
                 // build fetches it straight from Modrinth, so it will be present.
@@ -2231,6 +2284,49 @@ mod tests {
         assert_eq!(rep.missing.len(), 1);
         assert_eq!(rep.missing[0].target, "external:OptiFine.jar");
         assert_eq!(rep.missing[0].reason.as_deref(), Some("external"));
+    }
+
+    // Moving a mod off self-hosting must not cost the pack its identity: the
+    // bytes are the same bytes, and everything that depended on the mod still
+    // does. A CurseForge pin used to be skipped outright, so the mod went
+    // unresolved and its dependents reported it missing while it sat in the
+    // same config two lines away.
+    #[test]
+    fn a_curseforge_pin_keeps_the_identity_its_bytes_already_had() {
+        let r = Registry::open_in_memory().unwrap();
+        let sha = "a".repeat(40);
+        add_mod(&r, "cofhcore", "4.6.6.1", &sha);
+        r.with_conn_mut(|c| {
+            upsert::set_curseforge_file(
+                c,
+                &sha,
+                1234,
+                Some(&crate::authoring::curseforge::Match {
+                    project_id: 69162,
+                    file_id: 2920433,
+                    display_name: "CoFHCore 4.6.6.1".into(),
+                    file_name: "CoFHCore-1.12.2-4.6.6.1-universal.jar".into(),
+                    download_url: Some("https://example.invalid/x.jar".into()),
+                    game_versions: vec!["1.12.2".into()],
+                }),
+                NOW,
+            )
+        })
+        .unwrap();
+
+        let pin = SourceDecl::CurseForge {
+            project_id: 69162,
+            file_id: 2920433,
+        };
+        let rep = r
+            .with_conn(|c| resolve_pack(c, &config(vec![declared("CoFHCore.jar", true, pin)])))
+            .unwrap();
+        assert_eq!(rep.resolved_mods, 1, "the pin is placed, not skipped");
+        assert!(
+            rep.unresolved.is_empty(),
+            "and it is not reported as unidentified: {:?}",
+            rep.unresolved
+        );
     }
 
     #[test]

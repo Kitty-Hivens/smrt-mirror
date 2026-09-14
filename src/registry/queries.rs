@@ -1832,6 +1832,27 @@ pub(crate) fn curseforge_identity(
 ///
 /// A matched row is never returned. Its answer cannot change, because the
 /// question is about bytes that cannot change.
+/// The content hash behind a CurseForge pin, when the mirror has met those
+/// bytes before.
+///
+/// A pin names a project and a file, which says nothing about what the file
+/// declares. The fingerprint leg wrote this row the other way round, from bytes
+/// to identity, and reading it backwards is what lets a pack that moved a mod
+/// off self-hosting keep the identity it already had: same bytes, same mod.
+pub fn sha1_for_curseforge_file(
+    conn: &Connection,
+    project_id: i64,
+    file_id: i64,
+) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT sha1 FROM curseforge_file WHERE project_id = ?1 AND file_id = ?2",
+            params![project_id, file_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?)
+}
+
 /// Every sha1 the harvest has already opened and read.
 ///
 /// The one-time gate for jars whose bytes are not ours: a pack may pin a file
