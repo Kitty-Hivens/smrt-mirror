@@ -55,11 +55,20 @@
   let relsByMod = $state<Record<number, ReleaseRow[]>>({});
   let loadingIds = $state<number[]>([]);
   const isOpen = (id: number) => openIds.includes(id);
-  // A file whose sha1 Modrinth confirmed is authentic; a self-hosted file under a
-  // mod that ALSO has a Modrinth-verified one is a likely repackage (the SC case).
-  // Asked per mod, since several are open at once and the answer is about one.
-  const hasVerified = (modId: number) =>
+  // Two questions about one mod, answering to different things. Asked per mod,
+  // since several are open at once and each answer is about one of them.
+  //
+  // The diff needs a Modrinth sibling, because comparing a jar against the
+  // genuine build is the only thing it can do and Modrinth is where the
+  // counterpart query looks. The chip asks the wider question: does the
+  // publisher carry this mod at all. A jar somebody else built is the same
+  // finding whichever registry publishes the real one.
+  const hasModrinthSibling = (modId: number) =>
     (relsByMod[modId] ?? []).some((r) => r.files.some((f) => f.modrinth_version_id));
+  const publisherCarriesMod = (modId: number) =>
+    (relsByMod[modId] ?? []).some((r) =>
+      r.files.some((f) => f.modrinth_version_id || f.curseforge?.project_id),
+    );
 
   let idTarget = $state<IdentityTarget | null>(null);
 
@@ -532,7 +541,7 @@
                   {/if}
                 </div>
                 {#each rel.files as f (f.sha1)}
-                  {@const prov = fileProvenance(f, hasVerified(m.mod_id))}
+                  {@const prov = fileProvenance(f, publisherCarriesMod(m.mod_id))}
                   <div class="file">
                     <!-- the file's own embedded icon when the mirror holds the
                          jar; otherwise the mod's, because an uncached build has
@@ -558,7 +567,7 @@
                       >{t(prov.key)}</span>
                     {#if canOperate}
                       <div class="factions">
-                        {#if !f.modrinth_version_id && hasVerified(m.mod_id) && f.cached}
+                        {#if !f.modrinth_version_id && hasModrinthSibling(m.mod_id) && f.cached}
                           <button
                             class="link"
                             class:active={diffFor === f.sha1}
