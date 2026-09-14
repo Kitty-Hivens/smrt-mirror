@@ -1844,9 +1844,18 @@ pub fn sha1_for_curseforge_file(
     project_id: i64,
     file_id: i64,
 ) -> Result<Option<String>> {
+    // The pair is not unique: the fingerprint that wrote these rows ignores
+    // whitespace, so two jars differing only in it are one CurseForge file. An
+    // identified artifact is preferred, since that is the one a pack can be
+    // resolved against, and the hash breaks the remaining tie so the answer
+    // does not move with the query plan.
     Ok(conn
         .query_row(
-            "SELECT sha1 FROM curseforge_file WHERE project_id = ?1 AND file_id = ?2",
+            "SELECT cf.sha1 FROM curseforge_file cf
+               LEFT JOIN mod_version mv ON mv.sha1 = cf.sha1
+              WHERE cf.project_id = ?1 AND cf.file_id = ?2
+              ORDER BY (mv.id IS NULL), cf.sha1
+              LIMIT 1",
             params![project_id, file_id],
             |r| r.get::<_, String>(0),
         )
