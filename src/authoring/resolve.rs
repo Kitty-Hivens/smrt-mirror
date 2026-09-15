@@ -435,6 +435,22 @@ fn place_mods(conn: &Connection, cfg: &PackConfig) -> Result<PlacedMods> {
                 // resolves against Modrinth, so it is not an unidentified mod.
                 None => continue,
             },
+            // Same reasoning as a CurseForge pin: the mirror learned which
+            // bytes the asset is when it first resolved one, so the mod keeps
+            // the identity those bytes already have.
+            SourceDecl::Github { repo, tag, asset } => {
+                match queries::github_asset(conn, repo, tag, asset)? {
+                    Some((sha1, _)) => {
+                        match by_sha1(conn, &sha1, &m.filename, &mut unresolved, &mut non_mods)? {
+                            Some(found) => found,
+                            None => continue,
+                        }
+                    }
+                    // Never fetched: the build reads it and records what it is,
+                    // so this is a pin waiting on a build, not a bad one.
+                    None => continue,
+                }
+            }
             SourceDecl::Modrinth {
                 project_id,
                 version_id,
@@ -1276,6 +1292,67 @@ mod tests {
             vec!["cofhcore"],
             "nothing in the pack answers it, so it stays missing"
         );
+    }
+
+    // A github pin is bytes the mirror has met, so the mod keeps the identity
+    // those bytes already have -- and a dependency on it is met. Getting this
+    // wrong is silent: the mod simply stops counting as present, and everything
+    // that needs it reports unmet while it sits in the same config.
+    #[test]
+    fn a_github_pin_the_mirror_has_read_places_its_mod() {
+        const SHA: &str = "cccccccccccccccccccccccccccccccccccccccc";
+        let r = Registry::open_in_memory().unwrap();
+        add_mod(&r, "hidemymods", "0.2.0", SHA);
+        let requirer = add_mod(&r, "packfixes", "1.0", &"d".repeat(40));
+        relate(
+            &r,
+            requirer,
+            "hidemymods",
+            None,
+            RelKind::Requires,
+            None,
+            crate::registry::model::Source::JarMeta,
+        );
+        r.with_conn_mut(|c| {
+            upsert::set_github_asset(
+                c,
+                "Kitty-Hivens/hidemymods",
+                "v0.2.0",
+                "hidemymods-1.7.10.jar",
+                SHA,
+                10,
+                NOW,
+            )
+        })
+        .unwrap();
+
+        let pin = SourceDecl::Github {
+            repo: "Kitty-Hivens/hidemymods".into(),
+            tag: "v0.2.0".into(),
+            asset: "hidemymods-1.7.10.jar".into(),
+        };
+        let cfg = config(vec![
+            declared("packfixes.jar", true, cache(&"d".repeat(40))),
+            declared("hidemymods.jar", true, pin),
+        ]);
+        let rep = r.with_conn(|c| resolve_pack(c, &cfg)).unwrap();
+        assert!(rep.unresolved.is_empty(), "{:?}", rep.unresolved);
+        assert_eq!(rep.resolved_mods, 2);
+        assert!(rep.missing.is_empty(), "{:?}", rep.missing);
+
+        // and a pin to an asset nothing has read yet is a pin waiting on a
+        // build, not an unidentified mod
+        let unread = config(vec![declared(
+            "other.jar",
+            true,
+            SourceDecl::Github {
+                repo: "Kitty-Hivens/hidemymods".into(),
+                tag: "v9.9.9".into(),
+                asset: "hidemymods-1.7.10.jar".into(),
+            },
+        )]);
+        let rep = r.with_conn(|c| resolve_pack(c, &unread)).unwrap();
+        assert!(rep.unresolved.is_empty(), "{:?}", rep.unresolved);
     }
 
     // A pre-build check must recognise a valid Modrinth pin: litematica depends on

@@ -304,6 +304,19 @@ pub enum Source {
         #[serde(skip_serializing_if = "Option::is_none")]
         url: Option<String>,
     },
+    /// An asset of a GitHub release.
+    ///
+    /// The url is always present, unlike the CurseForge one: a release asset is
+    /// public and its address is derived from the three fields rather than
+    /// signed and expiring, so it is carried for the launcher's convenience and
+    /// the fields remain the provenance.
+    #[serde(rename = "github")]
+    Github {
+        repo: String,
+        tag: String,
+        asset: String,
+        url: String,
+    },
     SmrtCache {
         url: String,
     },

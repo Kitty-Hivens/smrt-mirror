@@ -18,6 +18,7 @@ pub mod curator;
 pub mod curseforge;
 pub mod depfill;
 pub mod gate;
+pub mod github;
 pub mod harvest;
 pub mod harvest_sched;
 pub mod jardiff;

@@ -338,6 +338,9 @@ impl PackConfig {
                     project_id,
                     file_id,
                 } => format!("curseforge file {project_id}/{file_id}"),
+                SourceDecl::Github { repo, tag, asset } => {
+                    format!("github asset {repo}@{tag}/{asset}")
+                }
                 SourceDecl::SmrtCache { sha1 } => format!("cache jar {sha1}"),
                 SourceDecl::SmrtStatic { rel_path } => format!("static file {rel_path}"),
             };
@@ -443,6 +446,22 @@ pub enum SourceDecl {
         project_id: i64,
         #[ts(type = "number")]
         file_id: i64,
+    },
+    /// An asset of a GitHub release, named by the three things that identify
+    /// one. A release asset has a stable public URL, so unlike a CurseForge
+    /// file id there is nothing to resolve and no key to hold: the build can
+    /// write the link straight into the manifest.
+    ///
+    /// The asset is named because a release carries several. HookLib Ultimate
+    /// ships universal, dev and dev-sources under one tag and only the first
+    /// runs, so a pin that named only the repository and the tag would be a
+    /// coin toss.
+    #[serde(rename = "github")]
+    Github {
+        /// `owner/name`.
+        repo: String,
+        tag: String,
+        asset: String,
     },
     SmrtCache {
         sha1: String,

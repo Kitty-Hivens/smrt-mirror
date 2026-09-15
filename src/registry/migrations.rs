@@ -100,6 +100,10 @@ const MIGRATIONS: &[(u32, Migration)] = &[
         25,
         Migration::Sql(include_str!("schema/0025_curseforge_file.sql")),
     ),
+    (
+        26,
+        Migration::Sql(include_str!("schema/0026_github_asset.sql")),
+    ),
 ];
 
 /// Apply every migration newer than the recorded schema version, each in its

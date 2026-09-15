@@ -1132,93 +1132,25 @@ struct GithubIngest {
     asset: String,
 }
 
-fn safe_seg(s: &str) -> bool {
-    !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+'))
-}
-
-/// A single URL path segment for a release tag / asset name. Real GitHub release
-/// filenames carry spaces, parens, commas etc, so this only rejects what would
-/// change the URL's shape -- path separators, `.`/`..` traversal, control chars,
-/// emptiness. Everything else is allowed and percent-encoded into the URL.
-fn safe_path_seg(s: &str) -> bool {
-    !s.is_empty()
-        && s != "."
-        && s != ".."
-        && !s.contains('/')
-        && !s.contains('\\')
-        && !s.chars().any(|c| c.is_control())
-}
-
-/// Percent-encode one URL path segment: keep the RFC 3986 unreserved set, encode
-/// space and everything URL-structural so a filename with spaces/`&`/`+`/`#`
-/// produces a valid, unambiguous path.
-fn enc_seg(s: &str) -> String {
-    use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
-    const SET: &AsciiSet = &CONTROLS
-        .add(b' ')
-        .add(b'"')
-        .add(b'#')
-        .add(b'%')
-        .add(b'<')
-        .add(b'>')
-        .add(b'?')
-        .add(b'[')
-        .add(b'\\')
-        .add(b']')
-        .add(b'^')
-        .add(b'`')
-        .add(b'{')
-        .add(b'|')
-        .add(b'}')
-        .add(b'/')
-        .add(b'&')
-        .add(b'=')
-        .add(b'+');
-    utf8_percent_encode(s, SET).to_string()
-}
-
-/// Build the github.com release-download URL from a repo / tag / asset, or `None`
-/// if the inputs aren't safe. `repo` accepts a pasted URL or `owner/name` and is
-/// kept strict (it's the SSRF-sensitive path prefix); tag/asset may be richer
-/// filenames and are percent-encoded.
-fn github_asset_url(repo_in: &str, tag_in: &str, asset_in: &str) -> Option<String> {
-    let repo = repo_in
-        .trim()
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .trim_start_matches("github.com/")
-        .trim_end_matches('/')
-        .trim_end_matches(".git");
-    let tag = tag_in.trim();
-    let asset = asset_in.trim();
-    let repo_ok = repo.matches('/').count() == 1 && repo.split('/').all(safe_seg);
-    if !repo_ok || !safe_path_seg(tag) || !safe_path_seg(asset) {
-        return None;
-    }
-    Some(format!(
-        "https://github.com/{repo}/releases/download/{}/{}",
-        enc_seg(tag),
-        enc_seg(asset)
-    ))
-}
-
-// Fetch a GitHub release asset server-side and cache it by content hash, so a
-// pack can pull a GitHub-only mod (open-smrt-network, hidemymods) as a normal
-// smrt_cache source -- no new wire source type. The host is fixed to github.com,
-// repo is kept strict (owner/name), and tag/asset are single, percent-encoded
-// path segments (no separators, no traversal) -- not an open SSRF sink. See
-// `github_asset_url`.
+// Fetch a GitHub release asset server-side and cache it by content hash. A pack
+// naming such a file pins it with a `github` source and the launcher downloads
+// it from the publisher, so this is the archival route: it puts the bytes on
+// this mirror, which is what a takedown or a deleted release leaves us with.
+// The host is fixed to github.com, repo is kept strict (owner/name), and
+// tag/asset are single, percent-encoded path segments (no separators, no
+// traversal) -- not an open SSRF sink. See `authoring::github::asset_url`.
 async fn ingest_github(
     State(state): State<AppState>,
     Json(req): Json<GithubIngest>,
 ) -> Result<(StatusCode, Json<PutCacheResponse>), ApiError> {
-    let url = github_asset_url(&req.repo, &req.tag, &req.asset).ok_or_else(|| {
-        ApiError::BadRequest(
-            "repo must be owner/name (a github.com URL is ok); tag and asset must each be a single path segment".into(),
-        )
-    })?;
+    let url =
+        crate::authoring::github::asset_url(&req.repo, &req.tag, &req.asset).ok_or_else(|| {
+            ApiError::BadRequest(
+                "repo must be owner/name (a github.com URL is ok); tag and asset must each be a \
+                 single path segment"
+                    .into(),
+            )
+        })?;
     let bytes = state
         .modrinth
         .fetch_bytes(&url)
@@ -3098,8 +3030,7 @@ struct StaticListing {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_BLOCK_REASON, Precondition, check_precondition, fill_needed, github_asset_url,
-        precondition, tidy_reason,
+        MAX_BLOCK_REASON, Precondition, check_precondition, fill_needed, precondition, tidy_reason,
     };
     use crate::domain::{DeclaredMod, LoaderSpec, PackConfig, PackTier, SourceDecl, Visibility};
     use axum::http::{HeaderMap, HeaderValue, header};
@@ -3268,55 +3199,5 @@ mod tests {
             check_precondition(None, None, "Industrial").is_ok(),
             "an unconditional first save still creates"
         );
-    }
-
-    #[test]
-    fn github_url_accepts_plain_repo_and_simple_names() {
-        assert_eq!(
-            github_asset_url("Kitty-Hivens/open-smrt-network", "v1.2.3", "osn-1.12.2.jar"),
-            Some(
-                "https://github.com/Kitty-Hivens/open-smrt-network/releases/download/v1.2.3/osn-1.12.2.jar"
-                    .into()
-            )
-        );
-    }
-
-    #[test]
-    fn github_url_normalizes_a_pasted_url() {
-        // a pasted browser URL (scheme + host, trailing .git/slash) still resolves
-        for repo in [
-            "https://github.com/owner/repo",
-            "github.com/owner/repo/",
-            "owner/repo.git",
-        ] {
-            assert_eq!(
-                github_asset_url(repo, "v1", "a.jar"),
-                Some("https://github.com/owner/repo/releases/download/v1/a.jar".into()),
-                "repo {repo:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn github_url_percent_encodes_rich_asset_names() {
-        // spaces / parens / plus -- common in real release assets -- are encoded,
-        // not rejected
-        let url = github_asset_url("o/r", "1.0+build5", "Cool Mod (1.12.2).jar").unwrap();
-        assert_eq!(
-            url,
-            "https://github.com/o/r/releases/download/1.0%2Bbuild5/Cool%20Mod%20(1.12.2).jar"
-        );
-    }
-
-    #[test]
-    fn github_url_rejects_unsafe_inputs() {
-        // repo must be exactly owner/name
-        assert!(github_asset_url("owner/repo/extra", "v1", "a.jar").is_none());
-        assert!(github_asset_url("justowner", "v1", "a.jar").is_none());
-        // tag/asset can't add path depth or traverse
-        assert!(github_asset_url("o/r", "v1/x", "a.jar").is_none());
-        assert!(github_asset_url("o/r", "v1", "sub/a.jar").is_none());
-        assert!(github_asset_url("o/r", "..", "a.jar").is_none());
-        assert!(github_asset_url("o/r", "v1", "").is_none());
     }
 }

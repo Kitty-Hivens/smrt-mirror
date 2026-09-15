@@ -134,6 +134,7 @@ fn artifact_key(source: &SourceDecl) -> Option<String> {
         SourceDecl::SmrtCache { sha1 } => Some(sha1.clone()),
         SourceDecl::Modrinth { version_id, .. } => Some(format!("modrinth:{version_id}")),
         SourceDecl::CurseForge { file_id, .. } => Some(format!("curseforge:{file_id}")),
+        SourceDecl::Github { repo, tag, asset } => Some(format!("github:{repo}/{tag}/{asset}")),
         SourceDecl::SmrtStatic { .. } => None, // not a jar
     }
 }
@@ -215,6 +216,11 @@ async fn read_artifacts(
                 // mirror's key, so what a CurseForge pin declares is read at
                 // build time rather than here.
                 SourceDecl::CurseForge { .. } => continue,
+                // A release asset needs no key and its url is derivable, so this
+                // one can be read where it lies, the same as a Modrinth pin.
+                SourceDecl::Github { repo, tag, asset } => {
+                    Target::Remote(super::github::asset_url(repo, tag, asset))
+                }
                 SourceDecl::SmrtStatic { .. } => continue,
             };
             set.spawn(async move {
