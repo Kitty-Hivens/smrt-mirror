@@ -98,9 +98,12 @@ fn identity(m: &ModEntry) -> String {
     match &m.source {
         Source::Modrinth { project_id, .. } => format!("m:{project_id}"),
         Source::CurseForge { project_id, .. } => format!("cf:{project_id}"),
-        // The tag is the version, so it is deliberately not part of this: a pin
-        // moved to a newer release is the same mod.
-        Source::Github { repo, asset, .. } => format!("gh:{repo}/{asset}"),
+        // The repository alone. The tag is the version by definition and the
+        // asset name carries it just as often (`mymod-1.2.3.jar`), so either one
+        // would re-key the entry at every release, which is what this exists to
+        // prevent. Two assets of one repository in one pack are what the slug
+        // above is for.
+        Source::Github { repo, .. } => format!("gh:{repo}"),
         Source::SmrtCache { .. } | Source::SmrtStatic { .. } => format!("f:{}", m.filename),
     }
 }

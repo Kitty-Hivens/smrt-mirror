@@ -352,7 +352,7 @@ fn source_identity(s: &SourceDecl) -> String {
     match s {
         SourceDecl::Modrinth { project_id, .. } => format!("m:{project_id}"),
         SourceDecl::CurseForge { project_id, .. } => format!("cf:{project_id}"),
-        SourceDecl::Github { repo, asset, .. } => format!("gh:{repo}/{asset}"),
+        SourceDecl::Github { repo, .. } => format!("gh:{repo}"),
         SourceDecl::SmrtCache { sha1 } => format!("c:{sha1}"),
         SourceDecl::SmrtStatic { rel_path } => format!("s:{rel_path}"),
     }
@@ -607,11 +607,13 @@ fn already_present(cfg: &PackConfig, decl: &DeclaredMod) -> bool {
         SourceDecl::CurseForge { project_id, .. } => cfg.mods.iter().any(
             |m| matches!(&m.source, SourceDecl::CurseForge { project_id: p, .. } if p == project_id),
         ),
-        // Repository and asset, not the tag: a pin moved to a newer release is
-        // the same dependency, the way a Modrinth version bump is.
-        SourceDecl::Github { repo, asset, .. } => cfg.mods.iter().any(|m| {
-            matches!(&m.source, SourceDecl::Github { repo: r, asset: a, .. } if r == repo && a == asset)
-        }),
+        // The repository, the way the CurseForge arm above takes the project:
+        // a pin moved to a newer release is the same dependency, and the asset
+        // name usually moves with it.
+        SourceDecl::Github { repo, .. } => cfg
+            .mods
+            .iter()
+            .any(|m| matches!(&m.source, SourceDecl::Github { repo: r, .. } if r == repo)),
         SourceDecl::SmrtStatic { .. } => false,
     }
 }

@@ -517,9 +517,12 @@ fn identity(m: &DeclaredMod) -> String {
     match &m.source {
         SourceDecl::Modrinth { project_id, .. } => format!("m:{project_id}"),
         SourceDecl::CurseForge { project_id, .. } => format!("cf:{project_id}"),
-        // The tag is the version, so it is deliberately not part of this: a pin
-        // moved to a newer release is the same mod.
-        SourceDecl::Github { repo, asset, .. } => format!("gh:{repo}/{asset}"),
+        // The repository alone. The tag is the version by definition and the
+        // asset name carries it just as often (`mymod-1.2.3.jar`), so either one
+        // would re-key the entry at every release, which is what this exists to
+        // prevent. Two assets of one repository in one pack are what the slug
+        // above is for.
+        SourceDecl::Github { repo, .. } => format!("gh:{repo}"),
         SourceDecl::SmrtCache { .. } | SourceDecl::SmrtStatic { .. } => {
             format!("f:{}", m.filename)
         }
@@ -684,6 +687,42 @@ mod tests {
         assert_eq!(rows[0].op, ChangeOp::Add);
         assert_eq!(rows[0].label, "Cosmetica.jar");
         assert_eq!(rows[0].project.as_deref(), Some("s9hF9QGp"));
+    }
+
+    /// The property the identity cascade exists for, stated as the release it
+    /// has to survive: a new tag, published under a versioned asset name, is a
+    /// re-pin of one row and not a departure plus an arrival.
+    #[test]
+    fn a_github_release_bump_is_one_re_pin() {
+        let at = |tag: &str, asset: &str| DeclaredMod {
+            filename: asset.into(),
+            default_enabled: true,
+            source: SourceDecl::Github {
+                repo: "Kitty-Hivens/hidemymods".into(),
+                tag: tag.into(),
+                asset: asset.into(),
+            },
+            display: None,
+            slug: None,
+            pulled: false,
+        };
+        let mut before = cfg();
+        before.mods.push(at("v0.2.0", "hidemymods-0.2.0.jar"));
+        let mut after = cfg();
+        after.mods.push(at("v0.3.1", "hidemymods-0.3.1.jar"));
+
+        let rows = diff_configs(&before, &after);
+        assert!(
+            rows.iter().all(|r| r.op == ChangeOp::Change),
+            "a bump is a re-pin, not a removal and an arrival: {rows:?}"
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r.field == Some(ChangeField::Pin))
+                .count(),
+            1,
+            "{rows:?}"
+        );
     }
 
     #[test]

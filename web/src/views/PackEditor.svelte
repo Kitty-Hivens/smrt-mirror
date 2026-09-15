@@ -1023,8 +1023,9 @@
     // the project, not the file: another file of the same project is a re-pin
     // of this row, the same way another Modrinth version is
     if (s.type === 'curseforge') return `cf:${s.project_id}`;
-    // and the repository and asset, not the tag, for the same reason
-    if (s.type === 'github') return `gh:${s.repo}/${s.asset}`;
+    // and the repository alone: a release bump moves the tag and usually the
+    // asset name with it, and both name the same mod
+    if (s.type === 'github') return `gh:${s.repo}`;
     return `s:${s.rel_path}`;
   }
 
