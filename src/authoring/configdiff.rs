@@ -10,8 +10,8 @@
 //!
 //! Two rules make the answer match what a person did.
 //!
-//! **Rows are matched by identity, not by position.** A mod is its Modrinth
-//! project, else its curator slug, else its filename -- the cascade
+//! **Rows are matched by identity, not by position.** A mod is its curator slug,
+//! else the publisher project its pin names, else its filename -- the cascade
 //! `domain::diff` already uses across two builds, so a re-pin reads as a re-pin
 //! on both sides of the mirror. An asset is its destination path.
 //!
@@ -497,20 +497,32 @@ fn authored_mods(cfg: &PackConfig) -> BTreeMap<String, &DeclaredMod> {
     out
 }
 
-/// The identity a declared mod is matched by across two configs: the Modrinth
-/// project (a re-pin is the same mod), else the curator slug (ADR 0002), else
-/// the filename. The same cascade `domain::diff::identity` uses across two
-/// builds, so one mod reads as one mod wherever the mirror is asked.
+/// The identity a declared mod is matched by across two configs: the curator
+/// slug (ADR 0002), else the publisher project a pin names, else the filename.
+/// The same cascade `domain::diff::identity` uses across two builds, so one mod
+/// reads as one mod wherever the mirror is asked.
+///
+/// The slug leads because it is the only one of the three that survives a move
+/// between publishers, and that move is the whole point of having more than one
+/// source type: a mod repinned off this mirror onto CurseForge is the same mod,
+/// and a diff that reads it as a removal plus an addition says the pack lost
+/// something it did not lose.
 fn identity(m: &DeclaredMod) -> String {
+    // A blank slug is the editor's own default for a cached jar, not an
+    // identity anyone assigned: keying by it would make every jar nobody named
+    // the same row.
+    if let Some(s) = m.slug.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        return format!("s:{s}");
+    }
     match &m.source {
         SourceDecl::Modrinth { project_id, .. } => format!("m:{project_id}"),
-        // A blank slug is the editor's own default for a cached jar, not an
-        // identity anyone assigned: keying by it would make every jar nobody
-        // named the same row.
-        _ => match m.slug.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            Some(s) => format!("s:{s}"),
-            None => format!("f:{}", m.filename),
-        },
+        SourceDecl::CurseForge { project_id, .. } => format!("cf:{project_id}"),
+        // The tag is the version, so it is deliberately not part of this: a pin
+        // moved to a newer release is the same mod.
+        SourceDecl::Github { repo, asset, .. } => format!("gh:{repo}/{asset}"),
+        SourceDecl::SmrtCache { .. } | SourceDecl::SmrtStatic { .. } => {
+            format!("f:{}", m.filename)
+        }
     }
 }
 

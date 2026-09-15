@@ -84,16 +84,24 @@ pub struct PackDiff {
     pub assets_updated: Vec<DiffUpdate>,
 }
 
-/// The identity a mod entry is matched by across builds: the Modrinth project
-/// (a re-pin is the same mod), else the curator slug (ADR 0002), else the
-/// filename.
+/// The identity a mod entry is matched by across builds: the curator slug (ADR
+/// 0002), else the publisher project the entry names, else the filename.
+///
+/// The slug leads because it is the only one of the three that survives a move
+/// between publishers. A mod repinned off this mirror onto CurseForge or a
+/// release asset is the same mod, and the update dialog a player reads must say
+/// so rather than list it as one thing gone and another arrived.
 fn identity(m: &ModEntry) -> String {
+    if let Some(s) = m.slug.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        return format!("s:{s}");
+    }
     match &m.source {
         Source::Modrinth { project_id, .. } => format!("m:{project_id}"),
-        _ => match &m.slug {
-            Some(s) => format!("s:{s}"),
-            None => format!("f:{}", m.filename),
-        },
+        Source::CurseForge { project_id, .. } => format!("cf:{project_id}"),
+        // The tag is the version, so it is deliberately not part of this: a pin
+        // moved to a newer release is the same mod.
+        Source::Github { repo, asset, .. } => format!("gh:{repo}/{asset}"),
+        Source::SmrtCache { .. } | Source::SmrtStatic { .. } => format!("f:{}", m.filename),
     }
 }
 
