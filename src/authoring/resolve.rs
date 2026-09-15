@@ -498,6 +498,23 @@ fn place_mods(conn: &Connection, cfg: &PackConfig) -> Result<PlacedMods> {
     })
 }
 
+/// The registry mod behind each declared row the registry can place, as
+/// `mod_id -> filename`. The first row of a mod wins, matching how findings
+/// elsewhere point at the earlier of two declarations.
+///
+/// A pack declares a mod by naming a file, and which file that is depends on
+/// the publisher it is pinned from. Two rows can be the same mod under two
+/// source types, and nothing comparing declarations to each other can see it:
+/// that is how a library already in the pack reads as missing and gets pulled
+/// a second time, which Forge refuses to start.
+pub fn declared_mods(conn: &Connection, cfg: &PackConfig) -> Result<HashMap<i64, String>> {
+    let mut out: HashMap<i64, String> = HashMap::new();
+    for p in place_mods(conn, cfg)?.present {
+        out.entry(p.mod_id).or_insert(p.filename);
+    }
+    Ok(out)
+}
+
 /// The outcome of placing a pack's declared mods on the registry graph.
 struct PlacedMods {
     /// Mods the registry has an identity for -- reasoned about fully.
