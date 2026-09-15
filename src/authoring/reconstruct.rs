@@ -81,6 +81,13 @@ fn source_decl(source: &Source, sha1: &str) -> SourceDecl {
             project_id: *project_id,
             file_id: *file_id,
         },
+        Source::Github {
+            repo, tag, asset, ..
+        } => SourceDecl::Github {
+            repo: repo.clone(),
+            tag: tag.clone(),
+            asset: asset.clone(),
+        },
         Source::SmrtCache { .. } => SourceDecl::SmrtCache {
             sha1: sha1.to_string(),
         },

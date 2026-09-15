@@ -688,6 +688,27 @@ pub fn link_build_mod(
     Ok(())
 }
 
+/// Record which bytes a GitHub release asset is, so the next resolve does not
+/// have to fetch it to find out.
+pub fn set_github_asset(
+    conn: &Connection,
+    repo: &str,
+    tag: &str,
+    asset: &str,
+    sha1: &str,
+    size: u64,
+    now: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO github_asset (repo, tag, asset, sha1, size, read_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(repo, tag, asset) DO UPDATE SET
+           sha1 = excluded.sha1, size = excluded.size, read_at = excluded.read_at",
+        rusqlite::params![repo, tag, asset, sha1, size as i64, now],
+    )?;
+    Ok(())
+}
+
 /// Record what CurseForge said about a jar, including when it said nothing.
 ///
 /// A row without a `project_id` is the useful negative: asked, matched nowhere.

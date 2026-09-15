@@ -135,6 +135,15 @@ pub struct PackSeed {
     pub conflicts: Vec<(String, String)>, // (a_sha1, b_sha1), from display.incompatible_with
 }
 
+/// Which bytes one GitHub release asset is.
+pub struct GithubPin {
+    pub repo: String,
+    pub tag: String,
+    pub asset: String,
+    pub sha1: String,
+    pub size: u64,
+}
+
 #[derive(Default)]
 pub struct ScanData {
     pub jars: Vec<JarSeed>,
@@ -155,6 +164,11 @@ pub struct ScanData {
     /// aliases are settled, so the flags land on whatever mod owns the project
     /// -- including a self-hosted provider linked to it by slug.
     pub project_envs: HashMap<String, (String, String)>,
+    /// GitHub release assets this scan fetched, and which bytes each turned out
+    /// to be. The row is the pin, read backwards by the resolve: unlike a
+    /// CurseForge file, nothing upstream publishes an asset's hash, so reading
+    /// it is the only way to learn one.
+    pub github: Vec<GithubPin>,
     /// Whether the Modrinth sha1-identity leg of this scan actually answered.
     /// False on an error AND on a suspiciously empty answer (hashes sent,
     /// nothing matched -- the shape a degraded upstream returns): `write_scan`
@@ -529,6 +543,13 @@ pub fn write_scan(conn: &Connection, scan: &ScanData, now: &str) -> Result<Harve
         // upstream weather must not erase derived state
         tracing::warn!("modrinth leg degraded; keeping last good modrinth relations");
         conn.execute("DELETE FROM relation WHERE source = 'inferred'", [])?;
+    }
+
+    // What a GitHub pin names, recorded before anything else reads it: the
+    // resolve goes from the pin to these bytes, and a jar row without it is a
+    // mod the pack can no longer find.
+    for p in &scan.github {
+        upsert::set_github_asset(conn, &p.repo, &p.tag, &p.asset, &p.sha1, p.size, now)?;
     }
 
     let mut sides_derived = 0i64;
@@ -1151,14 +1172,73 @@ fn needs_reading(
     Some((sha1, url))
 }
 
+/// A jar fetched from the publisher a pack pins it from, and what has to be
+/// recorded so the resolve can get back from the pin to these bytes.
+struct Borrowed {
+    sha1: String,
+    bytes: Vec<u8>,
+    pin: BorrowedPin,
+}
+
+enum BorrowedPin {
+    /// The file the API described, hash and all.
+    CurseForge(Box<FileInfo>),
+    /// The three fields the pin names. Nothing else is known about it: GitHub
+    /// publishes no hash for a release asset, so the fetch is what settles it.
+    Github {
+        repo: String,
+        tag: String,
+        asset: String,
+    },
+}
+
+/// Every pin across every pack config that names a publisher rather than us.
+///
+/// Configs rather than built manifests: a pin that has just been edited is
+/// exactly the one the next build will be checked against, and waiting for a
+/// build to learn it would mean the first build after every repin is wrong.
+async fn publisher_pins(
+    storage: &Storage,
+) -> (HashSet<(i64, i64)>, HashSet<(String, String, String)>) {
+    let mut curseforge: HashSet<(i64, i64)> = HashSet::new();
+    let mut github: HashSet<(String, String, String)> = HashSet::new();
+    let packs = match storage.list_authoring_packs().await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "listing packs for borrowed-jar reads failed");
+            return (curseforge, github);
+        }
+    };
+    for pid in packs {
+        let Ok(cfg) = storage.load_pack_config(&pid).await else {
+            continue; // a pack with no config yet
+        };
+        for m in &cfg.mods {
+            match &m.source {
+                crate::domain::SourceDecl::CurseForge {
+                    project_id,
+                    file_id,
+                } => {
+                    curseforge.insert((*project_id, *file_id));
+                }
+                crate::domain::SourceDecl::Github { repo, tag, asset } => {
+                    github.insert((repo.clone(), tag.clone(), asset.clone()));
+                }
+                _ => {}
+            }
+        }
+    }
+    (curseforge, github)
+}
+
 /// Fetch, once, the jars a pack pins from a publisher rather than from us.
 ///
-/// A CurseForge pin names a file the mirror never holds: the build reads its
-/// hash and size from the API and the launcher downloads it from the publisher,
-/// so no pass over our cache can ever see what it declares. Nothing then knows
-/// its modid, which means every dependency keyed on that modid goes unmet and
-/// the mod itself never appears as resolved -- a repin silently blinds the
-/// pre-publish check for the mod it moved.
+/// Such a pin names a file the mirror never holds: the build reads its hash and
+/// size from the publisher and the launcher downloads it from there, so no pass
+/// over our cache can ever see what it declares. Nothing then knows its modid,
+/// which means every dependency keyed on that modid goes unmet and the mod
+/// itself never appears as resolved -- a repin silently blinds the pre-publish
+/// check for the mod it moved.
 ///
 /// The bytes are read and dropped. Keeping them would put a copy in a cache
 /// that is served wholesale, which is both the thing a repin exists to stop and,
@@ -1174,75 +1254,92 @@ async fn borrowed_jars(
     curseforge: Option<&CurseForge>,
     cache_shas: &HashSet<String>,
     already_read: &HashSet<String>,
-) -> Vec<(String, FileInfo, Vec<u8>)> {
-    let Some(cf) = curseforge else {
-        return Vec::new();
-    };
-    // Configs rather than built manifests: a pin that has just been edited is
-    // exactly the one the next build will be checked against, and waiting for a
-    // build to learn it would mean the first build after every repin is wrong.
-    let mut pins: HashSet<(i64, i64)> = HashSet::new();
-    let packs = match storage.list_authoring_packs().await {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(error = %e, "listing packs for borrowed-jar reads failed");
-            return Vec::new();
-        }
-    };
-    for pid in packs {
-        let Ok(cfg) = storage.load_pack_config(&pid).await else {
-            continue; // a pack with no config yet
-        };
-        for m in &cfg.mods {
-            if let crate::domain::SourceDecl::CurseForge {
-                project_id,
-                file_id,
-            } = &m.source
-            {
-                pins.insert((*project_id, *file_id));
+    github_read: &HashSet<(String, String, String)>,
+) -> Vec<Borrowed> {
+    let (cf_pins, gh_pins) = publisher_pins(storage).await;
+
+    let mut out = Vec::new();
+    if let Some(cf) = curseforge {
+        for (project_id, file_id) in cf_pins {
+            let info = match cf.file(project_id, file_id).await {
+                Ok(i) => i,
+                Err(e) => {
+                    tracing::warn!(project_id, file_id, error = %format!("{e:#}"), "curseforge file lookup failed; that pin stays unread");
+                    continue;
+                }
+            };
+            let Some((sha1, url)) = needs_reading(&info, cache_shas, already_read) else {
+                continue;
+            };
+            let info = FileInfo {
+                sha1: Some(sha1.clone()),
+                ..info
+            };
+            let Some(bytes) = fetch_borrowed(modrinth, &url).await else {
+                continue;
+            };
+            // The hash CurseForge published is what the manifest will tell a
+            // launcher to verify against, so bytes that do not match it are not
+            // the file this pin names and must not be read as if they were.
+            let got = sha1_of(&bytes);
+            if got != sha1 {
+                tracing::warn!(project_id, file_id, expected = %sha1, got = %got, "borrowed jar hash mismatch; not read");
+                continue;
             }
+            out.push(Borrowed {
+                sha1,
+                bytes,
+                pin: BorrowedPin::CurseForge(Box::new(info)),
+            });
         }
     }
 
-    let mut out = Vec::new();
-    for (project_id, file_id) in pins {
-        let info = match cf.file(project_id, file_id).await {
-            Ok(i) => i,
-            Err(e) => {
-                tracing::warn!(project_id, file_id, error = %format!("{e:#}"), "curseforge file lookup failed; that pin stays unread");
-                continue;
-            }
-        };
-        let Some((sha1, url)) = needs_reading(&info, cache_shas, already_read) else {
-            continue;
-        };
-        let info = FileInfo {
-            sha1: Some(sha1.clone()),
-            ..info
-        };
-        let bytes = match modrinth.fetch_bytes(&url).await {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(url = %url, error = %format!("{e:#}"), "borrowed jar fetch failed");
-                continue;
-            }
-        };
-        // The hash CurseForge published is what the manifest will tell a
-        // launcher to verify against, so bytes that do not match it are not the
-        // file this pin names and must not be read as if they were.
-        let mut hasher = Sha1::new();
-        hasher.update(&bytes);
-        let got = hex::encode(hasher.finalize());
-        if got != sha1 {
-            tracing::warn!(project_id, file_id, expected = %sha1, got = %got, "borrowed jar hash mismatch; not read");
+    // A release asset needs no key, so this leg runs whether or not the mirror
+    // has one. There is no published hash to check the bytes against either:
+    // the URL is the claim, and what comes back is what the launcher will get.
+    for (repo, tag, asset) in gh_pins {
+        if github_read.contains(&(repo.clone(), tag.clone(), asset.clone())) {
             continue;
         }
-        out.push((sha1, info, bytes));
+        let Some(url) = super::github::asset_url(&repo, &tag, &asset) else {
+            tracing::warn!(
+                repo,
+                tag,
+                asset,
+                "github pin is not a release asset; not read"
+            );
+            continue;
+        };
+        let Some(bytes) = fetch_borrowed(modrinth, &url).await else {
+            continue;
+        };
+        out.push(Borrowed {
+            sha1: sha1_of(&bytes),
+            bytes,
+            pin: BorrowedPin::Github { repo, tag, asset },
+        });
     }
+
     if !out.is_empty() {
         tracing::info!(jars = out.len(), "read jars pinned from a publisher");
     }
     out
+}
+
+async fn fetch_borrowed(modrinth: &Modrinth, url: &str) -> Option<Vec<u8>> {
+    match modrinth.fetch_bytes(url).await {
+        Ok(b) => Some(b),
+        Err(e) => {
+            tracing::warn!(url = %url, error = %format!("{e:#}"), "borrowed jar fetch failed");
+            None
+        }
+    }
+}
+
+fn sha1_of(bytes: &[u8]) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
 }
 
 /// What the registry already knows, so a scan can skip the work of learning it
@@ -1260,6 +1357,10 @@ pub struct Known<'a> {
     /// borrowed jar is fetched until both are true, since either one alone
     /// leaves a pack pointing at something the resolve cannot place.
     pub already_read: &'a HashSet<String>,
+    /// GitHub pins whose asset has been read. The same rule in the shape that
+    /// side of it comes in: a github pin is keyed by what it names, not by a
+    /// hash, because the hash is what reading it is for.
+    pub github_read: &'a HashSet<(String, String, String)>,
 }
 
 /// Scan the storage tree + Modrinth into a [ScanData]. Async (FS reads + one
@@ -1276,6 +1377,7 @@ pub async fn scan(
         envless_project_aliases,
         awaiting_curseforge,
         already_read,
+        github_read,
     } = known;
     let inventory = storage.list_cache_inventory().await.map_err(ae)?;
     let mut size_by_sha: HashMap<String, i64> = inventory
@@ -1309,7 +1411,15 @@ pub async fn scan(
     // dependency and drops out of the resolve. Fetched here to be read and
     // dropped, exactly as the Modrinth leg below does for a re-upload: what is
     // wanted is what the file says about itself, not a copy of it.
-    let borrowed = borrowed_jars(storage, modrinth, curseforge, &cache_shas, already_read).await;
+    let borrowed = borrowed_jars(
+        storage,
+        modrinth,
+        curseforge,
+        &cache_shas,
+        already_read,
+        github_read,
+    )
+    .await;
     // What the pack said this file is, kept for after the read. A pin states
     // the project and the file outright, which is better evidence than asking
     // the fingerprint index whose bytes these are, and it is the only way the
@@ -1317,15 +1427,25 @@ pub async fn scan(
     // so a jar being read for the first time is never in the set it asks about,
     // and by the next harvest it is no longer fetched. Two gates computed from
     // one table, consumed in opposite directions, and the file falls between.
-    let borrowed_pins: HashMap<String, FileInfo> = borrowed
-        .iter()
-        .map(|(sha, info, _)| (sha.clone(), info.clone()))
-        .collect();
-    for (sha, info, _) in &borrowed {
+    let mut borrowed_pins: HashMap<String, FileInfo> = HashMap::new();
+    let mut github_pins: Vec<GithubPin> = Vec::new();
+    for b in &borrowed {
         size_by_sha
-            .entry(sha.clone())
-            .or_insert(info.size_bytes as i64);
-        all_shas.insert(sha.clone());
+            .entry(b.sha1.clone())
+            .or_insert(b.bytes.len() as i64);
+        all_shas.insert(b.sha1.clone());
+        match &b.pin {
+            BorrowedPin::CurseForge(info) => {
+                borrowed_pins.insert(b.sha1.clone(), (**info).clone());
+            }
+            BorrowedPin::Github { repo, tag, asset } => github_pins.push(GithubPin {
+                repo: repo.clone(),
+                tag: tag.clone(),
+                asset: asset.clone(),
+                sha1: b.sha1.clone(),
+                size: b.bytes.len() as u64,
+            }),
+        }
     }
 
     let (
@@ -1350,7 +1470,7 @@ pub async fn scan(
         let from_cache = jar_paths
             .into_iter()
             .filter_map(|(sha, path)| std::fs::read(&path).ok().map(|b| (sha, b)));
-        let from_publisher = borrowed.into_iter().map(|(sha, _, bytes)| (sha, bytes));
+        let from_publisher = borrowed.into_iter().map(|b| (b.sha1, b.bytes));
         for (sha, bytes) in from_cache.chain(from_publisher) {
             fingerprints.insert(sha.clone(), curseforge::fingerprint(&bytes));
             let r = read_jar(&bytes);
@@ -1792,6 +1912,7 @@ pub async fn scan(
         jars,
         packs,
         curseforge: curseforge_answers,
+        github: github_pins,
         modrinth_modids_learned,
         dep_project_slugs,
         project_envs,
@@ -1816,6 +1937,7 @@ pub async fn run_harvest(
         envless_project_aliases,
         awaiting_curseforge,
         already_read,
+        github_read,
     ) = tokio::task::spawn_blocking(move || {
         reg.with_conn(|c| {
             Ok((
@@ -1824,6 +1946,7 @@ pub async fn run_harvest(
                 queries::modrinth_aliases_without_env(c)?,
                 queries::shas_awaiting_curseforge(c, &asked_before)?,
                 queries::shas_read(c)?,
+                queries::github_pins_read(c)?,
             ))
         })
     })
@@ -1831,6 +1954,7 @@ pub async fn run_harvest(
     .map_err(|e| anyhow::anyhow!("known-modid query task: {e}"))??;
     let awaiting_curseforge: HashSet<String> = awaiting_curseforge.into_iter().collect();
     let already_read: HashSet<String> = already_read.into_iter().collect();
+    let github_read: HashSet<(String, String, String)> = github_read.into_iter().collect();
     let scan = scan(
         storage,
         modrinth,
@@ -1841,6 +1965,7 @@ pub async fn run_harvest(
             envless_project_aliases: &envless_project_aliases,
             awaiting_curseforge: &awaiting_curseforge,
             already_read: &already_read,
+            github_read: &github_read,
         },
     )
     .await?;
@@ -1902,6 +2027,7 @@ mod tests {
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
+            github: Vec::new(),
             modrinth_leg_ok: true,
         };
         r.with_txn(|c| write_scan(c, &scan, "T0")).unwrap();
@@ -2075,6 +2201,7 @@ mod tests {
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
+            github: Vec::new(),
             modrinth_leg_ok: true,
         }
     }
@@ -2188,6 +2315,7 @@ mod tests {
             modrinth_modids_learned: 1,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
+            github: Vec::new(),
             modrinth_leg_ok: true,
         };
         r.with_txn(|c| write_scan(c, &scan, "T0")).unwrap();
@@ -2229,6 +2357,7 @@ mod tests {
             modrinth_modids_learned: 0,
             dep_project_slugs: HashMap::from([("NvZ9ZhwE".to_string(), "autoreglib".to_string())]),
             project_envs: Default::default(),
+            github: Vec::new(),
             modrinth_leg_ok: true,
         };
         let rep = r.with_txn(|c| write_scan(c, &scan, "T0")).unwrap();
@@ -2264,6 +2393,7 @@ mod tests {
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
+            github: Vec::new(),
             modrinth_leg_ok: true,
         };
         r.with_txn(|c| write_scan(c, &scan, "T0")).unwrap();
@@ -2305,6 +2435,7 @@ mod tests {
             modrinth_modids_learned: 0,
             dep_project_slugs: HashMap::from([("NvZ9ZhwE".to_string(), "autoreglib".to_string())]),
             project_envs: Default::default(),
+            github: Vec::new(),
             modrinth_leg_ok: true,
         };
         let rep = r.with_txn(|c| write_scan(c, &scan, "T1")).unwrap();
@@ -2400,6 +2531,7 @@ mod tests {
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
+            github: Vec::new(),
             modrinth_leg_ok: true,
         };
         r.with_txn(|c| write_scan(c, &scan, "T0")).unwrap();
@@ -2534,6 +2666,7 @@ mod tests {
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
+            github: Vec::new(),
             modrinth_leg_ok: true,
         };
         let rep = r.with_txn(|c| write_scan(c, &scan, "T0")).unwrap();
@@ -2563,6 +2696,7 @@ mod tests {
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
+            github: Vec::new(),
             modrinth_leg_ok: true,
         };
         let rep = r.with_txn(|c| write_scan(c, &plain, "T1")).unwrap();
@@ -2595,6 +2729,7 @@ mod tests {
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
+            github: Vec::new(),
             modrinth_leg_ok: true,
         };
         r.with_txn(|c| write_scan(c, &scan, "T0")).unwrap();
@@ -2669,6 +2804,7 @@ mod tests {
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
+            github: Vec::new(),
             modrinth_leg_ok: true,
         };
 
@@ -2762,6 +2898,7 @@ mod tests {
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
+            github: Vec::new(),
             modrinth_leg_ok: true,
         };
         let rep = r.with_txn(|c| write_scan(c, &scan, "T0")).unwrap();
@@ -2816,6 +2953,7 @@ mod tests {
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
+            github: Vec::new(),
             modrinth_leg_ok: true,
         };
         let rep = r.with_txn(|c| write_scan(c, &scan, "T0")).unwrap();
@@ -2854,6 +2992,7 @@ mod tests {
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
+            github: Vec::new(),
             modrinth_leg_ok: true,
         };
 
@@ -2946,6 +3085,7 @@ mod tests {
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
+            github: Vec::new(),
             modrinth_leg_ok: true,
         };
         r.with_txn(|c| write_scan(c, &scan, "T0")).unwrap();
@@ -2990,6 +3130,7 @@ mod tests {
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
+            github: Vec::new(),
             modrinth_leg_ok: true,
         };
         let rep = r.with_txn(|c| write_scan(c, &scan, "T0")).unwrap();
@@ -3056,6 +3197,7 @@ mod tests {
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
+            github: Vec::new(),
             modrinth_leg_ok: true,
         };
         let rep = r.with_txn(|c| write_scan(c, &scan, "T0")).unwrap();
@@ -3101,6 +3243,7 @@ mod tests {
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
+            github: Vec::new(),
             modrinth_leg_ok: true,
         };
         let rep = r.with_txn(|c| write_scan(c, &scan, "T0")).unwrap();
@@ -3249,6 +3392,7 @@ mod tests {
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
+            github: Vec::new(),
             modrinth_leg_ok: true,
         };
         let rep = r.with_txn(|c| write_scan(c, &scan, "T0")).unwrap();
@@ -3282,6 +3426,7 @@ mod tests {
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
+            github: Vec::new(),
             modrinth_leg_ok: true,
         };
         r.with_txn(|c| write_scan(c, &scan, "T0")).unwrap();
@@ -3305,6 +3450,7 @@ mod tests {
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
+            github: Vec::new(),
             modrinth_leg_ok: true,
         };
         r.with_txn(|c| write_scan(c, &scan2, "T1")).unwrap();
@@ -3333,6 +3479,7 @@ mod tests {
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
+            github: Vec::new(),
             modrinth_leg_ok: true,
         };
         r.with_txn(|c| write_scan(c, &scan, "T0")).unwrap();
@@ -3353,6 +3500,7 @@ mod tests {
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
+            github: Vec::new(),
             modrinth_leg_ok: true,
         };
         r.with_txn(|c| write_scan(c, &scan2, "T1")).unwrap();
@@ -3390,6 +3538,7 @@ mod tests {
                 .iter()
                 .map(|(p, c, s)| (p.to_string(), (c.to_string(), s.to_string())))
                 .collect(),
+            github: Vec::new(),
             modrinth_leg_ok: true,
         };
         let env = |r: &Registry| -> (Option<String>, Option<String>) {
@@ -3455,6 +3604,7 @@ mod tests {
                 "NvZ9ZhwE".to_string(),
                 ("required".to_string(), "required".to_string()),
             )]),
+            github: Vec::new(),
             modrinth_leg_ok: true,
         };
         r.with_txn(|c| write_scan(c, &scan, "T0")).unwrap();
@@ -3488,6 +3638,7 @@ mod tests {
             modrinth_modids_learned: 0,
             dep_project_slugs: Default::default(),
             project_envs: Default::default(),
+            github: Vec::new(),
             modrinth_leg_ok: true,
         };
         r.with_txn(|c| write_scan(c, &scan, "T0")).unwrap();

@@ -41,7 +41,7 @@ pub async fn fill_dependencies(
     let versions = ModrinthCache::default();
     let mut added_total = 0;
     for _ in 0..MAX_PASSES {
-        let plan = plan_for(cfg, registry, modrinth, &mut read).await?;
+        let Pass { plan, mut declared } = plan_for(cfg, registry, modrinth, &mut read).await?;
         let mut added = false;
         for target in &plan.missing {
             // Per-target isolation: one unresolvable target (a Modrinth
@@ -49,9 +49,9 @@ pub async fn fill_dependencies(
             // other targets still fill, and this one stays in the resolve
             // report's missing list instead of silently taking the rest
             // down with it.
-            let decl =
+            let cand =
                 match resolve_target(target, cfg, registry, modrinth, storage, &versions).await {
-                    Ok(Some(d)) => d,
+                    Ok(Some(c)) => c,
                     Ok(None) => continue,
                     Err(e) => {
                         tracing::warn!(
@@ -62,19 +62,27 @@ pub async fn fill_dependencies(
                         continue;
                     }
                 };
-            if !already_present(cfg, &decl) {
-                cfg.mods.push(decl);
-                added = true;
-                added_total += 1;
+            if already_present(cfg, &cand, &declared) {
+                continue;
             }
+            // Two targets in one pass can name one mod (an addon and its host
+            // both requiring the same library). The pack's identities are read
+            // once per pass, so the row just added has to join them here or the
+            // second target pulls it again.
+            if let Some(id) = cand.mod_id {
+                declared.insert(id, cand.decl.filename.clone());
+            }
+            cfg.mods.push(cand.decl);
+            added = true;
+            added_total += 1;
         }
         if !added {
             break;
         }
     }
     // record the final graph so the build derives required-ness from it
-    let plan = plan_for(cfg, registry, modrinth, &mut read).await?;
-    apply_requires(cfg, &plan.requires);
+    let pass = plan_for(cfg, registry, modrinth, &mut read).await?;
+    apply_requires(cfg, &pass.plan.requires);
     prune_orphaned_pulled(cfg);
     Ok(added_total)
 }
@@ -92,13 +100,30 @@ async fn plan_for(
     registry: &Arc<Registry>,
     modrinth: &Modrinth,
     read: &mut HashMap<String, MrVersion>,
-) -> Result<resolve::DepFillPlan> {
+) -> Result<Pass> {
     let snapshot = cfg.clone();
-    let mut plan = registry
-        .read(move |c| resolve::dependency_fill_plan(c, &snapshot))
+    let (mut plan, declared) = registry
+        .read(move |c| {
+            Ok((
+                resolve::dependency_fill_plan(c, &snapshot)?,
+                resolve::declared_mods(c, &snapshot)?,
+            ))
+        })
         .await?;
-    merge_wire_deps(&mut plan, cfg, registry, modrinth, read).await;
-    Ok(plan)
+    merge_wire_deps(&mut plan, cfg, registry, modrinth, read, &declared).await;
+    Ok(Pass { plan, declared })
+}
+
+/// One fill pass's reading of the config: what it still needs, and which
+/// registry mods it already holds.
+///
+/// The second is not derivable from the first. The plan is a list of selectors
+/// nothing satisfies, and answering "is this one already here" by comparing
+/// declarations only works while both sides are pinned from the same publisher.
+struct Pass {
+    plan: resolve::DepFillPlan,
+    /// `mod_id -> the filename the pack declares it under`.
+    declared: HashMap<i64, String>,
 }
 
 /// One hard dependency read straight off a Modrinth version, before the mirror
@@ -132,21 +157,29 @@ async fn merge_wire_deps(
     registry: &Arc<Registry>,
     modrinth: &Modrinth,
     read: &mut HashMap<String, MrVersion>,
+    declared: &HashMap<i64, String>,
 ) {
     let deps = wire_deps(cfg, registry, modrinth, read).await;
+    let providers = wire_providers(&deps, registry, declared).await;
     let known: HashSet<&str> = plan.missing.iter().map(|t| t.selector.as_str()).collect();
     let mut extra: Vec<resolve::MissingTarget> = Vec::new();
     for d in &deps {
-        match cfg.mods.iter().find(|m| {
-            matches!(&m.source, SourceDecl::Modrinth { project_id, .. } if *project_id == d.project_id)
-        }) {
-            Some(present) => plan
-                .requires
-                .push((d.requirer.clone(), present.filename.clone())),
+        // The pack's own Modrinth pins first, since one the harvest has not read
+        // has no registry identity to be found by, then the same mod under
+        // whatever else it is pinned from.
+        let present = cfg
+            .mods
+            .iter()
+            .find(|m| {
+                matches!(&m.source, SourceDecl::Modrinth { project_id, .. } if *project_id == d.project_id)
+            })
+            .map(|m| m.filename.clone())
+            .or_else(|| providers.get(&d.project_id).cloned());
+        match present {
+            Some(filename) => plan.requires.push((d.requirer.clone(), filename)),
             None => {
                 let selector = format!("modrinth:{}", d.project_id);
-                if known.contains(selector.as_str())
-                    || extra.iter().any(|t| t.selector == selector)
+                if known.contains(selector.as_str()) || extra.iter().any(|t| t.selector == selector)
                 {
                     continue;
                 }
@@ -159,6 +192,43 @@ async fn merge_wire_deps(
         }
     }
     plan.missing.extend(extra);
+}
+
+/// Which of the projects these dependencies name the pack already ships, under
+/// whatever source type, as `project_id -> the filename it is declared under`.
+///
+/// A wire dependency names a Modrinth project and nothing else, so matching it
+/// against the pack's Modrinth pins alone answers for one publisher out of
+/// four. A library the pack takes from CurseForge, from a release asset or out
+/// of the mirror's own cache reads as absent, and what follows from that is a
+/// second copy of a mod that is already there plus a missing requires edge on
+/// the one that is.
+async fn wire_providers(
+    deps: &[WireDep],
+    registry: &Arc<Registry>,
+    declared: &HashMap<i64, String>,
+) -> HashMap<String, String> {
+    let projects: HashSet<String> = deps.iter().map(|d| d.project_id.clone()).collect();
+    if projects.is_empty() || declared.is_empty() {
+        return HashMap::new();
+    }
+    let ids: Vec<String> = projects.into_iter().collect();
+    let found: Vec<(String, i64)> = registry
+        .read(move |c| {
+            let mut out = Vec::new();
+            for p in ids {
+                if let Some(id) = queries::mod_id_for_alias(c, "modrinth", &p)? {
+                    out.push((p, id));
+                }
+            }
+            Ok(out)
+        })
+        .await
+        .unwrap_or_default();
+    found
+        .into_iter()
+        .filter_map(|(p, id)| declared.get(&id).map(|f| (p, f.clone())))
+        .collect()
 }
 
 /// Read the required dependencies of every Modrinth pin the registry has not
@@ -335,6 +405,7 @@ pub async fn preview_fill(
                 source: match &m.source {
                     SourceDecl::Modrinth { .. } => "modrinth".to_string(),
                     SourceDecl::CurseForge { .. } => "curseforge".to_string(),
+                    SourceDecl::Github { .. } => "github".to_string(),
                     SourceDecl::SmrtCache { .. } => "cache".to_string(),
                     SourceDecl::SmrtStatic { .. } => "static".to_string(),
                 },
@@ -351,6 +422,7 @@ fn source_identity(s: &SourceDecl) -> String {
     match s {
         SourceDecl::Modrinth { project_id, .. } => format!("m:{project_id}"),
         SourceDecl::CurseForge { project_id, .. } => format!("cf:{project_id}"),
+        SourceDecl::Github { repo, .. } => format!("gh:{repo}"),
         SourceDecl::SmrtCache { sha1 } => format!("c:{sha1}"),
         SourceDecl::SmrtStatic { rel_path } => format!("s:{rel_path}"),
     }
@@ -418,7 +490,7 @@ async fn resolve_target(
     modrinth: &Modrinth,
     storage: &Storage,
     versions: &ModrinthCache,
-) -> Result<Option<DeclaredMod>> {
+) -> Result<Option<Candidate>> {
     let bare = target
         .selector
         .split('@')
@@ -449,7 +521,11 @@ async fn resolve_target(
         if let Some(version_id) = &target.pinned_version {
             match versions.get_or_fetch(modrinth, &project, version_id).await {
                 Ok(v) if usable(&v, &loader) => {
-                    return Ok(Some(pulled_from_version(&project, &v)));
+                    let decl = pulled_from_version(&project, &v);
+                    return Ok(Some(Candidate {
+                        mod_id: modrinth_mod_id(registry, &project).await,
+                        decl,
+                    }));
                 }
                 Ok(_) => tracing::warn!(
                     project = %project,
@@ -470,7 +546,11 @@ async fn resolve_target(
         // Modrinth returns versions newest-first, so the first usable one is the
         // latest compatible build.
         if let Some(v) = listing.into_iter().find(|v| usable(v, &loader)) {
-            return Ok(Some(pulled_from_version(&project, &v)));
+            let decl = pulled_from_version(&project, &v);
+            return Ok(Some(Candidate {
+                mod_id: modrinth_mod_id(registry, &project).await,
+                decl,
+            }));
         }
     }
     // Modrinth cannot provide it: fall back to the mirror's own cache.
@@ -518,15 +598,15 @@ async fn resolve_from_cache(
     cfg: &PackConfig,
     registry: &Arc<Registry>,
     storage: &Storage,
-) -> Result<Option<DeclaredMod>> {
+) -> Result<Option<Candidate>> {
     let selector = target.selector.clone();
     let range = target.version_range.clone();
     let loader = cfg.loader.name.to_ascii_lowercase();
     let mc = cfg.minecraft_version.clone();
-    let candidates: Vec<DeclaredMod> = registry
+    let (mod_id, candidates): (Option<i64>, Vec<DeclaredMod>) = registry
         .read(move |c| {
             let Some(mod_id) = queries::mod_id_for_selector(c, &selector)? else {
-                return Ok(Vec::new());
+                return Ok((None, Vec::new()));
             };
             let chain = queries::loader_chain(c, &loader)?;
             let mut out = Vec::new();
@@ -570,7 +650,7 @@ async fn resolve_from_cache(
                     pulled: true,
                 });
             }
-            Ok(out)
+            Ok((Some(mod_id), out))
         })
         .await?;
     // rows come version-ordered, so the newest acceptable one is last
@@ -579,18 +659,54 @@ async fn resolve_from_cache(
             continue;
         };
         if storage.has_cache_jar(sha1).await {
-            return Ok(Some(decl));
+            return Ok(Some(Candidate { decl, mod_id }));
         }
     }
     Ok(None)
 }
 
-/// A pulled dependency is already in the pack when its source identity is
-/// declared -- the Modrinth project id or the cache sha1, so a dep is not
-/// re-added under a different display name -- or when its filename is taken,
-/// since two rows writing one `mods/<filename>` is never a pack the build may
-/// ship.
-fn already_present(cfg: &PackConfig, decl: &DeclaredMod) -> bool {
+/// The registry mod a Modrinth project is, when the mirror has met it.
+///
+/// `None` is an ordinary answer: a project nothing has harvested has no
+/// registry row, and the project id is then the only identity there is, which
+/// is what the source arms of [`already_present`] compare.
+async fn modrinth_mod_id(registry: &Arc<Registry>, project: &str) -> Option<i64> {
+    let project = project.to_string();
+    registry
+        .read(move |c| queries::mod_id_for_alias(c, "modrinth", &project))
+        .await
+        .unwrap_or(None)
+}
+
+/// A dependency resolved to something the pack can declare, and which registry
+/// mod it is when the mirror knows.
+///
+/// The identity travels with the declaration because it is the only thing that
+/// answers whether the pack already has this mod: a declaration says which file
+/// to fetch and from whom, and the pack may hold the same mod pinned from
+/// somebody else entirely.
+struct Candidate {
+    decl: DeclaredMod,
+    mod_id: Option<i64>,
+}
+
+/// A pulled dependency is already in the pack when the pack declares that mod,
+/// however it pins it; failing that, when its own source identity is declared
+/// (the Modrinth project, the CurseForge project, the repository, the cache
+/// sha1), so a dep is not re-added under a different display name; failing that,
+/// when its filename is taken, since two rows writing one `mods/<filename>` is
+/// never a pack the build may ship.
+///
+/// Three tests rather than one because each answers where the others cannot.
+/// The registry identity is the real question and it is silent about a pin
+/// nothing has harvested. The source identity covers exactly that case, and
+/// only while both sides are pinned from the same publisher. The filename is
+/// the last guard and belongs to the filesystem, not to any notion of sameness.
+fn already_present(cfg: &PackConfig, cand: &Candidate, declared: &HashMap<i64, String>) -> bool {
+    if cand.mod_id.is_some_and(|id| declared.contains_key(&id)) {
+        return true;
+    }
+    let decl = &cand.decl;
     if cfg.mods.iter().any(|m| m.filename == decl.filename) {
         return true;
     }
@@ -605,6 +721,13 @@ fn already_present(cfg: &PackConfig, decl: &DeclaredMod) -> bool {
         SourceDecl::CurseForge { project_id, .. } => cfg.mods.iter().any(
             |m| matches!(&m.source, SourceDecl::CurseForge { project_id: p, .. } if p == project_id),
         ),
+        // The repository, the way the CurseForge arm above takes the project:
+        // a pin moved to a newer release is the same dependency, and the asset
+        // name usually moves with it.
+        SourceDecl::Github { repo, .. } => cfg
+            .mods
+            .iter()
+            .any(|m| matches!(&m.source, SourceDecl::Github { repo: r, .. } if r == repo)),
         SourceDecl::SmrtStatic { .. } => false,
     }
 }
@@ -1306,6 +1429,85 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(again, 0, "idempotent");
+    }
+
+    // The duplicate this identity check exists for. A Modrinth version states its
+    // dependency as a project id, and the pack answers that dependency with a jar
+    // it holds from somewhere else entirely -- the cache here, a CurseForge pin or
+    // a release asset in production. Matching the wire dependency against the
+    // pack's Modrinth pins alone finds nothing, so the library reads as absent and
+    // a second copy of it is pulled, which Forge refuses to start on. The edge is
+    // the other half: a provider found is a provider the build has to lock.
+    #[tokio::test]
+    async fn a_wire_dependency_the_pack_already_holds_elsewhere_is_not_pulled_again() {
+        let r = Arc::new(Registry::open_in_memory().unwrap());
+        r.with_conn_mut(|c| {
+            let lib =
+                upsert::upsert_mod_by_alias(c, &[("modid", "lib"), ("modrinth", "PROJ_LIB")], NOW)?;
+            upsert::upsert_mod_version(
+                c,
+                lib,
+                "1.0",
+                &["neoforge"],
+                &sha("sha_lib"),
+                10,
+                Some("lib-cached.jar"),
+                None,
+                NOW,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let pin = version_json(
+            "PROJ_A",
+            "VER_A",
+            "a.jar",
+            r#"{"project_id":"PROJ_LIB","version_id":"VER_LIB","dependency_type":"required"}"#,
+        );
+        let lib = version_json("PROJ_LIB", "VER_LIB", "lib-1.0.jar", "");
+        let base = stub_modrinth(vec![
+            ("/v2/versions".to_string(), format!("[{pin},{lib}]")),
+            (
+                "/v2/project/PROJ_LIB/version/VER_LIB".to_string(),
+                lib.clone(),
+            ),
+        ])
+        .await;
+        let modrinth = Modrinth::with_base(&base).unwrap();
+
+        let mut c = cfg(vec![
+            DeclaredMod {
+                filename: "a.jar".into(),
+                default_enabled: true,
+                source: SourceDecl::Modrinth {
+                    project_id: "PROJ_A".into(),
+                    version_id: "VER_A".into(),
+                },
+                display: None,
+                slug: None,
+                pulled: false,
+            },
+            cache_mod("lib-cached.jar", &sha("sha_lib")),
+        ]);
+        let (_tmp, store) = cache_holding(&["sha_lib"]).await;
+
+        let added = fill_dependencies(&mut c, &r, &modrinth, &store)
+            .await
+            .unwrap();
+        assert_eq!(
+            added,
+            0,
+            "the pack already holds that library: {:?}",
+            c.mods.iter().map(|m| &m.filename).collect::<Vec<_>>()
+        );
+        assert_eq!(c.mods.len(), 2);
+        let reqs = &c.mods[0].display.as_ref().unwrap().requires;
+        assert_eq!(
+            reqs.iter().map(|q| q.filename.as_str()).collect::<Vec<_>>(),
+            vec!["lib-cached.jar"],
+            "and the build is told to lock the copy the pack actually ships"
+        );
     }
 
     // Upstream sometimes publishes a version whose jar never landed (metadata

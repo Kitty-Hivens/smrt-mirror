@@ -908,6 +908,7 @@
   function blankSource(type: SourceDecl['type']): SourceDecl {
     if (type === 'modrinth') return { type, project_id: '', version_id: '' };
     if (type === 'curseforge') return { type, project_id: 0, file_id: 0 };
+    if (type === 'github') return { type, repo: '', tag: '', asset: '' };
     if (type === 'smrt_cache') return { type, sha1: '' };
     return { type, rel_path: '' };
   }
@@ -1022,6 +1023,9 @@
     // the project, not the file: another file of the same project is a re-pin
     // of this row, the same way another Modrinth version is
     if (s.type === 'curseforge') return `cf:${s.project_id}`;
+    // and the repository alone: a release bump moves the tag and usually the
+    // asset name with it, and both name the same mod
+    if (s.type === 'github') return `gh:${s.repo}`;
     return `s:${s.rel_path}`;
   }
 
@@ -1462,19 +1466,20 @@
                   {:else if m.source.type === 'curseforge'}
                     <input class="mono num" type="number" bind:value={m.source.project_id} placeholder="project_id" aria-label={t('pe.projectId')} />
                     <input class="mono num" type="number" bind:value={m.source.file_id} placeholder="file_id" aria-label={t('pe.fileId')} />
+                  {:else if m.source.type === 'github'}
+                    <input class="mono" bind:value={m.source.repo} placeholder="owner/name" aria-label={t('pe.repo')} />
+                    <input class="mono" bind:value={m.source.tag} placeholder="tag" aria-label={t('pe.tag')} />
+                    <input class="mono" bind:value={m.source.asset} placeholder="asset" aria-label={t('pe.asset')} />
                   {:else}
                     <input class="mono" bind:value={m.source.rel_path} placeholder="rel_path" aria-label={t('pe.relPath')} />
                   {/if}
                 </div>
                 <label class="ck" title={t('pe.defHint')}><input type="checkbox" bind:checked={m.default_enabled} /> {t('pe.def')}</label>
-                {#if m.source.type === 'smrt_cache'}
-                  <input class="slug mono" bind:value={m.slug} placeholder={t('pe.slug')} aria-label={t('pe.slug')} title={t('pe.slugHint')} />
-                {:else}
-                  <!-- A Modrinth mod is already keyed across builds by its project
-                       id, so a slug on it changes nothing; the column says what the
-                       key actually is instead of offering a field that does nothing. -->
-                  <span class="slug keyed faint mono" title={t('pe.keyedByProjectHint')}>{t('pe.keyedByProject')}</span>
-                {/if}
+                <!-- Offered on every row: a slug outranks the publisher a mod is
+                     pinned from, which is what keeps a mod moved between
+                     publishers reading as the same mod rather than as one
+                     removed and another added. -->
+                <input class="slug mono" bind:value={m.slug} placeholder={t('pe.slug')} aria-label={t('pe.slug')} title={t('pe.slugHint')} />
                 <button class="danger sm del" onclick={() => removeMod(i)} aria-label={t('common.delete')}>x</button>
               </div>
             {/each}
@@ -1538,7 +1543,7 @@
                         <input class="mono" bind:value={a.source.version_id} placeholder="version_id" aria-label={t('pe.versionId')} />
                       {:else if a.source.type === 'smrt_cache'}
                         <input class="mono" bind:value={a.source.sha1} placeholder="sha1" aria-label={t('pe.sha1')} />
-                      {:else if a.source.type === 'curseforge'}
+                      {:else if a.source.type === 'curseforge' || a.source.type === 'github'}
                         <span class="faint">{t('pe.cfAssetsUnsupported')}</span>
                       {:else}
                         <input class="mono" bind:value={a.source.rel_path} placeholder="rel_path" aria-label={t('pe.relPath')} />
@@ -1976,14 +1981,6 @@
   .modrow .slug {
     min-width: 0;
     opacity: 0.85;
-  }
-  /* the non-editable half of that column: a statement, not a disabled input */
-  .modrow .keyed {
-    font-size: var(--fs-xs);
-    align-self: center;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
   /* the source-type Select wrapper occupies the grid's 3rd column; the trigger
      (full) fills it, and min-width:0 lets it shrink in the narrow flex reflow */

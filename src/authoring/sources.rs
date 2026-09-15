@@ -196,6 +196,25 @@ pub(super) async fn resolve_mod(
                 },
             )
         }
+        // A release asset is public and its URL is derivable, so the manifest
+        // carries a link to the publisher and nothing is served from here. The
+        // hash is the one thing GitHub does not publish, which is why this goes
+        // through the registry rather than straight into a URL.
+        SourceDecl::Github { repo, tag, asset } => {
+            let got = super::github::resolve(repo, tag, asset, up.modrinth, registry)
+                .await
+                .with_context(|| format!("resolving GitHub mod {}", decl.filename))?;
+            (
+                got.sha1,
+                got.size,
+                Source::Github {
+                    repo: repo.clone(),
+                    tag: tag.clone(),
+                    asset: asset.clone(),
+                    url: got.url,
+                },
+            )
+        }
         SourceDecl::SmrtCache { sha1 } => {
             let path = cache_jar_path(storage, sha1)?;
             let meta = tokio::fs::metadata(&path).await.with_context(|| {
@@ -276,6 +295,12 @@ pub(super) async fn resolve_asset(
         SourceDecl::CurseForge { .. } => {
             bail!(
                 "asset {} uses a curseforge source -- assets must be modrinth or smrt_static",
+                decl.dest
+            );
+        }
+        SourceDecl::Github { .. } => {
+            bail!(
+                "asset {} uses a github source -- assets must be modrinth or smrt_static",
                 decl.dest
             );
         }

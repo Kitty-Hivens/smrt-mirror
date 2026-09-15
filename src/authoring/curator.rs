@@ -371,6 +371,7 @@ pub fn enrich_from_mcmod_info(
             // The mirror does not hold these bytes, so there is no jar here to
             // read a name or a description out of.
             SourceDecl::CurseForge { .. } => continue,
+            SourceDecl::Github { .. } => continue,
             SourceDecl::SmrtStatic { .. } => continue,
         };
 

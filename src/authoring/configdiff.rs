@@ -10,8 +10,8 @@
 //!
 //! Two rules make the answer match what a person did.
 //!
-//! **Rows are matched by identity, not by position.** A mod is its Modrinth
-//! project, else its curator slug, else its filename -- the cascade
+//! **Rows are matched by identity, not by position.** A mod is its curator slug,
+//! else the publisher project its pin names, else its filename -- the cascade
 //! `domain::diff` already uses across two builds, so a re-pin reads as a re-pin
 //! on both sides of the mirror. An asset is its destination path.
 //!
@@ -497,20 +497,35 @@ fn authored_mods(cfg: &PackConfig) -> BTreeMap<String, &DeclaredMod> {
     out
 }
 
-/// The identity a declared mod is matched by across two configs: the Modrinth
-/// project (a re-pin is the same mod), else the curator slug (ADR 0002), else
-/// the filename. The same cascade `domain::diff::identity` uses across two
-/// builds, so one mod reads as one mod wherever the mirror is asked.
+/// The identity a declared mod is matched by across two configs: the curator
+/// slug (ADR 0002), else the publisher project a pin names, else the filename.
+/// The same cascade `domain::diff::identity` uses across two builds, so one mod
+/// reads as one mod wherever the mirror is asked.
+///
+/// The slug leads because it is the only one of the three that survives a move
+/// between publishers, and that move is the whole point of having more than one
+/// source type: a mod repinned off this mirror onto CurseForge is the same mod,
+/// and a diff that reads it as a removal plus an addition says the pack lost
+/// something it did not lose.
 fn identity(m: &DeclaredMod) -> String {
+    // A blank slug is the editor's own default for a cached jar, not an
+    // identity anyone assigned: keying by it would make every jar nobody named
+    // the same row.
+    if let Some(s) = m.slug.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        return format!("s:{s}");
+    }
     match &m.source {
         SourceDecl::Modrinth { project_id, .. } => format!("m:{project_id}"),
-        // A blank slug is the editor's own default for a cached jar, not an
-        // identity anyone assigned: keying by it would make every jar nobody
-        // named the same row.
-        _ => match m.slug.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            Some(s) => format!("s:{s}"),
-            None => format!("f:{}", m.filename),
-        },
+        SourceDecl::CurseForge { project_id, .. } => format!("cf:{project_id}"),
+        // The repository alone. The tag is the version by definition and the
+        // asset name carries it just as often (`mymod-1.2.3.jar`), so either one
+        // would re-key the entry at every release, which is what this exists to
+        // prevent. Two assets of one repository in one pack are what the slug
+        // above is for.
+        SourceDecl::Github { repo, .. } => format!("gh:{repo}"),
+        SourceDecl::SmrtCache { .. } | SourceDecl::SmrtStatic { .. } => {
+            format!("f:{}", m.filename)
+        }
     }
 }
 
@@ -521,6 +536,7 @@ fn pin(source: &SourceDecl) -> String {
     match source {
         SourceDecl::Modrinth { version_id, .. } => version_id.clone(),
         SourceDecl::CurseForge { file_id, .. } => file_id.to_string(),
+        SourceDecl::Github { tag, asset, .. } => format!("{tag}/{asset}"),
         SourceDecl::SmrtCache { sha1 } => sha1.clone(),
         SourceDecl::SmrtStatic { rel_path } => rel_path.clone(),
     }
@@ -671,6 +687,42 @@ mod tests {
         assert_eq!(rows[0].op, ChangeOp::Add);
         assert_eq!(rows[0].label, "Cosmetica.jar");
         assert_eq!(rows[0].project.as_deref(), Some("s9hF9QGp"));
+    }
+
+    /// The property the identity cascade exists for, stated as the release it
+    /// has to survive: a new tag, published under a versioned asset name, is a
+    /// re-pin of one row and not a departure plus an arrival.
+    #[test]
+    fn a_github_release_bump_is_one_re_pin() {
+        let at = |tag: &str, asset: &str| DeclaredMod {
+            filename: asset.into(),
+            default_enabled: true,
+            source: SourceDecl::Github {
+                repo: "Kitty-Hivens/hidemymods".into(),
+                tag: tag.into(),
+                asset: asset.into(),
+            },
+            display: None,
+            slug: None,
+            pulled: false,
+        };
+        let mut before = cfg();
+        before.mods.push(at("v0.2.0", "hidemymods-0.2.0.jar"));
+        let mut after = cfg();
+        after.mods.push(at("v0.3.1", "hidemymods-0.3.1.jar"));
+
+        let rows = diff_configs(&before, &after);
+        assert!(
+            rows.iter().all(|r| r.op == ChangeOp::Change),
+            "a bump is a re-pin, not a removal and an arrival: {rows:?}"
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r.field == Some(ChangeField::Pin))
+                .count(),
+            1,
+            "{rows:?}"
+        );
     }
 
     #[test]

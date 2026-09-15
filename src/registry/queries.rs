@@ -1822,16 +1822,27 @@ pub(crate) fn curseforge_identity(
         .optional()?)
 }
 
-/// Scanned jars that still owe a CurseForge answer: never asked, or asked and
-/// matched nothing long enough ago to be worth asking again.
+/// Which bytes a GitHub release asset is, and how many, when the mirror has
+/// read that asset before.
 ///
-/// Driven from `jar_read` rather than from `mod_version` on purpose. `jar_read`
-/// holds a row for every jar the harvest opened, written before the identity
-/// gate, while a jar nothing could identify may have no `mod_version` row at
-/// all -- and that is precisely the population this leg exists to name.
-///
-/// A matched row is never returned. Its answer cannot change, because the
-/// question is about bytes that cannot change.
+/// Read in the direction the pin runs, which is why the table is keyed on the
+/// three fields rather than on the hash: a resolve has the pin and wants the
+/// bytes, and it may not download to find out.
+pub fn github_asset(
+    conn: &Connection,
+    repo: &str,
+    tag: &str,
+    asset: &str,
+) -> Result<Option<(String, u64)>> {
+    Ok(conn
+        .query_row(
+            "SELECT sha1, size FROM github_asset WHERE repo = ?1 AND tag = ?2 AND asset = ?3",
+            params![repo, tag, asset],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64)),
+        )
+        .optional()?)
+}
+
 /// The content hash behind a CurseForge pin, when the mirror has met those
 /// bytes before.
 ///
@@ -1888,6 +1899,35 @@ pub fn shas_read(conn: &Connection) -> Result<Vec<String>> {
     Ok(out)
 }
 
+/// GitHub pins whose asset has been fetched and opened.
+///
+/// The github half of [`shas_read`], keyed the way that side arrives: a pin
+/// names a repository, a tag and a file, and what the fetch is for is learning
+/// which bytes those are. Read AND recorded, for the same reason: a row in
+/// `jar_read` alone leaves a pack pointing at bytes no pin maps to.
+pub fn github_pins_read(conn: &Connection) -> Result<Vec<(String, String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT g.repo, g.tag, g.asset FROM github_asset g
+           JOIN jar_read j ON j.sha1 = g.sha1",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// Scanned jars that still owe a CurseForge answer: never asked, or asked and
+/// matched nothing long enough ago to be worth asking again.
+///
+/// Driven from `jar_read` rather than from `mod_version` on purpose. `jar_read`
+/// holds a row for every jar the harvest opened, written before the identity
+/// gate, while a jar nothing could identify may have no `mod_version` row at
+/// all -- and that is precisely the population this leg exists to name.
+///
+/// A matched row is never returned. Its answer cannot change, because the
+/// question is about bytes that cannot change.
 pub fn shas_awaiting_curseforge(conn: &Connection, retry_before: &str) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT j.sha1 FROM jar_read j

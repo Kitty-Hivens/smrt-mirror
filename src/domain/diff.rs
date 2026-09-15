@@ -84,16 +84,27 @@ pub struct PackDiff {
     pub assets_updated: Vec<DiffUpdate>,
 }
 
-/// The identity a mod entry is matched by across builds: the Modrinth project
-/// (a re-pin is the same mod), else the curator slug (ADR 0002), else the
-/// filename.
+/// The identity a mod entry is matched by across builds: the curator slug (ADR
+/// 0002), else the publisher project the entry names, else the filename.
+///
+/// The slug leads because it is the only one of the three that survives a move
+/// between publishers. A mod repinned off this mirror onto CurseForge or a
+/// release asset is the same mod, and the update dialog a player reads must say
+/// so rather than list it as one thing gone and another arrived.
 fn identity(m: &ModEntry) -> String {
+    if let Some(s) = m.slug.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        return format!("s:{s}");
+    }
     match &m.source {
         Source::Modrinth { project_id, .. } => format!("m:{project_id}"),
-        _ => match &m.slug {
-            Some(s) => format!("s:{s}"),
-            None => format!("f:{}", m.filename),
-        },
+        Source::CurseForge { project_id, .. } => format!("cf:{project_id}"),
+        // The repository alone. The tag is the version by definition and the
+        // asset name carries it just as often (`mymod-1.2.3.jar`), so either one
+        // would re-key the entry at every release, which is what this exists to
+        // prevent. Two assets of one repository in one pack are what the slug
+        // above is for.
+        Source::Github { repo, .. } => format!("gh:{repo}"),
+        Source::SmrtCache { .. } | Source::SmrtStatic { .. } => format!("f:{}", m.filename),
     }
 }
 
