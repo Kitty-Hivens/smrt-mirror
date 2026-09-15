@@ -163,7 +163,7 @@
                 <button class="forkbtn" onclick={() => fork(p)}>{t('browse.fork')}</button>
               {/if}
               {#if p.description_md}
-                <!-- renderMarkdown sanitizes; safe to inject -->
+                <!-- renderMarkdown sanitizes; the author's own markup is escaped, never passed through -->
                 <div class="desc">{@html renderMarkdown(p.description_md)}</div>
               {/if}
               <!-- What is being asked of this pack, where the pack is. A
@@ -317,6 +317,40 @@
     line-height: 1.55;
     color: var(--fg-dim);
     max-width: 65ch;
+  }
+  /* A description's table is a spec sheet: horizontal seams only, and it
+     scrolls on its own rather than pushing the column wider. */
+  .desc :global(table) {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0.7em 0;
+    font-size: var(--fs-sm);
+    display: block;
+    overflow-x: auto;
+  }
+  .desc :global(th),
+  .desc :global(td) {
+    padding: 6px 10px;
+    text-align: left;
+    border-bottom: 1px solid var(--seam);
+  }
+  .desc :global(th) {
+    color: var(--fg);
+    font-weight: 600;
+  }
+  .desc :global(tbody tr:last-child td) {
+    border-bottom: none;
+  }
+  .desc :global(details) {
+    border: 1px solid var(--seam);
+    border-radius: var(--radius-sm);
+    padding: 8px 12px;
+    margin: 0.7em 0;
+  }
+  .desc :global(details summary) {
+    cursor: pointer;
+    color: var(--fg);
+    font-weight: 600;
   }
   .modhead {
     font-size: var(--fs-xs);
