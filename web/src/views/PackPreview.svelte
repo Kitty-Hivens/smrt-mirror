@@ -222,7 +222,7 @@
     <!-- about -->
     {#if summary.description_md}
       <div class="card about">
-        <!-- renderMarkdown emits a sanitised CommonMark subset; no raw HTML reaches the DOM -->
+        <!-- renderMarkdown emits a sanitised subset; the author's own markup is escaped, never passed through -->
         {@html renderMarkdown(summary.description_md)}
       </div>
     {/if}
@@ -627,6 +627,41 @@
   .about :global(img) {
     max-width: 100%;
     border-radius: 8px;
+  }
+  /* A description's table is a spec sheet: rows a reader scans down, so the
+     seams run horizontally and nothing boxes each cell in. It scrolls on its
+     own rather than widening the card. */
+  .about :global(table) {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0.7em 0;
+    font-size: var(--fs-sm);
+    display: block;
+    overflow-x: auto;
+  }
+  .about :global(th),
+  .about :global(td) {
+    padding: 6px 10px;
+    text-align: left;
+    border-bottom: 1px solid var(--p-outline);
+  }
+  .about :global(th) {
+    color: var(--p-fg);
+    font-weight: 600;
+  }
+  .about :global(tbody tr:last-child td) {
+    border-bottom: none;
+  }
+  .about :global(details) {
+    border: 1px solid var(--p-outline);
+    border-radius: 8px;
+    padding: 8px 12px;
+    margin: 0.7em 0;
+  }
+  .about :global(details summary) {
+    cursor: pointer;
+    color: var(--p-fg);
+    font-weight: 600;
   }
 
   .gallery {
