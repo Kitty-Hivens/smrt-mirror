@@ -1482,7 +1482,7 @@
                     <input class="mono num" type="number" bind:value={m.source.project_id} placeholder="project_id" aria-label={t('pe.projectId')} />
                     <input class="mono num" type="number" bind:value={m.source.file_id} placeholder="file_id" aria-label={t('pe.fileId')} />
                   {:else if m.source.type === 'github'}
-                    <input class="mono" bind:value={m.source.repo} placeholder="owner/name" aria-label={t('pe.repo')} />
+                    <input class="mono repo" bind:value={m.source.repo} placeholder="owner/name" aria-label={t('pe.repo')} />
                     <input class="mono" bind:value={m.source.tag} placeholder="tag" aria-label={t('pe.tag')} />
                     <input class="mono" bind:value={m.source.asset} placeholder="asset" aria-label={t('pe.asset')} />
                   {:else}
@@ -2008,6 +2008,18 @@
     align-items: center;
     gap: var(--space-2);
     min-width: 0;
+  }
+  /* One grid column holds whatever the row's type needs, which is three fields
+     for a release asset. Left at their own width they shrink evenly, and with
+     the preview open that is around sixty pixels each: the repository, the one
+     part of the pin anybody reads, is then clipped to a few characters. It gets
+     twice the share of the tag and the asset name. */
+  .ref input {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+  .ref input.repo {
+    flex: 2 1 0;
   }
   .refval {
     overflow: hidden;
