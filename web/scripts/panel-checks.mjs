@@ -370,7 +370,8 @@ check('the offered list holds what old packs need', [8, 11, 16, 17, 21].every((v
 // The preview answers "what would publishing change?" locally, because a dry run
 // has no published version for the mirror to diff against. It has to give the
 // answer the mirror gives, which means matching mods the way `domain/diff.rs`
-// does: the Modrinth project, else the curator slug, else the filename.
+// does: the curator slug, else the publisher project the entry names, else the
+// filename.
 {
   const manifest = (mods) => ({ pack_version: 'v', mods, assets: [] });
   const mod = (filename, sha1, extra = {}) => ({
@@ -380,6 +381,14 @@ check('the offered list holds what old packs need', [8, 11, 16, 17, 21].every((v
   const pinned = (filename, sha1, project) => ({
     filename, sha1, size_bytes: 1, required: false, default_enabled: true,
     source: { type: 'modrinth', project_id: project, version_id: 'v' },
+  });
+  const fromCurseForge = (filename, sha1, project, extra = {}) => ({
+    filename, sha1, size_bytes: 1, required: false, default_enabled: true,
+    source: { type: 'curseforge', project_id: project, file_id: 1, url: 'u' }, ...extra,
+  });
+  const fromGithub = (filename, sha1, repo, tag, extra = {}) => ({
+    filename, sha1, size_bytes: 1, required: false, default_enabled: true,
+    source: { type: 'github', repo, tag, asset: filename, url: 'u' }, ...extra,
   });
 
   // A re-pin that renames the jar is one mod moving, not one leaving and
@@ -401,6 +410,29 @@ check('the offered list holds what old packs need', [8, 11, 16, 17, 21].every((v
   check('a slugged self-hosted jar is followed across a rename',
     slugged.changed.length === 1 && !slugged.added.length && !slugged.removed.length,
     JSON.stringify(slugged));
+
+  // Moving a mod off this mirror onto a publisher is a re-pin of one row. Only
+  // the slug survives that move, which is why it leads: keyed by the source, the
+  // same mod would read as one thing gone and another arrived, and the launcher
+  // would take the player's on/off choice with it.
+  const movedToPublisher = diffManifests(
+    manifest([mod('cofh-4.6.jar', 'a1', { slug: 'cofh-core' })]),
+    manifest([fromCurseForge('cofh-4.6.jar', 'a2', 69162, { slug: 'cofh-core' })]),
+  );
+  check('a mod repinned onto a publisher is an update, not a swap',
+    movedToPublisher.changed.length === 1 &&
+      !movedToPublisher.added.length && !movedToPublisher.removed.length,
+    JSON.stringify(movedToPublisher));
+
+  // A release bump moves the tag, and the asset name carries the version just as
+  // often, so the repository is the only part of the pin that stays the mod.
+  const released = diffManifests(
+    manifest([fromGithub('open-smrt-network-1.0.jar', 'a1', 'Kitty-Hivens/open-smrt-network', 'v1.0')]),
+    manifest([fromGithub('open-smrt-network-1.1.jar', 'a2', 'Kitty-Hivens/open-smrt-network', 'v1.1')]),
+  );
+  check('a release bump is an update, not a swap',
+    released.changed.length === 1 && !released.added.length && !released.removed.length,
+    JSON.stringify(released));
 
   // Two different mods stay two different mods.
   const swap = diffManifests(
