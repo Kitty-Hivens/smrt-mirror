@@ -39,6 +39,17 @@
   const presence = $derived(
     d?.presence && d.presence !== 'required' ? presenceKey[d.presence] : null,
   );
+  // Who serves the bytes, where anybody but this mirror does. The pin's own type
+  // is the whole answer, and the three publishers earn the same line: naming one
+  // of them and staying silent about the other two reads as "self-hosted" for a
+  // mod that is nothing of the sort.
+  const publisher = $derived(
+    mod.source.type === 'modrinth' ||
+      mod.source.type === 'curseforge' ||
+      mod.source.type === 'github'
+      ? mod.source.type
+      : null,
+  );
 </script>
 
 <div class="row" class:alt class:off={!enabled}>
@@ -68,7 +79,7 @@
     <div class="l2 mono">
       <span>{mod.filename}</span>
       <span class="faint">{formatBytes(mod.size_bytes)}</span>
-      {#if mod.source.type === 'modrinth'}<span class="faint">modrinth</span>{/if}
+      {#if publisher}<span class="faint">{publisher}</span>{/if}
       {#if d?.url}<a href={safeUrl(d.url)} target="_blank" rel="noopener noreferrer">{t('mr.learnMore')}</a>{/if}
     </div>
     {#if d?.description}<div class="desc">{d.description}</div>{/if}
