@@ -58,9 +58,14 @@
   import TabStrip from './ui/TabStrip.svelte';
   import FloatDock from './ui/FloatDock.svelte';
 
+  // Every type a mod row can be pinned to. A type missing from this list cannot
+  // be chosen, and a row that already holds one draws an empty picker, since the
+  // trigger shows the label of the option matching its value and there is none.
   const MOD_SOURCE_OPTIONS = [
     { value: 'smrt_cache', label: 'cache' },
     { value: 'modrinth', label: 'modrinth' },
+    { value: 'curseforge', label: 'curseforge' },
+    { value: 'github', label: 'github' },
     { value: 'smrt_static', label: 'static' },
   ];
   const ASSET_SOURCE_OPTIONS = [
@@ -1091,9 +1096,19 @@
     pick = null;
   }
 
-  // a GitHub ingest always lands a fresh jar in the cache -> a cache source
-  function onGithubPick(sel: { sha1: string; filename: string }) {
-    onMirrorPick({ filename: sel.filename, source: { type: 'smrt_cache', sha1: sel.sha1 } });
+  // Both of the GitHub picker's actions hand back a finished row: a pin that
+  // names the release asset where it is, or a cache source once its bytes have
+  // been copied here. Neither can grey out what the pack already ships the way
+  // the other pickers do, because the repository is typed rather than chosen
+  // from a list. A duplicate is therefore caught here and said, instead of the
+  // dialog closing on a row that silently never appeared.
+  function onGithubPick(sel: MirrorSel) {
+    if (presentKeys(null).includes(sourceKey(sel.source))) {
+      toasts.push({ kind: 'error', text: t('pe.dupMod', { name: sel.filename }) });
+      pick = null;
+      return;
+    }
+    onMirrorPick(sel);
   }
 
   // pull an asset from a build (Builds tab) into this pack, deduped by dest; the
@@ -1467,7 +1482,7 @@
                     <input class="mono num" type="number" bind:value={m.source.project_id} placeholder="project_id" aria-label={t('pe.projectId')} />
                     <input class="mono num" type="number" bind:value={m.source.file_id} placeholder="file_id" aria-label={t('pe.fileId')} />
                   {:else if m.source.type === 'github'}
-                    <input class="mono" bind:value={m.source.repo} placeholder="owner/name" aria-label={t('pe.repo')} />
+                    <input class="mono repo" bind:value={m.source.repo} placeholder="owner/name" aria-label={t('pe.repo')} />
                     <input class="mono" bind:value={m.source.tag} placeholder="tag" aria-label={t('pe.tag')} />
                     <input class="mono" bind:value={m.source.asset} placeholder="asset" aria-label={t('pe.asset')} />
                   {:else}
@@ -1993,6 +2008,18 @@
     align-items: center;
     gap: var(--space-2);
     min-width: 0;
+  }
+  /* One grid column holds whatever the row's type needs, which is three fields
+     for a release asset. Left at their own width they shrink evenly, and with
+     the preview open that is around sixty pixels each: the repository, the one
+     part of the pin anybody reads, is then clipped to a few characters. It gets
+     twice the share of the tag and the asset name. */
+  .ref input {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+  .ref input.repo {
+    flex: 2 1 0;
   }
   .refval {
     overflow: hidden;

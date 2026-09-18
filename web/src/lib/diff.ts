@@ -8,16 +8,26 @@
 
 import type { ModEntry, PackManifest } from './types';
 
-/// What makes two entries the same mod across builds: the Modrinth project, else
-/// the curator slug (ADR 0002), else the filename.
+/// What makes two entries the same mod across builds: the curator slug (ADR
+/// 0002), else the publisher project the entry names, else the filename.
 ///
 /// The same rule as `ModEntry::identity` in `domain/diff.rs`, and it has to be:
-/// matching on the filename alone -- which is what this did -- reads a re-pin
-/// that renames the jar as a removal plus an addition, while the update dialog
-/// a player sees calls the same event an update. One product, one answer.
+/// this one answers for a dry run, which has no published build for the mirror
+/// to diff against, and the two must not call one event by two names. One
+/// product, one answer.
+///
+/// The slug leads because it is the only part that survives a move between
+/// publishers, which is exactly the move this panel is used to make.
 function identity(m: ModEntry): string {
+  const slug = m.slug?.trim();
+  if (slug) return `s:${slug}`;
   if (m.source.type === 'modrinth') return `m:${m.source.project_id}`;
-  return m.slug ? `s:${m.slug}` : `f:${m.filename}`;
+  if (m.source.type === 'curseforge') return `cf:${m.source.project_id}`;
+  // the repository alone: the tag is the version by definition and the asset
+  // name carries it just as often, so either would re-key the entry at every
+  // release
+  if (m.source.type === 'github') return `gh:${m.source.repo}`;
+  return `f:${m.filename}`;
 }
 
 export interface ModChange {

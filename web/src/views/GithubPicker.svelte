@@ -2,13 +2,14 @@
   import { Dialog } from 'bits-ui';
   import { api, ApiError } from '../lib/api';
   import { t } from '../lib/i18n.svelte';
+  import type { SourceDecl } from '../lib/types';
   import Field from './ui/Field.svelte';
 
   let {
     onPick,
     onClose,
   }: {
-    onPick: (sel: { sha1: string; filename: string }) => void;
+    onPick: (sel: { filename: string; source: SourceDecl }) => void;
     onClose: () => void;
   } = $props();
 
@@ -20,13 +21,29 @@
 
   const ready = $derived(!!(repo.trim() && tag.trim() && asset.trim()));
 
-  async function add() {
+  /// Name the asset and leave it where it is. A release asset has a derivable
+  /// address, so the launcher downloads it from whoever published it: nothing
+  /// is fetched here and no copy is kept on this mirror. Whether the asset is
+  /// really there is answered by the first resolve, which is also where its
+  /// content hash comes from.
+  function pin() {
+    if (!ready || busy) return;
+    onPick({
+      filename: asset.trim(),
+      source: { type: 'github', repo: repo.trim(), tag: tag.trim(), asset: asset.trim() },
+    });
+  }
+
+  /// The other half, and the reason the ingest route still exists: the bytes
+  /// land in the mirror's cache and the row pins that copy. It is what a pack
+  /// is left with once a release is deleted or taken down.
+  async function copyIn() {
     if (!ready || busy) return;
     busy = true;
     err = '';
     try {
       const r = await api.ingestGithub(repo.trim(), tag.trim(), asset.trim());
-      onPick({ sha1: r.sha1, filename: asset.trim() });
+      onPick({ filename: asset.trim(), source: { type: 'smrt_cache', sha1: r.sha1 } });
     } catch (e) {
       err = e instanceof ApiError ? `${e.status} ${e.body}` : String(e);
       busy = false;
@@ -60,8 +77,11 @@
     {#if err}<div class="err mono">{err}</div>{/if}
     <div class="row foot">
       <div class="sp"></div>
-      <button class="primary" onclick={add} disabled={!ready || busy}>
-        {busy ? t('gh.adding') : t('gh.add')}
+      <button onclick={copyIn} disabled={!ready || busy} title={t('gh.copyHint')}>
+        {busy ? t('gh.copying') : t('gh.copy')}
+      </button>
+      <button class="primary" onclick={pin} disabled={!ready || busy} title={t('gh.pinHint')}>
+        {t('gh.pin')}
       </button>
     </div>
   </Dialog.Content>
