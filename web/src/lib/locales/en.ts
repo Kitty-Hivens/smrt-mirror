@@ -332,12 +332,17 @@ export const en = {
 
   'pe.fromGithub': 'From GitHub',
   'gh.title': 'Add from GitHub release',
-  'gh.hint': 'Downloads the release asset into the mirror cache and adds it as a mod.',
+  'gh.hint':
+    'Two ways to take a release asset: name it, and the launcher downloads it from GitHub, or copy it onto this mirror and serve it from here.',
   'gh.repo': 'Repository (owner/name)',
   'gh.tag': 'Tag',
   'gh.asset': 'Asset (file name)',
-  'gh.add': 'Download and add',
-  'gh.adding': 'downloading...',
+  'gh.pin': 'Pin the release',
+  'gh.pinHint': 'The pack names the asset. Nothing is downloaded now, and no copy is kept here.',
+  'gh.copy': 'Copy onto the mirror',
+  'gh.copying': 'copying...',
+  'gh.copyHint':
+    'Fetches the asset into the cache and pins that copy, which is what a pack is left with once a release is deleted.',
 
   'cache.drop': 'Drop .jar files here, or click to choose',
   'cache.uploading': 'Uploading...',

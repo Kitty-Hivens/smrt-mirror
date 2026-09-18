@@ -1096,9 +1096,19 @@
     pick = null;
   }
 
-  // a GitHub ingest always lands a fresh jar in the cache -> a cache source
-  function onGithubPick(sel: { sha1: string; filename: string }) {
-    onMirrorPick({ filename: sel.filename, source: { type: 'smrt_cache', sha1: sel.sha1 } });
+  // Both of the GitHub picker's actions hand back a finished row: a pin that
+  // names the release asset where it is, or a cache source once its bytes have
+  // been copied here. Neither can grey out what the pack already ships the way
+  // the other pickers do, because the repository is typed rather than chosen
+  // from a list. A duplicate is therefore caught here and said, instead of the
+  // dialog closing on a row that silently never appeared.
+  function onGithubPick(sel: MirrorSel) {
+    if (presentKeys(null).includes(sourceKey(sel.source))) {
+      toasts.push({ kind: 'error', text: t('pe.dupMod', { name: sel.filename }) });
+      pick = null;
+      return;
+    }
+    onMirrorPick(sel);
   }
 
   // pull an asset from a build (Builds tab) into this pack, deduped by dest; the
