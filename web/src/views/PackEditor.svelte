@@ -58,9 +58,14 @@
   import TabStrip from './ui/TabStrip.svelte';
   import FloatDock from './ui/FloatDock.svelte';
 
+  // Every type a mod row can be pinned to. A type missing from this list cannot
+  // be chosen, and a row that already holds one draws an empty picker, since the
+  // trigger shows the label of the option matching its value and there is none.
   const MOD_SOURCE_OPTIONS = [
     { value: 'smrt_cache', label: 'cache' },
     { value: 'modrinth', label: 'modrinth' },
+    { value: 'curseforge', label: 'curseforge' },
+    { value: 'github', label: 'github' },
     { value: 'smrt_static', label: 'static' },
   ];
   const ASSET_SOURCE_OPTIONS = [
