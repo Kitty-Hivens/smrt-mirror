@@ -1,11 +1,12 @@
 <script lang="ts">
   import { api, ApiError } from '../lib/api';
   import { notifyFail, toasts } from '../lib/toasts.svelte';
-  import { t } from '../lib/i18n.svelte';
+  import { i18n, t } from '../lib/i18n.svelte';
   import JobLog from './JobLog.svelte';
   import ModRow from './ModRow.svelte';
   import ModIcon from './ModIcon.svelte';
   import { renderMarkdown } from '../lib/markdown';
+  import { inLanguage } from '../lib/cardtext';
   import { diffIsEmpty, diffManifests } from '../lib/diff';
   import { unroll } from '../lib/motion.svelte';
   import {
@@ -47,6 +48,16 @@
   const libraries = $derived(mods.filter(isLibrary));
   const buckets = $derived(manifest ? bucketAssets(manifest.assets) : null);
   const dep = $derived(resolveDeps(mods));
+  // The card in the language this operator is reading the panel in, which is
+  // what a player with that language gets. A preview that showed the untagged
+  // copy to everybody would be the one screen where checking a translation is
+  // impossible.
+  const tagline = $derived(
+    summary ? inLanguage(summary.tagline, summary.tagline_i18n, i18n.locale) : '',
+  );
+  const about = $derived(
+    summary ? inLanguage(summary.description_md, summary.description_md_i18n, i18n.locale) : '',
+  );
   const conflictIdx = $derived(conflictIndex(mods));
   const diff = $derived(prev && manifest ? diffManifests(prev, manifest) : null);
 
@@ -208,7 +219,7 @@
       </div>
       <div class="herotext">
         <h1>{summary.display_name}</h1>
-        {#if summary.tagline}<p class="tag">{summary.tagline}</p>{/if}
+        {#if tagline}<p class="tag">{tagline}</p>{/if}
         <div class="metachips">
           <span class="mc">{manifest.minecraft.version}</span>
           <span class="mc">{manifest.loader.name} {manifest.loader.version}</span>
@@ -220,10 +231,10 @@
     </div>
 
     <!-- about -->
-    {#if summary.description_md}
+    {#if about}
       <div class="card about">
         <!-- renderMarkdown emits a sanitised subset; the author's own markup is escaped, never passed through -->
-        {@html renderMarkdown(summary.description_md)}
+        {@html renderMarkdown(about)}
       </div>
     {/if}
 

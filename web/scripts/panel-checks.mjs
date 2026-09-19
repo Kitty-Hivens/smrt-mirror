@@ -21,6 +21,7 @@ import { assetPath, isPackFile, ASSET_PREFIX } from '../src/lib/packassets.ts';
 import { nextPageUrl } from '../src/lib/pagelink.ts';
 import { suggest, tally } from '../src/lib/changes.ts';
 import { renderMarkdown, safeUrl } from '../src/lib/markdown.ts';
+import { inLanguage } from '../src/lib/cardtext.ts';
 import { diffManifests } from '../src/lib/diff.ts';
 import { resolve } from '../src/lib/message.ts';
 import { en } from '../src/lib/locales/en.ts';
@@ -472,6 +473,27 @@ check('the offered list holds what old packs need', [8, 11, 16, 17, 21].every((v
 }
 
 // tail
+
+// ── the card, read in the viewer's language ─────────────────────────────────
+//
+// The mirror settles what ships -- blanks dropped, the untagged field filled
+// from the map when only translations were written -- so what is left here is
+// the lookup, and it has to be the one the API guide states, because a launcher
+// follows the same words.
+{
+  const card = { ru: 'Тяжёлая промышленность.' };
+  check('a reader gets the card in their own language',
+    inLanguage('Heavy industry.', card, 'ru') === 'Тяжёлая промышленность.',
+    inLanguage('Heavy industry.', card, 'ru'));
+  check('and the untagged copy when the pack was never written in theirs',
+    inLanguage('Heavy industry.', card, 'en') === 'Heavy industry.');
+  check('a translation that is only whitespace is not text',
+    inLanguage('Heavy industry.', { ru: '   ' }, 'ru') === 'Heavy industry.');
+  check('a card with no map at all still reads',
+    inLanguage('Heavy industry.', null, 'ru') === 'Heavy industry.');
+  check('and a pack with nothing written reads as nothing',
+    inLanguage(null, null, 'ru') === '');
+}
 
 // ── counted strings ─────────────────────────────────────────────────────────
 // A count and a noun beside it is the one place a dictionary of flat strings
