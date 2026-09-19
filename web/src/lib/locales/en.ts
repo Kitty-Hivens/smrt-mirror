@@ -323,6 +323,11 @@ export const en = {
   'pe.card.banner': 'Banner',
   'pe.card.gallery': 'Gallery (one per line)',
   'pe.card.description': 'Description (Markdown)',
+  'pe.card.translations': 'In other languages',
+  'pe.card.taglineIn': 'Tagline ({lang})',
+  'pe.card.descriptionIn': 'Description ({lang})',
+  'pe.card.translationHint':
+    'A language left empty is not published as an empty card. Whoever the pack has no text for reads the two fields above, which is also what a client that matches no language has always read.',
 
   'cachePick.search': 'Search by name or sha1...',
   'cachePick.empty': 'Cache is empty. Upload a jar first.',
