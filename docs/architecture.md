@@ -186,7 +186,8 @@ regardless.
 
   With one gap, stated because it is a gap and not a design: a pack card's
   `icon_url`, `banner_url` and `gallery_urls`, and any image inside
-  `description_md`, are authored strings that the panel renders as they are.
+  `description_md` or its translations, are authored strings that the panel
+  renders as they are.
   Operator packs point them at the pack's own `static/` tree, which keeps the
   invariant; a community pack's author can point them anywhere, and then every
   visitor to the public catalog fetches that host directly and tells it who
