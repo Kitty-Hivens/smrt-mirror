@@ -169,25 +169,13 @@ async fn build_pack(
 /// language sorts first -- because a note in some language beats no note, and
 /// every existing client reads only the untagged field.
 fn release_notes(body: BuildBody) -> (Option<String>, Option<BTreeMap<String, String>>) {
-    let i18n = body
-        .changelog_i18n
-        .map(|m| {
-            m.into_iter()
-                .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))
-                .filter(|(k, v)| !k.is_empty() && !v.is_empty())
-                .collect::<BTreeMap<_, _>>()
-        })
-        .filter(|m| !m.is_empty());
+    let notes = crate::domain::i18n::settle(body.changelog_i18n);
     let changelog = body
         .changelog
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .or_else(|| {
-            i18n.as_ref()
-                .and_then(|m| m.get("en").or_else(|| m.values().next()))
-                .cloned()
-        });
-    (changelog, i18n)
+        .or_else(|| crate::domain::i18n::untagged(&notes));
+    (changelog, notes)
 }
 
 /// Which stored state this build should turn into a manifest (#122).

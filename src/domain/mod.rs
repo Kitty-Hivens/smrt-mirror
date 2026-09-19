@@ -3,6 +3,10 @@
 //! every model type via `crate::domain::*`.
 
 pub mod diff;
+/// Not flattened: `settle` and `untagged` are only meaningful beside the map
+/// they are settling, so they are read at `i18n::` rather than loose among the
+/// model types.
+pub mod i18n;
 pub mod manifest;
 pub mod pack;
 pub mod server;
