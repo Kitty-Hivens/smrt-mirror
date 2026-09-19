@@ -25,6 +25,18 @@ gallery_urls: Array<string>,
  */
 description_md?: string, 
 /**
+ * The same tagline keyed by language tag (`{"en": "...", "ru": "..."}`),
+ * for a reader who does not read the language the untagged one is written
+ * in. Same rule as `PackManifest::changelog_i18n`: prefer the user's
+ * language, fall back to the untagged field, and read a missing key as
+ * "not written" rather than "written as nothing".
+ */
+tagline_i18n?: { [key in string]: string }, 
+/**
+ * The same description per language tag; see `tagline_i18n`.
+ */
+description_md_i18n?: { [key in string]: string }, 
+/**
  * GitHub uid of the pack owner. Official packs are owned by the operator;
  * community packs by their member. Server-controlled -- set at authoring.
  */

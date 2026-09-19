@@ -31,6 +31,8 @@ pub fn reconstruct_config(manifest: &PackManifest, summary: &PackSummary) -> Pac
             banner_url: summary.banner_url.clone(),
             gallery_urls: summary.gallery_urls.clone(),
             description_md: summary.description_md.clone(),
+            tagline_i18n: summary.tagline_i18n.clone(),
+            description_md_i18n: summary.description_md_i18n.clone(),
         },
         owner: summary.owner,
         tier: summary.tier,
@@ -116,6 +118,7 @@ fn rel_from_static_url(url: &str) -> String {
 mod tests {
     use super::*;
     use crate::domain::{Display, JavaSpec, LoaderSpec, MinecraftSpec, PackTier, Visibility};
+    use std::collections::BTreeMap;
 
     fn manifest() -> PackManifest {
         PackManifest {
@@ -195,6 +198,11 @@ mod tests {
             banner_url: None,
             gallery_urls: vec!["https://m/g1.png".into()],
             description_md: Some("# Industrial".into()),
+            tagline_i18n: Some(BTreeMap::from([("ru".to_string(), "тег".to_string())])),
+            description_md_i18n: Some(BTreeMap::from([(
+                "ru".to_string(),
+                "# Индустриальный".to_string(),
+            )])),
             owner: 211033194,
             tier: PackTier::Official,
             visibility: Visibility::Published,
@@ -240,6 +248,26 @@ mod tests {
         assert_eq!(
             cfg.pack_meta.description_md.as_deref(),
             Some("# Industrial")
+        );
+        // including what the card says in every other language it was written
+        // in: a revert that recovered only the untagged copy would quietly
+        // delete the translations, and the next build would ship the card
+        // half-translated
+        assert_eq!(
+            cfg.pack_meta
+                .tagline_i18n
+                .as_ref()
+                .and_then(|m| m.get("ru"))
+                .map(String::as_str),
+            Some("тег")
+        );
+        assert_eq!(
+            cfg.pack_meta
+                .description_md_i18n
+                .as_ref()
+                .and_then(|m| m.get("ru"))
+                .map(String::as_str),
+            Some("# Индустриальный")
         );
     }
 }

@@ -488,7 +488,14 @@
   /// this editor having typed it.
   function adopt(c: PackConfig) {
     if (!c.pack_meta) {
-      c.pack_meta = { icon_url: null, banner_url: null, gallery_urls: [], description_md: null };
+      c.pack_meta = {
+        icon_url: null,
+        banner_url: null,
+        gallery_urls: [],
+        description_md: null,
+        tagline_i18n: null,
+        description_md_i18n: null,
+      };
     }
     cfg = c;
     tagsStr = (c.tags ?? []).join(', ');
@@ -569,7 +576,14 @@
       featured: false,
       mods: [],
       assets: [],
-      pack_meta: { icon_url: null, banner_url: null, gallery_urls: [], description_md: null },
+      pack_meta: {
+        icon_url: null,
+        banner_url: null,
+        gallery_urls: [],
+        description_md: null,
+        tagline_i18n: null,
+        description_md_i18n: null,
+      },
       // ownership + publication are server-authoritative; these are placeholders
       // the backend overwrites on create (owner = the creator) / preserves on edit.
       owner: 0,
@@ -736,6 +750,12 @@
           .split('\n')
           .map((x) => x.trim())
           .filter(Boolean),
+        // The per-language copies travel as authored. What ships is settled on
+        // the mirror, where one rule covers the card and the release notes
+        // alike -- a language left blank is dropped there rather than in two
+        // clients that could disagree about when a box counts as empty.
+        tagline_i18n: snap.pack_meta.tagline_i18n,
+        description_md_i18n: snap.pack_meta.description_md_i18n,
       },
     };
   }

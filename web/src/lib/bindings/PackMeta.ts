@@ -5,4 +5,11 @@
  * the emitted `summary.json` at build time. Every field optional; absent fields
  * stay out of summary.json (per the `skip_serializing_if` on PackSummary).
  */
-export type PackMeta = { icon_url: string | null, banner_url: string | null, gallery_urls: Array<string>, description_md: string | null, };
+export type PackMeta = { icon_url: string | null, banner_url: string | null, gallery_urls: Array<string>, description_md: string | null, 
+/**
+ * The card's text in the other languages this pack is read in, keyed by
+ * language tag. The two fields above stay what they are and remain what a
+ * client reads when it matches nothing here; the build settles these onto
+ * the summary (see `make_pack_summary`).
+ */
+tagline_i18n: { [key in string]: string } | null, description_md_i18n: { [key in string]: string } | null, };

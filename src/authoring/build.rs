@@ -7,7 +7,7 @@ use super::modrinth::Modrinth;
 use super::sources::{ModrinthCache, Upstream, resolve_asset, resolve_mod, sha1_hex};
 use crate::domain::{
     AssetEntry, Display, JavaSpec, LoaderSpec, MatchPolicy, MinecraftSpec, ModEntry, PackConfig,
-    PackManifest, PackSummary, PresenceClass, SCHEMA_VERSION, SideClass, VersionChannel,
+    PackManifest, PackSummary, PresenceClass, SCHEMA_VERSION, SideClass, VersionChannel, i18n,
 };
 use crate::registry::Registry;
 use crate::registry::classify::Classification;
@@ -398,12 +398,24 @@ fn content_fingerprint(
 /// The card's three image references are resolved here (see [`pack_asset_url`]),
 /// so what a client reads is always a URL it can fetch, whatever the config
 /// stored.
+///
+/// The card's text is settled here too (#195). A curator writes the tagline and
+/// the description once per language, and what ships is the same shape release
+/// notes already use: the map with the blanks dropped, and the untagged field
+/// filled from it when nothing untagged was written -- because the untagged
+/// field is what every client reads when it matches no language, and an empty
+/// one would hide the card from all of them.
 pub fn make_pack_summary(cfg: &PackConfig, pack_version: &str, mirror_base: &str) -> PackSummary {
     let resolve = |v: &str| pack_asset_url(mirror_base, &cfg.pack_id, v);
+    let written = |s: &str| (!s.trim().is_empty()).then(|| s.to_string());
+    let tagline_i18n = i18n::settle(cfg.pack_meta.tagline_i18n.clone());
+    let description_md_i18n = i18n::settle(cfg.pack_meta.description_md_i18n.clone());
     PackSummary {
         pack_id: cfg.pack_id.clone(),
         display_name: cfg.display_name.clone(),
-        tagline: cfg.tagline.clone(),
+        tagline: written(&cfg.tagline)
+            .or_else(|| i18n::untagged(&tagline_i18n))
+            .unwrap_or_default(),
         minecraft_version: cfg.minecraft_version.clone(),
         latest_pack_version: pack_version.to_string(),
         tags: cfg.tags.clone(),
@@ -416,7 +428,14 @@ pub fn make_pack_summary(cfg: &PackConfig, pack_version: &str, mirror_base: &str
             .iter()
             .map(|v| resolve(v))
             .collect(),
-        description_md: cfg.pack_meta.description_md.clone(),
+        description_md: cfg
+            .pack_meta
+            .description_md
+            .as_deref()
+            .and_then(written)
+            .or_else(|| i18n::untagged(&description_md_i18n)),
+        tagline_i18n,
+        description_md_i18n,
         owner: cfg.owner,
         tier: cfg.tier,
         visibility: cfg.visibility,
@@ -1010,13 +1029,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_summary_carries_the_resolved_card() {
+    /// A pack with nothing in it but a card, which is what these two are about.
+    fn card_config(tagline: &str, pack_meta: crate::domain::PackMeta) -> PackConfig {
         use crate::domain::pack::{default_owner, default_tier, default_visibility};
-        let cfg = PackConfig {
+        PackConfig {
             pack_id: "u/42/MyPack".into(),
             display_name: "Mine".into(),
-            tagline: String::new(),
+            tagline: tagline.into(),
             minecraft_version: "1.21.1".into(),
             loader: forge(),
             java_major: 21,
@@ -1026,17 +1045,26 @@ mod tests {
             mods: vec![],
             assets: vec![],
             auth: None,
-            pack_meta: crate::domain::PackMeta {
-                icon_url: Some("_pack/icon.png".into()),
-                banner_url: Some("https://cdn.example/b.png".into()),
-                gallery_urls: vec!["_pack/one.png".into()],
-                description_md: None,
-            },
+            pack_meta,
             owner: default_owner(),
             tier: default_tier(),
             visibility: default_visibility(),
             fork_of: None,
-        };
+        }
+    }
+
+    #[test]
+    fn the_summary_carries_the_resolved_card() {
+        let cfg = card_config(
+            "",
+            crate::domain::PackMeta {
+                icon_url: Some("_pack/icon.png".into()),
+                banner_url: Some("https://cdn.example/b.png".into()),
+                gallery_urls: vec!["_pack/one.png".into()],
+                description_md: None,
+                ..Default::default()
+            },
+        );
         let s = make_pack_summary(&cfg, "0.1.0", "https://smrt.example");
         assert_eq!(
             s.icon_url.as_deref(),
@@ -1051,6 +1079,56 @@ mod tests {
             s.gallery_urls,
             vec!["https://smrt.example/v1/packs/u%2F42%2FMyPack/static/_pack/one.png".to_string()]
         );
+    }
+
+    // A card written once per language (#195). What ships is the map with the
+    // blanks dropped, and the untagged fields keep being what every client reads
+    // when it matches nothing -- so a curator who wrote only translations still
+    // has a card there, rather than an empty one under a full map.
+    #[test]
+    fn the_summary_settles_the_cards_languages() {
+        let by_language = |pairs: &[(&str, &str)]| {
+            Some(
+                pairs
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+            )
+        };
+        let cfg = card_config(
+            "",
+            crate::domain::PackMeta {
+                tagline_i18n: by_language(&[("RU", "Тяжпром."), ("de", "  ")]),
+                description_md_i18n: by_language(&[("ru", "# Индустриальный")]),
+                ..Default::default()
+            },
+        );
+        let s = make_pack_summary(&cfg, "0.1.0", "https://smrt.example");
+
+        let tags = |m: &Option<std::collections::BTreeMap<String, String>>| {
+            m.as_ref()
+                .map(|m| m.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default()
+        };
+        assert_eq!(tags(&s.tagline_i18n), ["ru"], "a blank language is absent");
+        assert_eq!(
+            s.tagline, "Тяжпром.",
+            "an untagged tagline nobody wrote is filled from the map"
+        );
+        assert_eq!(s.description_md.as_deref(), Some("# Индустриальный"));
+
+        // and an untagged field somebody did write is never overwritten by a
+        // translation of it
+        let cfg = card_config(
+            "Heavy industry.",
+            crate::domain::PackMeta {
+                tagline_i18n: by_language(&[("ru", "Тяжпром.")]),
+                ..Default::default()
+            },
+        );
+        let s = make_pack_summary(&cfg, "0.1.0", "https://smrt.example");
+        assert_eq!(s.tagline, "Heavy industry.");
+        assert!(s.description_md_i18n.is_none(), "an empty map stays absent");
     }
 
     #[test]
