@@ -15,6 +15,7 @@ Running the mirror and curating its content.
 | `SMRT_ADMIN_GITHUB_UIDS` | empty | Comma-separated GitHub uids granted Admin on sign-in. |
 | `SMRT_DEBUG_TOKEN` / `SMRT_DEBUG_GITHUB_UIDS` | none | The Debug rung above Admin: gates compat-affecting registry writes (authored classification, forced overrides). Leave unset in production unless needed. |
 | `SMRT_COOKIE_SECURE` | `true` | Set `false` only for plain-HTTP local dev. |
+| `SMRT_DEFAULT_LANGUAGE` | `en` | Language tag this deployment's audience reads. It decides which translation fills a card or a release note whose untagged copy the curator left empty, and that copy is what every client reading no language map gets. Set it to the language your players read. |
 | `RUST_LOG` | `smrt=info` | tracing filter. |
 
 Production config lives in `/etc/smrt/env` (systemd `EnvironmentFile`).

@@ -517,7 +517,12 @@ async fn run_build(
             fell_back.join(", ")
         ));
     }
-    let summary = make_pack_summary(&cfg, &manifest.pack_version, &config.mirror_base);
+    let summary = make_pack_summary(
+        &cfg,
+        &manifest.pack_version,
+        &config.mirror_base,
+        &config.default_language,
+    );
 
     if req.dry_run {
         job.line(format!(
@@ -708,6 +713,7 @@ mod tests {
             debug_token: None,
             debug_github_uids: Vec::new(),
             curseforge_api_key: None,
+            default_language: "en".into(),
         }
     }
 

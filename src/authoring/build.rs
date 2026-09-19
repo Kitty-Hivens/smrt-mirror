@@ -404,8 +404,15 @@ fn content_fingerprint(
 /// notes already use: the map with the blanks dropped, and the untagged field
 /// filled from it when nothing untagged was written -- because the untagged
 /// field is what every client reads when it matches no language, and an empty
-/// one would hide the card from all of them.
-pub fn make_pack_summary(cfg: &PackConfig, pack_version: &str, mirror_base: &str) -> PackSummary {
+/// one would hide the card from all of them. Which translation fills it is the
+/// deployment's `default_language`, because which language the readers of one
+/// mirror have is a property of that mirror.
+pub fn make_pack_summary(
+    cfg: &PackConfig,
+    pack_version: &str,
+    mirror_base: &str,
+    default_language: &str,
+) -> PackSummary {
     let resolve = |v: &str| pack_asset_url(mirror_base, &cfg.pack_id, v);
     let written = |s: &str| (!s.trim().is_empty()).then(|| s.to_string());
     let tagline_i18n = i18n::settle(cfg.pack_meta.tagline_i18n.clone());
@@ -414,7 +421,7 @@ pub fn make_pack_summary(cfg: &PackConfig, pack_version: &str, mirror_base: &str
         pack_id: cfg.pack_id.clone(),
         display_name: cfg.display_name.clone(),
         tagline: written(&cfg.tagline)
-            .or_else(|| i18n::untagged(&tagline_i18n))
+            .or_else(|| i18n::untagged(&tagline_i18n, default_language))
             .unwrap_or_default(),
         minecraft_version: cfg.minecraft_version.clone(),
         latest_pack_version: pack_version.to_string(),
@@ -433,7 +440,7 @@ pub fn make_pack_summary(cfg: &PackConfig, pack_version: &str, mirror_base: &str
             .description_md
             .as_deref()
             .and_then(written)
-            .or_else(|| i18n::untagged(&description_md_i18n)),
+            .or_else(|| i18n::untagged(&description_md_i18n, default_language)),
         tagline_i18n,
         description_md_i18n,
         owner: cfg.owner,
@@ -1065,7 +1072,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let s = make_pack_summary(&cfg, "0.1.0", "https://smrt.example");
+        let s = make_pack_summary(&cfg, "0.1.0", "https://smrt.example", "en");
         assert_eq!(
             s.icon_url.as_deref(),
             Some("https://smrt.example/v1/packs/u%2F42%2FMyPack/static/_pack/icon.png")
@@ -1103,7 +1110,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let s = make_pack_summary(&cfg, "0.1.0", "https://smrt.example");
+        let s = make_pack_summary(&cfg, "0.1.0", "https://smrt.example", "en");
 
         let tags = |m: &Option<std::collections::BTreeMap<String, String>>| {
             m.as_ref()
@@ -1126,9 +1133,40 @@ mod tests {
                 ..Default::default()
             },
         );
-        let s = make_pack_summary(&cfg, "0.1.0", "https://smrt.example");
+        let s = make_pack_summary(&cfg, "0.1.0", "https://smrt.example", "en");
         assert_eq!(s.tagline, "Heavy industry.");
         assert!(s.description_md_i18n.is_none(), "an empty map stays absent");
+    }
+
+    // Which translation fills an untagged field is the deployment's, not
+    // English by default. That field is what a client reading no map gets, and
+    // today that is every player, so a mirror serving a Russian community fills
+    // it from Russian or hands its players a card they cannot read.
+    #[test]
+    fn the_untagged_card_takes_the_language_the_mirror_serves() {
+        let both = |pairs: &[(&str, &str)]| {
+            Some(
+                pairs
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+            )
+        };
+        let cfg = card_config(
+            "",
+            crate::domain::PackMeta {
+                tagline_i18n: both(&[("en", "Heavy industry."), ("ru", "Тяжпром.")]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            make_pack_summary(&cfg, "0.1.0", "https://smrt.example", "ru").tagline,
+            "Тяжпром."
+        );
+        assert_eq!(
+            make_pack_summary(&cfg, "0.1.0", "https://smrt.example", "en").tagline,
+            "Heavy industry."
+        );
     }
 
     #[test]

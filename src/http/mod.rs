@@ -199,6 +199,7 @@ mod tests {
             debug_token: None,
             debug_github_uids: Vec::new(),
             curseforge_api_key: None,
+            default_language: "en".into(),
         };
         AppState::new(config).unwrap()
     }
@@ -477,6 +478,7 @@ mod tests {
                 &cfg,
                 "0.1.0",
                 "http://localhost",
+                "en",
             ))
             .await
             .unwrap();
@@ -603,6 +605,7 @@ mod tests {
                 &cfg,
                 "0.1.0",
                 "http://localhost",
+                "en",
             ))
             .await
             .unwrap();
@@ -673,6 +676,7 @@ mod tests {
                 &cfg,
                 "0.1.0",
                 "http://localhost",
+                "en",
             ))
             .await
             .unwrap();
@@ -824,6 +828,7 @@ mod tests {
                 &cfg,
                 "0.1.0",
                 "http://localhost",
+                "en",
             ))
             .await
             .unwrap();
@@ -953,6 +958,7 @@ mod tests {
                     &cfg,
                     "0.1.0",
                     "http://localhost",
+                    "en",
                 ))
                 .await
                 .unwrap();
@@ -1018,6 +1024,7 @@ mod tests {
                 &cfg,
                 "0.1.0",
                 "http://localhost",
+                "en",
             ))
             .await
             .unwrap();
@@ -1191,6 +1198,7 @@ mod tests {
                     &cfg,
                     "0.1.0",
                     "http://localhost",
+                    "en",
                 ))
                 .await
                 .unwrap();
@@ -1286,6 +1294,7 @@ mod tests {
             debug_token: None,
             debug_github_uids: Vec::new(),
             curseforge_api_key: None,
+            default_language: "en".into(),
         };
         let app = router(AppState::new(config).unwrap());
 
@@ -1448,6 +1457,7 @@ mod tests {
             debug_token: None,
             debug_github_uids: Vec::new(),
             curseforge_api_key: None,
+            default_language: "en".into(),
         };
         let state = AppState::new(config).unwrap();
         let _ = router(state);

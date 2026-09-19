@@ -25,14 +25,22 @@ pub fn settle(map: Option<BTreeMap<String, String>>) -> Option<BTreeMap<String, 
 }
 
 /// What the untagged field falls back to when the curator wrote only
-/// translations: English first, then whichever language sorts first.
+/// translations: the language this deployment's audience reads
+/// (`SMRT_DEFAULT_LANGUAGE`, `en` unless set), then whichever language sorts
+/// first.
 ///
 /// Some text beats none. The untagged field is the one every client has always
 /// read, so leaving it empty while the map is full would hide the card, or the
 /// release note, from everything that has not learned about the map yet.
-pub fn untagged(map: &Option<BTreeMap<String, String>>) -> Option<String> {
+///
+/// Which translation fills it is not a detail. Today it is what every player
+/// sees, the launcher reading no map at all, so a mirror serving a Russian
+/// community and filling from English hands its players text they cannot read.
+/// The preference is the operator's because the audience is.
+pub fn untagged(map: &Option<BTreeMap<String, String>>, prefer: &str) -> Option<String> {
+    let prefer = prefer.trim().to_ascii_lowercase();
     map.as_ref()
-        .and_then(|m| m.get("en").or_else(|| m.values().next()))
+        .and_then(|m| m.get(&prefer).or_else(|| m.values().next()))
         .cloned()
 }
 
@@ -68,15 +76,22 @@ mod tests {
     }
 
     #[test]
-    fn the_untagged_copy_prefers_english_then_takes_what_there_is() {
+    fn the_untagged_copy_takes_the_language_the_deployment_reads() {
+        let both = map(&[("ru", "Тяжпром."), ("en", "Heavy industry.")]);
+        assert_eq!(untagged(&both, "en").as_deref(), Some("Heavy industry."));
+        // the case this exists for: the mirror's own audience reads Russian, so
+        // the copy every untranslated client gets is the Russian one
+        assert_eq!(untagged(&both, "ru").as_deref(), Some("Тяжпром."));
+        assert_eq!(untagged(&both, " RU ").as_deref(), Some("Тяжпром."));
+    }
+
+    #[test]
+    fn a_language_nobody_wrote_still_yields_what_there_is() {
+        // some text beats none, whatever the deployment prefers
         assert_eq!(
-            untagged(&map(&[("ru", "Тяжпром."), ("en", "Heavy industry.")])).as_deref(),
-            Some("Heavy industry.")
-        );
-        assert_eq!(
-            untagged(&map(&[("ru", "Тяжпром.")])).as_deref(),
+            untagged(&map(&[("ru", "Тяжпром.")]), "de").as_deref(),
             Some("Тяжпром.")
         );
-        assert_eq!(untagged(&None), None);
+        assert_eq!(untagged(&None, "ru"), None);
     }
 }
