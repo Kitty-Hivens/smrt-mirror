@@ -582,7 +582,14 @@ async fn run_build(
             "Modrinth unreachable; resolved these from the registry"
         );
     }
-    let summary = authoring::make_pack_summary(&cfg, &manifest.pack_version, mirror_base);
+    // The CLI builds against whatever deployment values it was given, and it is
+    // given a mirror base rather than a whole config, so the language a card
+    // falls back to comes straight from the environment here.
+    let default_language = std::env::var("SMRT_DEFAULT_LANGUAGE")
+        .map(|v| v.trim().to_ascii_lowercase())
+        .unwrap_or_else(|_| "en".to_string());
+    let summary =
+        authoring::make_pack_summary(&cfg, &manifest.pack_version, mirror_base, &default_language);
 
     let store = Storage::new(storage.to_path_buf());
     store

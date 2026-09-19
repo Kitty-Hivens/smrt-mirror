@@ -128,7 +128,10 @@ async fn build_pack(
         Some(c) => VersionChannel::parse(c)
             .ok_or_else(|| ApiError::BadRequest("channel must be release, beta or alpha".into()))?,
     };
-    let (changelog, changelog_i18n) = release_notes(body.map(|Json(b)| b).unwrap_or_default());
+    let (changelog, changelog_i18n) = release_notes(
+        body.map(|Json(b)| b).unwrap_or_default(),
+        &state.config.default_language,
+    );
     let job = state.jobs.spawn_build(
         pack_id,
         BuildDeps {
@@ -165,29 +168,21 @@ async fn build_pack(
 ///
 /// Blank entries are dropped rather than shipped, so a language the curator
 /// left empty is absent instead of publishing an empty note. When no untagged
-/// text was given, it is taken from the map -- English first, then whichever
-/// language sorts first -- because a note in some language beats no note, and
-/// every existing client reads only the untagged field.
-fn release_notes(body: BuildBody) -> (Option<String>, Option<BTreeMap<String, String>>) {
-    let i18n = body
-        .changelog_i18n
-        .map(|m| {
-            m.into_iter()
-                .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))
-                .filter(|(k, v)| !k.is_empty() && !v.is_empty())
-                .collect::<BTreeMap<_, _>>()
-        })
-        .filter(|m| !m.is_empty());
+/// text was given, it is taken from the map: the deployment's own language
+/// first, then whichever sorts first. A note in some language beats no note,
+/// and every existing client reads only the untagged field, so which language
+/// fills it is what a player actually gets.
+fn release_notes(
+    body: BuildBody,
+    default_language: &str,
+) -> (Option<String>, Option<BTreeMap<String, String>>) {
+    let notes = crate::domain::i18n::settle(body.changelog_i18n);
     let changelog = body
         .changelog
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .or_else(|| {
-            i18n.as_ref()
-                .and_then(|m| m.get("en").or_else(|| m.values().next()))
-                .cloned()
-        });
-    (changelog, i18n)
+        .or_else(|| crate::domain::i18n::untagged(&notes, default_language));
+    (changelog, notes)
 }
 
 /// Which stored state this build should turn into a manifest (#122).
@@ -405,8 +400,10 @@ mod tests {
 
     #[test]
     fn a_language_left_empty_does_not_ship_as_an_empty_note() {
-        let (untagged, map) =
-            release_notes(body(None, &[("en", "Fixed the crash."), ("ru", "  ")]));
+        let (untagged, map) = release_notes(
+            body(None, &[("en", "Fixed the crash."), ("ru", "  ")]),
+            "en",
+        );
         let map = map.expect("english survives");
         assert_eq!(map.keys().collect::<Vec<_>>(), ["en"]);
         // and the untagged copy every existing client reads is filled from it
@@ -415,33 +412,40 @@ mod tests {
 
     #[test]
     fn nothing_written_stays_nothing() {
-        assert_eq!(release_notes(body(None, &[])), (None, None));
+        assert_eq!(release_notes(body(None, &[]), "en"), (None, None));
         assert_eq!(
-            release_notes(body(Some("   "), &[("ru", "")])),
+            release_notes(body(Some("   "), &[("ru", "")]), "en"),
             (None, None)
         );
     }
 
     #[test]
-    fn the_untagged_note_falls_back_to_english_then_to_whatever_exists() {
-        let (untagged, _) = release_notes(body(None, &[("ru", "Починили."), ("en", "Fixed.")]));
+    fn the_untagged_note_falls_back_to_the_mirrors_own_language_then_to_whatever_exists() {
+        let both = &[("ru", "Починили."), ("en", "Fixed.")];
+        let (untagged, _) = release_notes(body(None, both), "en");
         assert_eq!(untagged.as_deref(), Some("Fixed."));
 
+        // the case this setting exists for: every client that reads no map gets
+        // this copy, so on a mirror whose players read Russian it is the Russian
+        // note rather than the English one
+        let (untagged, _) = release_notes(body(None, both), "ru");
+        assert_eq!(untagged.as_deref(), Some("Починили."));
+
         // no English written: a note in some language beats no note at all
-        let (untagged, _) = release_notes(body(None, &[("ru", "Починили.")]));
+        let (untagged, _) = release_notes(body(None, &[("ru", "Починили.")]), "en");
         assert_eq!(untagged.as_deref(), Some("Починили."));
     }
 
     #[test]
     fn an_explicit_untagged_note_is_never_overwritten() {
-        let (untagged, map) = release_notes(body(Some("Read me"), &[("en", "Fixed.")]));
+        let (untagged, map) = release_notes(body(Some("Read me"), &[("en", "Fixed.")]), "en");
         assert_eq!(untagged.as_deref(), Some("Read me"));
         assert_eq!(map.unwrap().get("en").map(String::as_str), Some("Fixed."));
     }
 
     #[test]
     fn language_tags_are_normalised_so_one_language_is_one_entry() {
-        let (_, map) = release_notes(body(None, &[(" EN ", "Fixed."), ("ru", "Починили.")]));
+        let (_, map) = release_notes(body(None, &[(" EN ", "Fixed."), ("ru", "Починили.")]), "en");
         let map = map.unwrap();
         assert_eq!(map.keys().collect::<Vec<_>>(), ["en", "ru"]);
     }

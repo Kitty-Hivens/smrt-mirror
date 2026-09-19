@@ -5,6 +5,7 @@
   import { dialogs } from '../lib/dialogs.svelte';
   import { route } from '../lib/route.svelte';
   import { t } from '../lib/i18n.svelte';
+  import { TEXT_LANGUAGES, languagesFor } from '../lib/languages';
   import { advertisesModList } from '../lib/handshake';
   import { assetPath } from '../lib/packassets';
   import { arrive, depart, settle, stagger } from '../lib/motion.svelte';
@@ -488,7 +489,14 @@
   /// this editor having typed it.
   function adopt(c: PackConfig) {
     if (!c.pack_meta) {
-      c.pack_meta = { icon_url: null, banner_url: null, gallery_urls: [], description_md: null };
+      c.pack_meta = {
+        icon_url: null,
+        banner_url: null,
+        gallery_urls: [],
+        description_md: null,
+        tagline_i18n: null,
+        description_md_i18n: null,
+      };
     }
     cfg = c;
     tagsStr = (c.tags ?? []).join(', ');
@@ -569,7 +577,14 @@
       featured: false,
       mods: [],
       assets: [],
-      pack_meta: { icon_url: null, banner_url: null, gallery_urls: [], description_md: null },
+      pack_meta: {
+        icon_url: null,
+        banner_url: null,
+        gallery_urls: [],
+        description_md: null,
+        tagline_i18n: null,
+        description_md_i18n: null,
+      },
       // ownership + publication are server-authoritative; these are placeholders
       // the backend overwrites on create (owner = the creator) / preserves on edit.
       owner: 0,
@@ -736,6 +751,12 @@
           .split('\n')
           .map((x) => x.trim())
           .filter(Boolean),
+        // The per-language copies travel as authored. What ships is settled on
+        // the mirror, where one rule covers the card and the release notes
+        // alike -- a language left blank is dropped there rather than in two
+        // clients that could disagree about when a box counts as empty.
+        tagline_i18n: snap.pack_meta.tagline_i18n,
+        description_md_i18n: snap.pack_meta.description_md_i18n,
       },
     };
   }
@@ -890,6 +911,38 @@
       bootstrapMode = false;
       load();
     }
+  }
+
+  // ── the card, per language (#195) ──
+  //
+  // `tagline` and `pack_meta.description_md` stay the untagged copy, which is
+  // what a client reads when it matches no language. These are the same two
+  // fields written again, keyed by tag, and they live in maps that are absent
+  // until something is written -- so the boxes read and write through here
+  // rather than binding into a map that may not exist yet.
+  type CardText = 'tagline_i18n' | 'description_md_i18n';
+  let cardLang = $state<string>(TEXT_LANGUAGES[0]);
+  // What the strip offers: the languages a client can render, plus anything
+  // this pack already carries, so a tag written elsewhere stays reachable.
+  const cardLanguages = $derived(
+    languagesFor(cfg?.pack_meta?.tagline_i18n, cfg?.pack_meta?.description_md_i18n),
+  );
+
+  function cardText(field: CardText, lang: string): string {
+    return cfg?.pack_meta?.[field]?.[lang] ?? '';
+  }
+
+  function setCardText(field: CardText, lang: string, value: string) {
+    if (!cfg) return;
+    // A new object rather than a mutation: the document's writer diffs the map
+    // key by key, so replacing it costs one patch on the language being typed
+    // in and leaves every other language alone.
+    cfg.pack_meta[field] = { ...(cfg.pack_meta[field] ?? {}), [lang]: value };
+  }
+
+  /// Whether a language has anything written in it, for the strip's mark.
+  function cardWritten(lang: string): boolean {
+    return !!(cardText('tagline_i18n', lang).trim() || cardText('description_md_i18n', lang).trim());
   }
 
   /// An icon or banner was just uploaded into the pack's own static tree: put
@@ -1635,6 +1688,43 @@
             </Field>
             <Field label={t('pe.card.gallery')} wide><textarea class="mono" rows="3" bind:value={cardGalleryStr}></textarea></Field>
             <Field label={t('pe.card.description')} wide><textarea class="mono" rows="5" bind:value={cfg.pack_meta.description_md}></textarea></Field>
+
+            <!-- The card in the other languages this pack is read in. The two
+                 fields above stay the untagged copy every client falls back to,
+                 so these sit beside them rather than replacing them, one
+                 language at a time -- the shape the release notes already use. -->
+            <div class="cardlang">
+              <div class="langhead">
+                <span>{t('pe.card.translations')}</span>
+                <div class="langs">
+                  {#each cardLanguages as l (l)}
+                    <button
+                      class="lang"
+                      class:on={cardLang === l}
+                      onclick={() => (cardLang = l)}
+                      title={cardWritten(l) ? t('bld.langWritten') : t('bld.langEmpty')}
+                    >
+                      {l}{cardWritten(l) ? '' : ' ·'}
+                    </button>
+                  {/each}
+                </div>
+              </div>
+              <Field label={t('pe.card.taglineIn', { lang: cardLang })} wide>
+                <input
+                  value={cardText('tagline_i18n', cardLang)}
+                  oninput={(e) => setCardText('tagline_i18n', cardLang, e.currentTarget.value)}
+                />
+              </Field>
+              <Field label={t('pe.card.descriptionIn', { lang: cardLang })} wide>
+                <textarea
+                  class="mono"
+                  rows="5"
+                  value={cardText('description_md_i18n', cardLang)}
+                  oninput={(e) => setCardText('description_md_i18n', cardLang, e.currentTarget.value)}
+                ></textarea>
+              </Field>
+              <p class="cardhint muted">{t('pe.card.translationHint')}</p>
+            </div>
           </div>
         </Section>
       {/if}
@@ -1938,6 +2028,41 @@
   .card textarea {
     resize: vertical;
     width: 100%;
+  }
+  /* the per-language half of the card, set off from the untagged fields above
+     it because which language a box is in is the thing that must not be guessed */
+  .cardlang {
+    display: grid;
+    gap: var(--space-3) var(--space-4);
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--seam);
+  }
+  .langhead {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-3);
+    font-size: var(--fs-sm);
+    color: var(--fg-dim);
+  }
+  .langs {
+    display: flex;
+    gap: 4px;
+  }
+  /* same control as the release notes': a tag, with a dot for a language
+     nothing has been written in yet */
+  .lang {
+    background: none;
+    border: 1px solid transparent;
+    box-shadow: none;
+    padding: 1px 7px;
+    font: inherit;
+    color: var(--fg-dim);
+    cursor: pointer;
+  }
+  .lang.on {
+    border-color: var(--seam);
+    color: var(--fg);
   }
   .chk {
     display: flex;

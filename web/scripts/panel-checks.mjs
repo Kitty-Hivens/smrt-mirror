@@ -21,6 +21,8 @@ import { assetPath, isPackFile, ASSET_PREFIX } from '../src/lib/packassets.ts';
 import { nextPageUrl } from '../src/lib/pagelink.ts';
 import { suggest, tally } from '../src/lib/changes.ts';
 import { renderMarkdown, safeUrl } from '../src/lib/markdown.ts';
+import { inLanguage } from '../src/lib/cardtext.ts';
+import { TEXT_LANGUAGES, languagesFor } from '../src/lib/languages.ts';
 import { diffManifests } from '../src/lib/diff.ts';
 import { resolve } from '../src/lib/message.ts';
 import { en } from '../src/lib/locales/en.ts';
@@ -41,7 +43,11 @@ const base = {
   minecraft_version: '1.12.2', loader: { name: 'forge', version: '14.23.5.2860' },
   java_major: 8, version: '0.4', tags: ['tech'], featured: true,
   mods: [{ filename: 'jei.jar', default_enabled: true, source: { type: 'smrt_cache', sha1: 'a'.repeat(40) }, pulled: false }],
-  assets: [], pack_meta: { description_md: 'A pack.', gallery_urls: [] },
+  assets: [],
+  pack_meta: {
+    description_md: 'A pack.', gallery_urls: [],
+    tagline_i18n: null, description_md_i18n: { ru: 'Пак.' },
+  },
   owner: 211033194, tier: 'community', visibility: 'draft', fork_of: 'Create',
 };
 
@@ -107,6 +113,26 @@ const seed = Y.encodeStateAsUpdate(server);
   Y.applyUpdate(ada, Y.encodeStateAsUpdate(bo));
   const names = readConfig(ada, base).mods.map((m) => m.filename);
   check('both additions land', names.length === 3 && names.includes('ae2.jar') && names.includes('thermal.jar'), JSON.stringify(names));
+}
+
+{
+  // A translation merges the way the original does (#195). The card is written
+  // once per language by the same people at the same time, and the language
+  // nobody else in the room reads is exactly where a paragraph quietly replaced
+  // by whoever saved last would go unnoticed.
+  const ada = editor(seed);
+  const bo = editor(seed);
+  const a = structuredClone(base);
+  a.pack_meta.description_md_i18n.ru = 'Пак. Тяжёлый.';     // appended
+  writeConfig(ada, a, 'local');
+  const b = structuredClone(base);
+  b.pack_meta.description_md_i18n.ru = 'Этот Пак.';          // prefixed
+  writeConfig(bo, b, 'local');
+
+  Y.applyUpdate(ada, Y.encodeStateAsUpdate(bo));
+  const text = readConfig(ada, base).pack_meta.description_md_i18n.ru;
+  check('both people keep their words in a translation too',
+    text.includes('Тяжёлый.') && text.startsWith('Этот '), `got ${JSON.stringify(text)}`);
 }
 
 {
@@ -448,6 +474,52 @@ check('the offered list holds what old packs need', [8, 11, 16, 17, 21].every((v
 }
 
 // tail
+
+// ── the card, read in the viewer's language ─────────────────────────────────
+//
+// The mirror settles what ships -- blanks dropped, the untagged field filled
+// from the map when only translations were written -- so what is left here is
+// the lookup, and it has to be the one the API guide states, because a launcher
+// follows the same words.
+{
+  const card = { ru: 'Тяжёлая промышленность.' };
+  check('a reader gets the card in their own language',
+    inLanguage('Heavy industry.', card, 'ru') === 'Тяжёлая промышленность.',
+    inLanguage('Heavy industry.', card, 'ru'));
+  check('and the untagged copy when the pack was never written in theirs',
+    inLanguage('Heavy industry.', card, 'en') === 'Heavy industry.');
+  check('a translation that is only whitespace is not text',
+    inLanguage('Heavy industry.', { ru: '   ' }, 'ru') === 'Heavy industry.');
+  check('a card with no map at all still reads',
+    inLanguage('Heavy industry.', null, 'ru') === 'Heavy industry.');
+  check('and a pack with nothing written reads as nothing',
+    inLanguage(null, null, 'ru') === '');
+}
+
+// ── which languages a card can be written in ────────────────────────────────
+//
+// Not the panel's own two. What a curator can write is bounded by what a
+// reader's client renders, and tying the two together left every player on a
+// language the panel has no dictionary for reading the untagged copy forever.
+{
+  check('the languages offered are the ones a client can render',
+    ['ru', 'en', 'de', 'ja'].every((l) => TEXT_LANGUAGES.includes(l)),
+    TEXT_LANGUAGES.join(', '));
+
+  check('a pack keeps its own tag even when nothing offers it',
+    languagesFor({ pt: 'Um pacote.' }).includes('pt'),
+    languagesFor({ pt: 'Um pacote.' }).join(', '));
+
+  check('and the offer holds no duplicates whatever the pack carries',
+    (() => {
+      const all = languagesFor({ RU: 'a', ru: 'b' }, { ja: 'c' });
+      return new Set(all).size === all.length && all.filter((l) => l === 'ru').length === 1;
+    })(),
+    languagesFor({ RU: 'a', ru: 'b' }, { ja: 'c' }).join(', '));
+
+  check('a pack with nothing written still gets the whole list',
+    languagesFor(null, undefined).length === TEXT_LANGUAGES.length);
+}
 
 // ── counted strings ─────────────────────────────────────────────────────────
 // A count and a noun beside it is the one place a dictionary of flat strings

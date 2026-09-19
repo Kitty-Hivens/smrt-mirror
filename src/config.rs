@@ -32,6 +32,19 @@ pub struct Config {
     /// file a cached jar is. Absent leaves the harvest with the Modrinth
     /// identity leg alone, which is what it had before.
     pub curseforge_api_key: Option<String>,
+    /// Which language this deployment's audience reads, as a language tag.
+    ///
+    /// It settles one question: when a curator writes a card or a release note
+    /// only per language and leaves the untagged copy empty, which translation
+    /// fills it. That copy is what every client reading no language map gets,
+    /// and for the launcher today that is every player, so filling it from
+    /// English on a mirror whose players read Russian hands them text they
+    /// cannot read.
+    ///
+    /// A property of the deployment rather than of the text: one mirror serves
+    /// one audience. Defaults to `en`, which is what the rule did before this
+    /// existed.
+    pub default_language: String,
 }
 
 impl Config {
@@ -72,6 +85,12 @@ impl Config {
         let debug_token = std::env::var("SMRT_DEBUG_TOKEN").ok();
         let curseforge_api_key = nonempty("SMRT_CURSEFORGE_API_KEY");
 
+        // Trimmed and lower-cased on the way in, because it is matched against
+        // map keys the mirror has already normalised the same way.
+        let default_language = nonempty("SMRT_DEFAULT_LANGUAGE")
+            .map(|v| v.trim().to_ascii_lowercase())
+            .unwrap_or_else(|| "en".to_string());
+
         Ok(Self {
             bind_addr,
             storage_dir,
@@ -84,6 +103,7 @@ impl Config {
             debug_token,
             debug_github_uids,
             curseforge_api_key,
+            default_language,
         })
     }
 }

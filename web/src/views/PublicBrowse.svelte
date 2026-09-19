@@ -3,10 +3,11 @@
   import { notifyFail } from '../lib/toasts.svelte';
   import { dialogs } from '../lib/dialogs.svelte';
   import { href, plainClick, route } from '../lib/route.svelte';
-  import { t } from '../lib/i18n.svelte';
+  import { i18n, t } from '../lib/i18n.svelte';
   import { mirror } from '../lib/mirror.svelte';
   import { terms } from '../lib/terms.svelte';
   import { renderMarkdown } from '../lib/markdown';
+  import { inLanguage } from '../lib/cardtext';
   import ModIcon from './ModIcon.svelte';
   import PackThreads from './PackThreads.svelte';
   import TabStrip from './ui/TabStrip.svelte';
@@ -79,6 +80,13 @@
     return m.display?.name ?? m.filename.replace(/\.jar$/, '');
   }
 
+  // What a card says to the person reading it: their language where the pack
+  // was written in it, the untagged copy otherwise. Functions rather than
+  // derived values because the catalog renders a list of them.
+  const tagline = (p: PackSummary) => inLanguage(p.tagline, p.tagline_i18n, i18n.locale);
+  const about = (p: PackSummary) =>
+    inLanguage(p.description_md, p.description_md_i18n, i18n.locale);
+
   async function fork(p: PackSummary) {
     if (!me) return;
     if (!(await terms.ensure())) return;
@@ -146,7 +154,7 @@
               {p.display_name}{#if p.featured}<span class="feat mono">{t('packs.flag.featured')}</span>{/if}
             </div>
             {#if owner}<div class="pby faint mono">{t('browse.by', { user: owner })}</div>{/if}
-            {#if p.tagline}<div class="ptag muted">{p.tagline}</div>{/if}
+            {#if tagline(p)}<div class="ptag muted">{tagline(p)}</div>{/if}
           </div>
           <div class="pmeta">
             <span class="tag">{p.minecraft_version}</span>
@@ -162,9 +170,9 @@
               {#if me}
                 <button class="forkbtn" onclick={() => fork(p)}>{t('browse.fork')}</button>
               {/if}
-              {#if p.description_md}
+              {#if about(p)}
                 <!-- renderMarkdown sanitizes; the author's own markup is escaped, never passed through -->
-                <div class="desc">{@html renderMarkdown(p.description_md)}</div>
+                <div class="desc">{@html renderMarkdown(about(p))}</div>
               {/if}
               <!-- What is being asked of this pack, where the pack is. A
                    decision nobody can find is indistinguishable from one nobody

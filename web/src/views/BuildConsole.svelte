@@ -1,7 +1,8 @@
 <script lang="ts">
   import { api } from '../lib/api';
   import { notifyFail, toasts } from '../lib/toasts.svelte';
-  import { t, LOCALES, type Locale } from '../lib/i18n.svelte';
+  import { t } from '../lib/i18n.svelte';
+  import { TEXT_LANGUAGES } from '../lib/languages';
   import type { CommitStatus, JobStatus } from '../lib/types';
   import JobLog from './JobLog.svelte';
   import PackHistory from './PackHistory.svelte';
@@ -68,10 +69,12 @@
   let channel = $state<'release' | 'beta' | 'alpha'>('beta');
   // Release notes per language rather than one box. The launcher renders them
   // to the player, and a mirror serving one community in its own language is
-  // the ordinary case -- the languages offered are the panel's own, and the
-  // wire accepts any tag.
-  let notes = $state<Record<string, string>>(Object.fromEntries(LOCALES.map((l) => [l, ''])));
-  let noteLang = $state<Locale>(LOCALES[0]);
+  // the ordinary case. The languages offered are the ones a client can render
+  // rather than the ones the panel itself speaks, and the wire accepts any tag.
+  let notes = $state<Record<string, string>>(
+    Object.fromEntries(TEXT_LANGUAGES.map((l) => [l, ''])),
+  );
+  let noteLang = $state<string>(TEXT_LANGUAGES[0]);
   // What the pre-publish check refused to publish over. Read from the job
   // rather than scraped out of the log, so the offer below only appears for a
   // refusal an override can actually answer.
@@ -190,7 +193,7 @@
     <div class="notes-h">
       <span>{t('bld.changelog')}</span>
       <div class="langs">
-        {#each LOCALES as l (l)}
+        {#each TEXT_LANGUAGES as l (l)}
           <button
             class="lang"
             class:on={noteLang === l}
@@ -202,7 +205,7 @@
         {/each}
       </div>
     </div>
-    {#each LOCALES as l (l)}
+    {#each TEXT_LANGUAGES as l (l)}
       {#if noteLang === l}
         <textarea rows="3" bind:value={notes[l]} placeholder={t('bld.changelogPlaceholder')}
         ></textarea>

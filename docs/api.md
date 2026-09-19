@@ -101,6 +101,12 @@ map holds and is what a client that ignores the map has always read. A tag the
 curator left blank is absent from the map rather than present and empty, so a
 missing key means "not written", never "written as nothing".
 
+A pack card follows the same rule, in `tagline_i18n` and `description_md_i18n`
+on the summary: prefer the user's language, fall back to `tagline` and
+`description_md`. Those two are what every client has always read and are never
+left empty while a map beside them has something in it, so a card is readable
+whether or not a client knows the maps exist.
+
 ## Downloading an instance
 
 For each `mods[]` / `assets[]` entry, dispatch on `source.type`:

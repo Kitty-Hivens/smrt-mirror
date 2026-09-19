@@ -320,6 +320,11 @@ export const ru: Dict = {
   'pe.card.banner': 'Баннер',
   'pe.card.gallery': 'Галерея (по одной в строке)',
   'pe.card.description': 'Описание (Markdown)',
+  'pe.card.translations': 'На других языках',
+  'pe.card.taglineIn': 'Подзаголовок ({lang})',
+  'pe.card.descriptionIn': 'Описание ({lang})',
+  'pe.card.translationHint':
+    'Пустой язык не публикуется как пустая карточка. Тот, для кого текста нет, читает два поля выше, их же всегда читал клиент, не подобравший язык.',
 
   'cachePick.search': 'Поиск по имени или sha1...',
   'cachePick.empty': 'Кэш пуст. Сначала загрузи jar.',

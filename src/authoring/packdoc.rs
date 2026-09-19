@@ -61,6 +61,12 @@ const SERVER_OWNED: [&str; 4] = ["owner", "tier", "visibility", "fork_of"];
 /// half-typed to everyone in the room tells them nothing.
 fn is_prose(path: &str) -> bool {
     matches!(path, "tagline" | "pack_meta.description_md")
+        // The same two fields written in another language (#195). A translation
+        // is composed the same way the original is, by the same people at the
+        // same time, so it merges the same way. The tag is part of the path, so
+        // this is a prefix rather than a list nobody can write in advance.
+        || path.starts_with("pack_meta.tagline_i18n.")
+        || path.starts_with("pack_meta.description_md_i18n.")
 }
 
 /// One pack's live document.
@@ -497,6 +503,60 @@ mod tests {
         );
         assert!(
             description.contains("A pack."),
+            "and what was there already: {description}"
+        );
+    }
+
+    // A translation is prose for the same reason the original is (#195): the
+    // card is written once per language, by the same people, in the same
+    // session. Replaced whole it would be last-writer-wins against a colleague
+    // mid-sentence -- and the language nobody else in the room reads is exactly
+    // where a silently overwritten paragraph goes unnoticed.
+    #[test]
+    fn two_people_writing_one_translation_both_keep_their_words() {
+        let mut seed = config(vec![]);
+        seed.pack_meta.description_md_i18n = Some(std::collections::BTreeMap::from([(
+            "ru".to_string(),
+            "Пак.".to_string(),
+        )]));
+        let server = PackDoc::from_config(&seed).unwrap();
+        let ada = joined(&server);
+        let bo = joined(&server);
+
+        let russian = |doc: &PackDoc, write: &dyn Fn(&yrs::TextRef, &mut yrs::TransactionMut)| {
+            let mut txn = doc.doc.transact_mut();
+            let Some(Out::YMap(meta)) = doc.root.get(&txn, "pack_meta") else {
+                panic!("pack_meta is a map");
+            };
+            let Some(Out::YMap(by_language)) = meta.get(&txn, "description_md_i18n") else {
+                panic!("the translations are a map");
+            };
+            let Some(Out::YText(ru)) = by_language.get(&txn, "ru") else {
+                panic!("a translation is prose");
+            };
+            write(&ru, &mut txn);
+        };
+        russian(&ada, &|ru, txn| ru.push(txn, " Тяжёлый."));
+        russian(&bo, &|ru, txn| ru.insert(txn, 0, "Этот "));
+
+        sync(&ada, &server);
+        sync(&bo, &server);
+
+        let description = back(&server)
+            .pack_meta
+            .description_md_i18n
+            .and_then(|m| m.get("ru").cloned())
+            .expect("still there");
+        assert!(
+            description.contains("Тяжёлый."),
+            "Ada's words survive: {description}"
+        );
+        assert!(
+            description.starts_with("Этот "),
+            "and Bo's, where he put them: {description}"
+        );
+        assert!(
+            description.contains("Пак."),
             "and what was there already: {description}"
         );
     }

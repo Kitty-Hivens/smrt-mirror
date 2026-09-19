@@ -96,6 +96,18 @@ pub struct PackSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub description_md: Option<String>,
+    /// The same tagline keyed by language tag (`{"en": "...", "ru": "..."}`),
+    /// for a reader who does not read the language the untagged one is written
+    /// in. Same rule as `PackManifest::changelog_i18n`: prefer the user's
+    /// language, fall back to the untagged field, and read a missing key as
+    /// "not written" rather than "written as nothing".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tagline_i18n: Option<std::collections::BTreeMap<String, String>>,
+    /// The same description per language tag; see `tagline_i18n`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub description_md_i18n: Option<std::collections::BTreeMap<String, String>>,
     /// GitHub uid of the pack owner. Official packs are owned by the operator;
     /// community packs by their member. Server-controlled -- set at authoring.
     #[serde(default = "default_owner")]
@@ -378,6 +390,14 @@ pub struct PackMeta {
     pub gallery_urls: Vec<String>,
     #[serde(default)]
     pub description_md: Option<String>,
+    /// The card's text in the other languages this pack is read in, keyed by
+    /// language tag. The two fields above stay what they are and remain what a
+    /// client reads when it matches nothing here; the build settles these onto
+    /// the summary (see `make_pack_summary`).
+    #[serde(default)]
+    pub tagline_i18n: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(default)]
+    pub description_md_i18n: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -497,7 +517,9 @@ mod tests {
             "gallery_urls": [
                 "https://smrt.hivens.dev/v1/packs/Industrial/static/_nexira/g1.png"
             ],
-            "description_md": "# Industrial\n\nLong-form copy."
+            "description_md": "# Industrial\n\nLong-form copy.",
+            "tagline_i18n": {"ru": "Тяжёлая промышленность."},
+            "description_md_i18n": {"ru": "# Индустриальный"}
         }"##;
         let s: PackSummary = serde_json::from_str(json).unwrap();
         assert_eq!(
@@ -514,6 +536,16 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .starts_with("# Industrial")
+        );
+        // the card in the other language it is read in, beside the untagged copy
+        // rather than instead of it
+        assert_eq!(
+            s.tagline_i18n.as_ref().and_then(|m| m.get("ru")),
+            Some(&"Тяжёлая промышленность.".to_string())
+        );
+        assert_eq!(
+            s.description_md_i18n.as_ref().and_then(|m| m.get("ru")),
+            Some(&"# Индустриальный".to_string())
         );
     }
 
@@ -534,6 +566,7 @@ mod tests {
         assert!(s.banner_url.is_none());
         assert!(s.gallery_urls.is_empty());
         assert!(s.description_md.is_none());
+        assert!(s.tagline_i18n.is_none() && s.description_md_i18n.is_none());
         // the ownership fields backfill via serde defaults, so a summary predating
         // them reads as an owned, official, published pack -- no migration needed
         assert_eq!(s.owner, default_owner());

@@ -21,6 +21,11 @@ import type { PackConfig } from './types';
 /// two ends is not a thing that fails loudly.
 const ROOT = 'config';
 const PROSE = new Set(['tagline', 'pack_meta.description_md']);
+/// The same two fields written in another language (#195). The tag is part of
+/// the path, so these are prefixes rather than a list nobody can write ahead of
+/// time -- and a translation is composed the way the original is, so it has to
+/// merge the way the original does.
+const PROSE_BY_LANGUAGE = ['pack_meta.tagline_i18n.', 'pack_meta.description_md_i18n.'];
 
 /// Fields the server owns. They never enter the document, so the editor neither
 /// sends nor expects them; it keeps whatever the config it loaded said.
@@ -29,7 +34,7 @@ const SERVER_OWNED = ['owner', 'tier', 'visibility', 'fork_of'] as const;
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 
 export function isProse(path: string): boolean {
-  return PROSE.has(path);
+  return PROSE.has(path) || PROSE_BY_LANGUAGE.some((prefix) => path.startsWith(prefix));
 }
 
 function childPath(parent: string, key: string): string {
