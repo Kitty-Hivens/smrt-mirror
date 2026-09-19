@@ -82,6 +82,27 @@ target directory via env:
 HOST=root@hivens.dev KEY=~/.ssh/other_key REMOTE_DIR=/usr/local/bin ./deploy/deploy.sh
 ```
 
+## What the deploy delivers
+
+Two settings are put on the box by the deploy rather than living only in
+`/etc/smrt/env`, as systemd drop-ins under `/etc/systemd/system/smrt.service.d/`:
+
+| Drop-in | Source | What it sets |
+| --- | --- | --- |
+| `10-curseforge.conf` | repository secret `SMRT_CURSEFORGE_API_KEY` | The key the identity leg uses to ask CurseForge whose file a cached jar is. |
+| `20-language.conf` | repository variable `SMRT_DEFAULT_LANGUAGE` | The language this deployment's audience reads. It decides which translation fills a card or a release note whose untagged copy the curator left empty, and that copy is what every client reading no language map gets. |
+
+A value that lives only on the VPS is lost to a rebuild or a restore, and the
+failure is quiet: the identity leg stops answering, or a card comes back in a
+language the players here do not read. Declared in the workflow, both show up in
+a diff and return with the next deploy.
+
+The language is a variable rather than a secret because nothing about a language
+tag is sensitive, and a two-letter secret would be masked as a substring
+everywhere it appeared in a workflow log. Clearing either one removes its
+drop-in on the next deploy: the CurseForge leg then goes quiet, and the language
+falls back to the binary's own default of `en`.
+
 ## Verification
 
 ```bash

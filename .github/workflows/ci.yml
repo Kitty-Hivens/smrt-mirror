@@ -189,6 +189,34 @@ jobs:
             systemctl daemon-reload
           '
 
+      - name: install the deployment's own language on the VPS
+        # Which language fills a card or a release note whose untagged copy the
+        # curator left empty. That copy is what every client reading no language
+        # map gets, which today is every player, so on a mirror serving Russian
+        # players an English fill hands them text they cannot read.
+        #
+        # A variable rather than a secret: the value is a language tag, nothing
+        # about it is sensitive, and a two-letter secret would be masked as a
+        # substring everywhere it occurred in a log. Written from here for the
+        # same reason as the key above, so a rebuilt box comes back with it.
+        # Unset removes the drop-in and the binary default (en) applies.
+        env:
+          DEFAULT_LANGUAGE: ${{ vars.SMRT_DEFAULT_LANGUAGE }}
+        run: |
+          printf '%s' "$DEFAULT_LANGUAGE" | ssh "${{ secrets.SMRT_DEPLOY_HOST }}" '
+            set -euo pipefail
+            language="$(cat)"
+            dir=/etc/systemd/system/smrt.service.d
+            conf="$dir/20-language.conf"
+            if [ -z "$language" ]; then
+              rm -f "$conf"
+            else
+              install -d -m 755 "$dir"
+              printf "[Service]\nEnvironment=SMRT_DEFAULT_LANGUAGE=%s\n" "$language" > "$conf"
+            fi
+            systemctl daemon-reload
+          '
+
       - name: swap binaries + restart service + verify
         run: |
           ssh "${{ secrets.SMRT_DEPLOY_HOST }}" 'bash -se' <<'REMOTE'
