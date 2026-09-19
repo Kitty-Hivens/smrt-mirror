@@ -41,7 +41,11 @@ const base = {
   minecraft_version: '1.12.2', loader: { name: 'forge', version: '14.23.5.2860' },
   java_major: 8, version: '0.4', tags: ['tech'], featured: true,
   mods: [{ filename: 'jei.jar', default_enabled: true, source: { type: 'smrt_cache', sha1: 'a'.repeat(40) }, pulled: false }],
-  assets: [], pack_meta: { description_md: 'A pack.', gallery_urls: [] },
+  assets: [],
+  pack_meta: {
+    description_md: 'A pack.', gallery_urls: [],
+    tagline_i18n: null, description_md_i18n: { ru: 'Пак.' },
+  },
   owner: 211033194, tier: 'community', visibility: 'draft', fork_of: 'Create',
 };
 
@@ -107,6 +111,26 @@ const seed = Y.encodeStateAsUpdate(server);
   Y.applyUpdate(ada, Y.encodeStateAsUpdate(bo));
   const names = readConfig(ada, base).mods.map((m) => m.filename);
   check('both additions land', names.length === 3 && names.includes('ae2.jar') && names.includes('thermal.jar'), JSON.stringify(names));
+}
+
+{
+  // A translation merges the way the original does (#195). The card is written
+  // once per language by the same people at the same time, and the language
+  // nobody else in the room reads is exactly where a paragraph quietly replaced
+  // by whoever saved last would go unnoticed.
+  const ada = editor(seed);
+  const bo = editor(seed);
+  const a = structuredClone(base);
+  a.pack_meta.description_md_i18n.ru = 'Пак. Тяжёлый.';     // appended
+  writeConfig(ada, a, 'local');
+  const b = structuredClone(base);
+  b.pack_meta.description_md_i18n.ru = 'Этот Пак.';          // prefixed
+  writeConfig(bo, b, 'local');
+
+  Y.applyUpdate(ada, Y.encodeStateAsUpdate(bo));
+  const text = readConfig(ada, base).pack_meta.description_md_i18n.ru;
+  check('both people keep their words in a translation too',
+    text.includes('Тяжёлый.') && text.startsWith('Этот '), `got ${JSON.stringify(text)}`);
 }
 
 {
