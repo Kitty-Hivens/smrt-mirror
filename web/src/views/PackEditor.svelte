@@ -4,7 +4,8 @@
   import { api, ApiError } from '../lib/api';
   import { dialogs } from '../lib/dialogs.svelte';
   import { route } from '../lib/route.svelte';
-  import { LOCALES, t, type Locale } from '../lib/i18n.svelte';
+  import { t } from '../lib/i18n.svelte';
+  import { TEXT_LANGUAGES, languagesFor } from '../lib/languages';
   import { advertisesModList } from '../lib/handshake';
   import { assetPath } from '../lib/packassets';
   import { arrive, depart, settle, stagger } from '../lib/motion.svelte';
@@ -920,7 +921,12 @@
   // until something is written -- so the boxes read and write through here
   // rather than binding into a map that may not exist yet.
   type CardText = 'tagline_i18n' | 'description_md_i18n';
-  let cardLang = $state<Locale>(LOCALES[0]);
+  let cardLang = $state<string>(TEXT_LANGUAGES[0]);
+  // What the strip offers: the languages a client can render, plus anything
+  // this pack already carries, so a tag written elsewhere stays reachable.
+  const cardLanguages = $derived(
+    languagesFor(cfg?.pack_meta?.tagline_i18n, cfg?.pack_meta?.description_md_i18n),
+  );
 
   function cardText(field: CardText, lang: string): string {
     return cfg?.pack_meta?.[field]?.[lang] ?? '';
@@ -1691,7 +1697,7 @@
               <div class="langhead">
                 <span>{t('pe.card.translations')}</span>
                 <div class="langs">
-                  {#each LOCALES as l (l)}
+                  {#each cardLanguages as l (l)}
                     <button
                       class="lang"
                       class:on={cardLang === l}

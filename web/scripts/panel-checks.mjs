@@ -22,6 +22,7 @@ import { nextPageUrl } from '../src/lib/pagelink.ts';
 import { suggest, tally } from '../src/lib/changes.ts';
 import { renderMarkdown, safeUrl } from '../src/lib/markdown.ts';
 import { inLanguage } from '../src/lib/cardtext.ts';
+import { TEXT_LANGUAGES, languagesFor } from '../src/lib/languages.ts';
 import { diffManifests } from '../src/lib/diff.ts';
 import { resolve } from '../src/lib/message.ts';
 import { en } from '../src/lib/locales/en.ts';
@@ -493,6 +494,31 @@ check('the offered list holds what old packs need', [8, 11, 16, 17, 21].every((v
     inLanguage('Heavy industry.', null, 'ru') === 'Heavy industry.');
   check('and a pack with nothing written reads as nothing',
     inLanguage(null, null, 'ru') === '');
+}
+
+// ── which languages a card can be written in ────────────────────────────────
+//
+// Not the panel's own two. What a curator can write is bounded by what a
+// reader's client renders, and tying the two together left every player on a
+// language the panel has no dictionary for reading the untagged copy forever.
+{
+  check('the languages offered are the ones a client can render',
+    ['ru', 'en', 'de', 'ja'].every((l) => TEXT_LANGUAGES.includes(l)),
+    TEXT_LANGUAGES.join(', '));
+
+  check('a pack keeps its own tag even when nothing offers it',
+    languagesFor({ pt: 'Um pacote.' }).includes('pt'),
+    languagesFor({ pt: 'Um pacote.' }).join(', '));
+
+  check('and the offer holds no duplicates whatever the pack carries',
+    (() => {
+      const all = languagesFor({ RU: 'a', ru: 'b' }, { ja: 'c' });
+      return new Set(all).size === all.length && all.filter((l) => l === 'ru').length === 1;
+    })(),
+    languagesFor({ RU: 'a', ru: 'b' }, { ja: 'c' }).join(', '));
+
+  check('a pack with nothing written still gets the whole list',
+    languagesFor(null, undefined).length === TEXT_LANGUAGES.length);
 }
 
 // ── counted strings ─────────────────────────────────────────────────────────
