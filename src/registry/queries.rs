@@ -495,6 +495,24 @@ pub fn modrinth_file_by_version_id(
         .optional()?)
 }
 
+/// Every Modrinth version whose file the harvest has recorded, as
+/// `version_id -> (sha1, size)`.
+///
+/// What the harvest needs to put a pack's Modrinth pins into a scan without
+/// asking Modrinth which file each one is: a pin names a version, the scan works
+/// in hashes, and once a version has been read this table already holds the
+/// answer.
+pub fn modrinth_version_files(conn: &Connection) -> Result<HashMap<String, (String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT modrinth_version_id, sha1, size_bytes FROM mod_version
+          WHERE modrinth_version_id IS NOT NULL",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, (r.get::<_, String>(1)?, r.get(2)?)))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+}
+
 /// The `mod_version` row id of a harvested Modrinth artifact, keyed by its
 /// Modrinth version id. The resolver needs the artifact itself, not just its
 /// version string, to scope the artifact's relations (#48).

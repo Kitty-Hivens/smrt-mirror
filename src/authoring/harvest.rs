@@ -1196,17 +1196,24 @@ enum BorrowedPin {
 ///
 /// Configs rather than built manifests: a pin that has just been edited is
 /// exactly the one the next build will be checked against, and waiting for a
-/// build to learn it would mean the first build after every repin is wrong.
-async fn publisher_pins(
-    storage: &Storage,
-) -> (HashSet<(i64, i64)>, HashSet<(String, String, String)>) {
-    let mut curseforge: HashSet<(i64, i64)> = HashSet::new();
-    let mut github: HashSet<(String, String, String)> = HashSet::new();
+/// build to learn it would mean the first build after every repin is wrong --
+/// and a pack that has never been built has no manifest to learn it from at
+/// all, so its first build would be checked against mods nothing had read.
+#[derive(Default)]
+struct PublisherPins {
+    curseforge: HashSet<(i64, i64)>,
+    github: HashSet<(String, String, String)>,
+    /// `version_id -> (project_id, the filename the pack installs it under)`.
+    modrinth: HashMap<String, (String, String)>,
+}
+
+async fn publisher_pins(storage: &Storage) -> PublisherPins {
+    let mut pins = PublisherPins::default();
     let packs = match storage.list_authoring_packs().await {
         Ok(p) => p,
         Err(e) => {
-            tracing::warn!(error = %e, "listing packs for borrowed-jar reads failed");
-            return (curseforge, github);
+            tracing::warn!(error = %e, "listing packs for publisher pins failed");
+            return pins;
         }
     };
     for pid in packs {
@@ -1219,16 +1226,25 @@ async fn publisher_pins(
                     project_id,
                     file_id,
                 } => {
-                    curseforge.insert((*project_id, *file_id));
+                    pins.curseforge.insert((*project_id, *file_id));
                 }
                 crate::domain::SourceDecl::Github { repo, tag, asset } => {
-                    github.insert((repo.clone(), tag.clone(), asset.clone()));
+                    pins.github
+                        .insert((repo.clone(), tag.clone(), asset.clone()));
+                }
+                crate::domain::SourceDecl::Modrinth {
+                    project_id,
+                    version_id,
+                } => {
+                    pins.modrinth
+                        .entry(version_id.clone())
+                        .or_insert_with(|| (project_id.clone(), m.filename.clone()));
                 }
                 _ => {}
             }
         }
     }
-    (curseforge, github)
+    pins
 }
 
 /// Fetch, once, the jars a pack pins from a publisher rather than from us.
@@ -1249,18 +1265,16 @@ async fn publisher_pins(
 /// Gated on a jar being both read and pinned, so it is one fetch per artifact
 /// for the life of the mirror rather than one per harvest.
 async fn borrowed_jars(
-    storage: &Storage,
+    pins: &PublisherPins,
     modrinth: &Modrinth,
     curseforge: Option<&CurseForge>,
     cache_shas: &HashSet<String>,
     already_read: &HashSet<String>,
     github_read: &HashSet<(String, String, String)>,
 ) -> Vec<Borrowed> {
-    let (cf_pins, gh_pins) = publisher_pins(storage).await;
-
     let mut out = Vec::new();
     if let Some(cf) = curseforge {
-        for (project_id, file_id) in cf_pins {
+        for &(project_id, file_id) in &pins.curseforge {
             let info = match cf.file(project_id, file_id).await {
                 Ok(i) => i,
                 Err(e) => {
@@ -1297,10 +1311,11 @@ async fn borrowed_jars(
     // A release asset needs no key, so this leg runs whether or not the mirror
     // has one. There is no published hash to check the bytes against either:
     // the URL is the claim, and what comes back is what the launcher will get.
-    for (repo, tag, asset) in gh_pins {
-        if github_read.contains(&(repo.clone(), tag.clone(), asset.clone())) {
+    for pin in &pins.github {
+        if github_read.contains(pin) {
             continue;
         }
+        let (repo, tag, asset) = pin.clone();
         let Some(url) = super::github::asset_url(&repo, &tag, &asset) else {
             tracing::warn!(
                 repo,
@@ -1361,6 +1376,10 @@ pub struct Known<'a> {
     /// side of it comes in: a github pin is keyed by what it names, not by a
     /// hash, because the hash is what reading it is for.
     pub github_read: &'a HashSet<(String, String, String)>,
+    /// Modrinth versions whose file a harvest has recorded, as
+    /// `version_id -> (sha1, size)`. A pack's Modrinth pin found here goes into
+    /// the scan without asking Modrinth which file it is.
+    pub modrinth_files: &'a HashMap<String, (String, i64)>,
 }
 
 /// Scan the storage tree + Modrinth into a [ScanData]. Async (FS reads + one
@@ -1378,6 +1397,7 @@ pub async fn scan(
         awaiting_curseforge,
         already_read,
         github_read,
+        modrinth_files,
     } = known;
     let inventory = storage.list_cache_inventory().await.map_err(ae)?;
     let mut size_by_sha: HashMap<String, i64> = inventory
@@ -1411,8 +1431,9 @@ pub async fn scan(
     // dependency and drops out of the resolve. Fetched here to be read and
     // dropped, exactly as the Modrinth leg below does for a re-upload: what is
     // wanted is what the file says about itself, not a copy of it.
+    let pins = publisher_pins(storage).await;
     let borrowed = borrowed_jars(
-        storage,
+        &pins,
         modrinth,
         curseforge,
         &cache_shas,
@@ -1502,12 +1523,13 @@ pub async fn scan(
     // published builds + curator conflicts, per pack
     let mut packs = Vec::new();
     let mut filename_by_sha: HashMap<String, String> = HashMap::new();
-    // Modrinth-source mods a build declares (project_id, version_id), keyed by sha.
-    // A repackaged jar whose sha Modrinth does not recognize would otherwise get no
-    // project identity from the sha1 lookup, leaving the pack's own Modrinth mod
-    // (better-advancements, customskinloader) unresolved; the manifest names the
+    // Modrinth-source mods a pack declares (project_id, version_id), keyed by sha:
+    // from each published build, then from each config. A repackaged jar whose
+    // sha Modrinth does not recognize would otherwise get no project identity
+    // from the sha1 lookup, leaving the pack's own Modrinth mod
+    // (better-advancements, customskinloader) unresolved; the pin names the
     // project directly, so register from it.
-    let mut manifest_modrinth_by_sha: HashMap<String, (String, String)> = HashMap::new();
+    let mut pinned_modrinth_by_sha: HashMap<String, (String, String)> = HashMap::new();
     for pid in storage.list_authoring_packs().await.map_err(ae)? {
         let Ok(manifest) = storage.load_latest_manifest(&pid).await else {
             continue; // unbuilt pack -> no published build to record
@@ -1534,7 +1556,7 @@ pub async fn scan(
                 version_id,
             } = &m.source
             {
-                manifest_modrinth_by_sha
+                pinned_modrinth_by_sha
                     .entry(m.sha1.clone())
                     .or_insert_with(|| (project_id.clone(), version_id.clone()));
             }
@@ -1562,6 +1584,51 @@ pub async fn scan(
             mods,
             conflicts,
         });
+    }
+
+    // Every Modrinth pin a config declares, built or not. A pack's first build
+    // is checked against its mods before any manifest names them, and a pin
+    // nobody has read has no modid, so each dependency keyed on that modid reads
+    // as missing although the pack ships it. Put into every scan rather than
+    // once: the Modrinth relation layer is rebuilt from the scanned jars each
+    // run, so a pin read once and then dropped would lose its dependencies on
+    // the next harvest. Modrinth is asked only for versions whose file no
+    // harvest has recorded yet.
+    let unrecorded: Vec<String> = pins
+        .modrinth
+        .keys()
+        .filter(|v| !modrinth_files.contains_key(*v))
+        .cloned()
+        .collect();
+    let pinned_versions = if unrecorded.is_empty() {
+        HashMap::new()
+    } else {
+        match modrinth.versions_by_ids(&unrecorded).await {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(pins = unrecorded.len(), error = %e, "modrinth pin lookup failed; those pins stay unread this run");
+                HashMap::new()
+            }
+        }
+    };
+    for (version_id, (project_id, filename)) in &pins.modrinth {
+        let file = modrinth_files.get(version_id).cloned().or_else(|| {
+            pinned_versions
+                .get(version_id)
+                .and_then(|v| v.primary_file())
+                .map(|f| (f.hashes.sha1.clone(), f.size as i64))
+        });
+        let Some((sha1, size)) = file else {
+            continue;
+        };
+        all_shas.insert(sha1.clone());
+        size_by_sha.entry(sha1.clone()).or_insert(size);
+        filename_by_sha
+            .entry(sha1.clone())
+            .or_insert_with(|| filename.clone());
+        pinned_modrinth_by_sha
+            .entry(sha1)
+            .or_insert_with(|| (project_id.clone(), version_id.clone()));
     }
 
     // one batched identity lookup over every sha1 we know
@@ -1655,7 +1722,7 @@ pub async fn scan(
     let project_ids: Vec<String> = modrinth_by_sha
         .values()
         .map(|v| v.project_id.clone())
-        .chain(manifest_modrinth_by_sha.values().map(|(p, _)| p.clone()))
+        .chain(pinned_modrinth_by_sha.values().map(|(p, _)| p.clone()))
         // aliased projects still missing env flags (an alias the self-host slug
         // bridge attached after the fact, or rows predating the env columns)
         .chain(envless_project_aliases.iter().cloned())
@@ -1768,11 +1835,11 @@ pub async fn scan(
             let facts = facts_by_sha.get(&sha);
             let bc = bytecode_by_sha.get(&sha);
             let mm = modmeta_by_sha.get(&sha);
-            // Modrinth identity: the sha1 match, else the project the manifest
+            // Modrinth identity: the sha1 match, else the project the pack
             // itself declares (a repackaged jar Modrinth does not know by hash).
             let project_id = mrv
                 .map(|v| v.project_id.clone())
-                .or_else(|| manifest_modrinth_by_sha.get(&sha).map(|(p, _)| p.clone()));
+                .or_else(|| pinned_modrinth_by_sha.get(&sha).map(|(p, _)| p.clone()));
             let project = project_id.as_deref().and_then(|p| projects.get(p));
             // name: jar-meta name wins (local: mcmod.info, else the modern
             // declared displayName), else Modrinth title
@@ -1839,7 +1906,7 @@ pub async fn scan(
                 slug,
                 modrinth_version_id: mrv
                     .map(|v| v.id.clone())
-                    .or_else(|| manifest_modrinth_by_sha.get(&sha).map(|(_, v)| v.clone())),
+                    .or_else(|| pinned_modrinth_by_sha.get(&sha).map(|(_, v)| v.clone())),
                 channel: mrv.and_then(|v| channel_from_version_type(&v.version_type)),
                 owned_packages: bc
                     .map(|b| b.owned.iter().cloned().collect())
@@ -1938,6 +2005,7 @@ pub async fn run_harvest(
         awaiting_curseforge,
         already_read,
         github_read,
+        modrinth_files,
     ) = tokio::task::spawn_blocking(move || {
         reg.with_conn(|c| {
             Ok((
@@ -1947,6 +2015,7 @@ pub async fn run_harvest(
                 queries::shas_awaiting_curseforge(c, &asked_before)?,
                 queries::shas_read(c)?,
                 queries::github_pins_read(c)?,
+                queries::modrinth_version_files(c)?,
             ))
         })
     })
@@ -1966,6 +2035,7 @@ pub async fn run_harvest(
             awaiting_curseforge: &awaiting_curseforge,
             already_read: &already_read,
             github_read: &github_read,
+            modrinth_files: &modrinth_files,
         },
     )
     .await?;
@@ -3652,5 +3722,195 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    /// Routes a stand-in Modrinth serves: a path prefix and the body for it.
+    type Routes = Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
+    /// How many times each route was asked for.
+    type Hits = Arc<std::sync::Mutex<HashMap<String, usize>>>;
+
+    /// A Modrinth stand-in serving fixed bodies by path prefix and counting the
+    /// requests per route. The routes are filled after it is listening, because
+    /// a version object names the url of its own file and that url is this
+    /// server's.
+    async fn stub_modrinth() -> (String, Routes, Hits) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let routes: Routes = Arc::default();
+        let hits: Hits = Arc::default();
+        let (served, counted) = (routes.clone(), hits.clone());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let (served, counted) = (served.clone(), counted.clone());
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 65536];
+                    let Ok(n) = sock.read(&mut buf).await else {
+                        return;
+                    };
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let path = req.split_whitespace().nth(1).unwrap_or_default();
+                    let hit = served
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .find(|(p, _)| path.starts_with(p.as_str()))
+                        .cloned();
+                    let resp = match hit {
+                        Some((route, body)) => {
+                            *counted.lock().unwrap().entry(route).or_default() += 1;
+                            let mut r = format!(
+                                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                                body.len()
+                            )
+                            .into_bytes();
+                            r.extend_from_slice(&body);
+                            r
+                        }
+                        None => b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                            .to_vec(),
+                    };
+                    let _ = sock.write_all(&resp).await;
+                });
+            }
+        });
+        (base, routes, hits)
+    }
+
+    // A pack that has never been built. Its cached mod requires the modid
+    // `playeranimator`, which the pack ships as a Modrinth pin; no manifest names
+    // that pin yet, so while the harvest learned Modrinth pins only from builds
+    // the requirement read as missing and the first build was refused over a mod
+    // the pack carried.
+    #[tokio::test]
+    async fn a_modrinth_pin_is_read_before_the_pack_is_ever_built() {
+        use super::super::classfile::fixtures::jar;
+        use crate::domain::{DeclaredMod, LoaderSpec, PackConfig, SourceDecl};
+
+        let lib = jar(&[(
+            "META-INF/mods.toml",
+            b"[[mods]]\nmodId=\"playeranimator\"\nversion=\"1.0.2-rc1\"",
+        )]);
+        let host = jar(&[(
+            "META-INF/mods.toml",
+            b"[[mods]]\nmodId=\"hostmod\"\n[[dependencies.hostmod]]\nmodId=\"playeranimator\"\nmandatory=true\nversionRange=\"1.0.2\"",
+        )]);
+        let (lib_sha, host_sha) = (sha1_of(&lib), sha1_of(&host));
+
+        let (base, routes, hits) = stub_modrinth().await;
+        let version = format!(
+            r#"{{"id":"VER_LIB","project_id":"PROJ_LIB","name":"n","version_number":"1.0.2-rc1",
+               "version_type":"release","game_versions":["1.20.1"],"loaders":["forge"],
+               "files":[{{"hashes":{{"sha1":"{lib_sha}"}},"url":"{base}/files/lib.jar",
+                 "filename":"lib.jar","primary":true,"size":{}}}],"dependencies":[]}}"#,
+            lib.len()
+        );
+        routes.lock().unwrap().extend([
+            (
+                "/v2/versions".to_string(),
+                format!("[{version}]").into_bytes(),
+            ),
+            (
+                "/v2/version_files".to_string(),
+                format!(r#"{{"{lib_sha}":{version}}}"#).into_bytes(),
+            ),
+            ("/v2/projects".to_string(), b"[]".to_vec()),
+            ("/files/lib.jar".to_string(), lib.clone()),
+        ]);
+        let modrinth = Modrinth::with_base(&base).unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().to_path_buf());
+        storage.save_cache_jar(&host_sha, &host).await.unwrap();
+        let row = |filename: &str, source: SourceDecl| DeclaredMod {
+            filename: filename.into(),
+            default_enabled: true,
+            source,
+            display: None,
+            slug: None,
+            pulled: false,
+        };
+        let cfg = PackConfig {
+            pack_id: "unbuilt".into(),
+            display_name: "unbuilt".into(),
+            tagline: String::new(),
+            minecraft_version: "1.20.1".into(),
+            loader: LoaderSpec {
+                name: "forge".into(),
+                version: "47.2.0".into(),
+            },
+            java_major: 17,
+            version: None,
+            tags: vec![],
+            featured: false,
+            mods: vec![
+                row(
+                    "hostmod.jar",
+                    SourceDecl::SmrtCache {
+                        sha1: host_sha.clone(),
+                    },
+                ),
+                row(
+                    "lib.jar",
+                    SourceDecl::Modrinth {
+                        project_id: "PROJ_LIB".into(),
+                        version_id: "VER_LIB".into(),
+                    },
+                ),
+            ],
+            assets: vec![],
+            auth: None,
+            pack_meta: Default::default(),
+            owner: crate::domain::pack::default_owner(),
+            tier: crate::domain::pack::default_tier(),
+            visibility: crate::domain::pack::default_visibility(),
+            fork_of: None,
+        };
+        storage.save_pack_config("unbuilt", &cfg).await.unwrap();
+        let registry = Arc::new(Registry::open_in_memory().unwrap());
+
+        run_harvest(&storage, &modrinth, None, registry.clone())
+            .await
+            .unwrap();
+        let report = registry
+            .with_conn(|c| super::super::resolve_pack(c, &cfg))
+            .unwrap();
+        assert!(
+            report.missing.is_empty(),
+            "the pin is read, so the modid it declares answers the requirement: {:?}",
+            report.missing.iter().map(|m| &m.target).collect::<Vec<_>>()
+        );
+        registry
+            .with_conn(|c| {
+                assert_eq!(
+                    queries::modrinth_version_files(c)?.get("VER_LIB"),
+                    Some(&(lib_sha.clone(), lib.len() as i64)),
+                    "and the file it names is recorded under the version"
+                );
+                Ok(())
+            })
+            .unwrap();
+
+        // the next harvest keeps the pin in its scan without asking again
+        run_harvest(&storage, &modrinth, None, registry.clone())
+            .await
+            .unwrap();
+        let asked = |route: &str| hits.lock().unwrap().get(route).copied().unwrap_or(0);
+        assert_eq!(
+            asked("/v2/versions"),
+            1,
+            "a recorded version is not looked up twice"
+        );
+        assert_eq!(asked("/files/lib.jar"), 1, "nor is its jar fetched twice");
+        let report = registry
+            .with_conn(|c| super::super::resolve_pack(c, &cfg))
+            .unwrap();
+        assert!(
+            report.missing.is_empty(),
+            "still answered on the second run"
+        );
     }
 }
