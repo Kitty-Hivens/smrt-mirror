@@ -178,6 +178,34 @@ pub struct ModEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub slug: Option<String>,
+    /// Which installs the mod belongs in, in the vocabulary a Modrinth pack
+    /// file uses. Absent when the mirror could not classify the mod, which a
+    /// consumer reads as "belongs everywhere". A slice of the manifest
+    /// (`?side=`) drops what is `unsupported` on that side, except what a mod
+    /// it keeps hard-requires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub env: Option<ModEnv>,
+}
+
+/// Whether a mod belongs in a client install and in a dedicated server
+/// install. A singleplayer install is both at once and takes everything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, ToSchema)]
+#[ts(export, export_to = "bindings/")]
+pub struct ModEnv {
+    pub client: EnvSupport,
+    pub server: EnvSupport,
+}
+
+/// One side of [`ModEnv`]: `required` when the pack locks the mod, `optional`
+/// when it can be switched off, `unsupported` when that side has no use for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, ToSchema)]
+#[ts(export, export_to = "bindings/")]
+#[serde(rename_all = "snake_case")]
+pub enum EnvSupport {
+    Required,
+    Optional,
+    Unsupported,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS, ToSchema)]
@@ -355,6 +383,7 @@ mod tests {
             source: Source::SmrtCache { url: "u".into() },
             display: None,
             slug: None,
+            env: None,
         };
         let s = serde_json::to_string(&m).unwrap();
         assert!(

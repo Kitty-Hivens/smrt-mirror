@@ -34,6 +34,13 @@ GET /v1/packs/{id}/manifest                # the latest build
 GET /v1/packs/{id}/manifest/{version}      # a specific build
 ```
 
+Both manifest reads take `?side=client` or `?side=server`. Without it the
+answer is the whole instance, which is what a launcher installs. See
+[Installs](concepts.md#installs-whole-client-server) for what each slice keeps;
+a slice carries its own `fingerprint`, while the versions listing's
+`fingerprint`, `mods_count` and `size_bytes` always describe the whole
+instance.
+
 1. **Catalog**: `latest_pack_version` on each summary is the current pointer.
    `latest_built_at` (RFC 3339) and `latest_channel` are derived by the mirror
    from the latest manifest at read time -- render "updated X ago" and the
@@ -134,7 +141,11 @@ to. Absent = no precondition. `kind` is an open vocabulary (`smartycraft`,
 Install flags: `required` is enforcing (never offer a toggle); for optional
 entries `default_enabled` (absent = true) is the install-time default. The
 `display` block is advisory UX metadata -- names, descriptions, icons, the
-`requires` tree for co-toggling, `presence` for the side badge.
+`requires` tree for co-toggling, `presence` for the side badge. `env`
+(`{client, server}`, each `required | optional | unsupported`) says which
+installs the entry belongs in; a client that slices a manifest itself instead
+of asking for `?side=` has to keep what a kept entry hard-requires, the way the
+mirror does.
 
 **Toggle identity** across version bumps: key an optional mod's on/off state
 by its Modrinth `project_id` when the source is Modrinth, else by the entry's

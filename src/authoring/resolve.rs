@@ -100,8 +100,9 @@ pub struct ResolveReport {
     /// force-installed. Inferred edges never get here (the guard downgrades
     /// them to soft before they can lock anything).
     pub forced_client_attempts: Vec<ForcedClientEdge>,
-    /// Server-side mods in the pack: legitimate, but the client manifest ships
-    /// them opted out (never required, default-disabled).
+    /// Server-side mods in the pack: legitimate, and in the whole instance like
+    /// any other mod, but a client joining somebody else's server leaves them
+    /// out (`?side=client`) unless a mod it keeps hard-requires them.
     pub server_side: Vec<String>,
     /// `Recommends` targets absent from the pack -- curator suggestions with a
     /// manual add action, never auto-added.
@@ -1025,7 +1026,7 @@ pub fn resolve_pack(conn: &Connection, cfg: &PackConfig) -> Result<ResolveReport
 
     // Classification advisories over the placed mods: what is not a mod at
     // all, what the classifier left undecided, where the sources disagree, and
-    // which mods are server-side (shipped opted out).
+    // which mods are server-side (left out of the client slice).
     let mut coremods: Vec<String> = non_mods;
     let mut unclassified: Vec<String> = Vec::new();
     let mut side_disagreements: Vec<SideDisagreement> = Vec::new();

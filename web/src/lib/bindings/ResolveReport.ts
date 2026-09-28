@@ -110,8 +110,9 @@ side_disagreements: Array<SideDisagreement>,
  */
 forced_client_attempts: Array<ForcedClientEdge>, 
 /**
- * Server-side mods in the pack: legitimate, but the client manifest ships
- * them opted out (never required, default-disabled).
+ * Server-side mods in the pack: legitimate, and in the whole instance like
+ * any other mod, but a client joining somebody else's server leaves them
+ * out (`?side=client`) unless a mod it keeps hard-requires them.
  */
 server_side: Array<string>, 
 /**

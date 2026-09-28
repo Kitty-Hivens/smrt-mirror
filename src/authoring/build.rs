@@ -6,8 +6,9 @@ use super::curseforge::CurseForge;
 use super::modrinth::Modrinth;
 use super::sources::{ModrinthCache, Upstream, resolve_asset, resolve_mod, sha1_hex};
 use crate::domain::{
-    AssetEntry, Display, JavaSpec, LoaderSpec, MatchPolicy, MinecraftSpec, ModEntry, PackConfig,
-    PackManifest, PackSummary, PresenceClass, SCHEMA_VERSION, SideClass, VersionChannel, i18n,
+    AssetEntry, Display, EnvSupport, JavaSpec, LoaderSpec, MatchPolicy, MinecraftSpec, ModEntry,
+    ModEnv, PackConfig, PackManifest, PackSummary, PresenceClass, SCHEMA_VERSION, SideClass,
+    VersionChannel, i18n,
 };
 use crate::registry::Registry;
 use crate::registry::classify::Classification;
@@ -184,13 +185,18 @@ pub async fn build_manifest(
 /// opted-out must_match mod stays out: the curator removed it from the default
 /// server set, and forcing it back would erase the opt-out.
 ///
-/// Side invariants: a server-side mod is never required for the client and
-/// ships opted out (advisory in the resolve report, nothing is removed); a
-/// coremod/library jar is never required (always toggleable); a confidently
-/// client-side mod never locks through the graph at all (client chains
-/// co-toggle in the launcher via the requires tree), with the low-confidence
-/// declared-edge override as the one exception and a build error as the
-/// backstop for an inconsistent classification.
+/// Side invariants: a coremod/library jar is never required (always
+/// toggleable); a confidently client-side mod never locks through the graph at
+/// all (client chains co-toggle in the launcher via the requires tree), with the
+/// low-confidence declared-edge override as the one exception and a build error
+/// as the backstop for an inconsistent classification.
+///
+/// A server-side mod is an ordinary mod here. The manifest describes a whole
+/// instance, and an instance runs its own integrated server whenever someone
+/// opens a world, so the curator's `default_enabled` stands for it as for any
+/// mod and a hard edge from an enabled mod locks it. Leaving it out of a client
+/// that joins somebody else's server is the business of the `?side=client`
+/// slice, which reads the `env` settled here.
 ///
 /// `required` and `default_enabled` are settled together at the end, because
 /// the graph can lock a mod the curator had opted out of: an enabled mod hard-
@@ -218,14 +224,6 @@ fn derive_required(
             .get(&m.filename)
             .is_some_and(|c| c.is_non_mod())
     };
-
-    // Server-side mods leave the default install before anything is seeded, so
-    // their own dependencies are not pulled in on their account.
-    for m in mods.iter_mut() {
-        if side(m) == Some(SideClass::Server) {
-            m.default_enabled = false;
-        }
-    }
 
     // A hard edge into a confidently client-side mod never contributes to the
     // required walk: locking it is exactly what the client invariant forbids,
@@ -287,9 +285,8 @@ fn derive_required(
         if !required.contains(&i) {
             continue;
         }
-        // never required: server-side mods (not the client's problem) and
-        // not-a-mod jars (always toggleable)
-        if side(m) == Some(SideClass::Server) || non_mod(m) {
+        // never required: not-a-mod jars (always toggleable)
+        if non_mod(m) {
             required.remove(&i);
             continue;
         }
@@ -335,7 +332,7 @@ fn derive_required(
                 // a required client survivor exists only via the soft-verdict
                 // override; it reads required, not client
                 Some(SideClass::Client) if !m.required => Some(PresenceClass::OptionalClient),
-                Some(SideClass::Server) => Some(PresenceClass::OptionalServer),
+                Some(SideClass::Server) if !m.required => Some(PresenceClass::OptionalServer),
                 _ if m.required => Some(PresenceClass::Required),
                 // policy does not matter for an unlocked both-side mod: an
                 // opted-out must_match mod (a content mod the curator removed
@@ -355,8 +352,29 @@ fn derive_required(
                 }
             }
         }
+        m.env = mod_env(side(m), non_mod(m), m.required);
     }
     Ok(())
+}
+
+/// Which installs a mod belongs in, from its side and the graph outcome.
+/// `None` for a jar that is not a mod or one nothing classified: which side it
+/// works on is not known, so no slice may leave it out.
+fn mod_env(side: Option<SideClass>, non_mod: bool, required: bool) -> Option<ModEnv> {
+    if non_mod {
+        return None;
+    }
+    let wanted = if required {
+        EnvSupport::Required
+    } else {
+        EnvSupport::Optional
+    };
+    let (client, server) = match side? {
+        SideClass::Client => (wanted, EnvSupport::Unsupported),
+        SideClass::Server => (EnvSupport::Unsupported, wanted),
+        SideClass::Both => (wanted, wanted),
+    };
+    Some(ModEnv { client, server })
 }
 
 /// Content fingerprint of a build: a sha1 over exactly what lands in an
@@ -389,6 +407,78 @@ fn content_fingerprint(
     }
     lines.sort();
     sha1_hex(lines.join("\n").as_bytes())
+}
+
+/// The part of a build one kind of install takes: a client joining somebody
+/// else's server, or a dedicated server. The whole manifest is the third kind,
+/// singleplayer, and needs no slicing.
+///
+/// A mod leaves the slice when its `env` says that side has no use for it, and
+/// stays whatever its `env` says when a mod the slice keeps hard-requires it: a
+/// dependency the loader enforces is a better witness than a side flag an
+/// author set, and a slice that dropped one would not start. A mod without an
+/// `env` is one nobody could place, so it stays. `requires` rows naming a mod
+/// the slice dropped go with it, so the slice is a manifest in its own right,
+/// and it carries its own fingerprint because it is a different instance.
+pub fn slice_for_side(manifest: &PackManifest, side: SideClass) -> PackManifest {
+    let wants = |m: &ModEntry| match (m.env, side) {
+        (None, _) | (_, SideClass::Both) => true,
+        (Some(env), SideClass::Client) => env.client != EnvSupport::Unsupported,
+        (Some(env), SideClass::Server) => env.server != EnvSupport::Unsupported,
+    };
+    let idx: HashMap<&str, usize> = manifest
+        .mods
+        .iter()
+        .enumerate()
+        .map(|(i, m)| (m.filename.as_str(), i))
+        .collect();
+    let mut kept: HashSet<usize> = HashSet::new();
+    let mut queue: Vec<usize> = (0..manifest.mods.len())
+        .filter(|&i| wants(&manifest.mods[i]))
+        .collect();
+    while let Some(i) = queue.pop() {
+        if !kept.insert(i) {
+            continue;
+        }
+        if let Some(d) = &manifest.mods[i].display {
+            queue.extend(
+                d.requires
+                    .iter()
+                    .filter(|r| !r.optional)
+                    .filter_map(|r| idx.get(r.filename.as_str()).copied()),
+            );
+        }
+    }
+    let kept_names: HashSet<&str> = kept
+        .iter()
+        .map(|&i| manifest.mods[i].filename.as_str())
+        .collect();
+    let mods: Vec<ModEntry> = manifest
+        .mods
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| kept.contains(i))
+        .map(|(_, m)| {
+            let mut m = m.clone();
+            if let Some(d) = &mut m.display {
+                d.requires
+                    .retain(|r| kept_names.contains(r.filename.as_str()));
+            }
+            m
+        })
+        .collect();
+    let fingerprint = content_fingerprint(
+        &manifest.minecraft,
+        &manifest.loader,
+        &manifest.java,
+        &mods,
+        &manifest.assets,
+    );
+    PackManifest {
+        fingerprint: Some(fingerprint),
+        mods,
+        ..manifest.clone()
+    }
 }
 
 /// Derive the `PackSummary` (the Browse-list / PackDetail card payload) from
@@ -751,6 +841,7 @@ mod tests {
             source: Source::SmrtCache { url: "u".into() },
             display,
             slug: None,
+            env: None,
         }
     }
 
@@ -847,23 +938,208 @@ mod tests {
         );
     }
 
-    // A server-side mod is never required for the client and ships opted out,
-    // even when a hard edge pulls at it; nothing is removed from the manifest.
+    // A server-side mod is an ordinary mod in the whole instance: it keeps the
+    // curator's default, and an enabled mod that hard-requires it locks it. The
+    // Occultism case: its author flags SmartBrainLib server-only, Occultism
+    // needs it to start, and the pack shipped it switched off.
     #[test]
-    fn server_side_mod_ships_opted_out_and_never_required() {
+    fn a_server_side_mod_keeps_its_default_and_locks_like_any_other() {
         let mut mods = vec![
-            entry("needs-server-util.jar", true, &["chunky.jar"]),
-            entry("chunky.jar", true, &[]),
+            entry("occultism.jar", true, &["smartbrainlib.jar"]),
+            entry("smartbrainlib.jar", true, &[]),
+            entry("dungeons_arise.jar", true, &[]),
+            entry("dynmap.jar", false, &[]),
         ];
-        let cl = HashMap::from([(
-            "chunky.jar".to_string(),
-            cls(Some(SideClass::Server), Some(MatchPolicy::Tolerant)),
-        )]);
+        let server = || cls(Some(SideClass::Server), Some(MatchPolicy::Tolerant));
+        let cl = HashMap::from([
+            ("smartbrainlib.jar".to_string(), server()),
+            ("dungeons_arise.jar".to_string(), server()),
+            ("dynmap.jar".to_string(), server()),
+        ]);
         derive_required(&mut mods, &cl).unwrap();
-        let chunky = &mods[1];
-        assert!(!chunky.required, "a server-side mod is never required");
-        assert!(!chunky.default_enabled, "it ships opted out");
-        assert_eq!(mods.len(), 2, "nothing is removed");
+        let by = |f: &str| mods.iter().find(|m| m.filename == f).unwrap();
+        let sbl = by("smartbrainlib.jar");
+        assert!(sbl.required, "a hard edge from an enabled mod locks it");
+        assert_eq!(
+            sbl.display.as_ref().and_then(|d| d.presence),
+            Some(PresenceClass::Required)
+        );
+        let arise = by("dungeons_arise.jar");
+        assert!(!arise.required);
+        assert!(arise.default_enabled, "nothing switches it off");
+        assert_eq!(
+            arise.display.as_ref().and_then(|d| d.presence),
+            Some(PresenceClass::OptionalServer)
+        );
+        assert!(
+            !by("dynmap.jar").default_enabled,
+            "and a curator's own opt-out still stands"
+        );
+    }
+
+    // What each install takes is settled beside the flags: a client mod has no
+    // place on a dedicated server, a server mod none on a client joining one,
+    // and a jar nobody could place carries no env at all.
+    #[test]
+    fn env_says_which_installs_a_mod_belongs_in() {
+        let mut mods = vec![
+            entry("jei.jar", true, &[]),
+            entry("sodium.jar", true, &[]),
+            entry("chunky.jar", true, &[]),
+            entry("mystery.jar", true, &[]),
+            entry("asm.jar", true, &[]),
+        ];
+        let mut asm = cls(None, None);
+        asm.kind = Some("coremod".into());
+        let cl = HashMap::from([
+            (
+                "jei.jar".to_string(),
+                cls(Some(SideClass::Both), Some(MatchPolicy::MustMatch)),
+            ),
+            (
+                "sodium.jar".to_string(),
+                cls(Some(SideClass::Client), Some(MatchPolicy::Tolerant)),
+            ),
+            (
+                "chunky.jar".to_string(),
+                cls(Some(SideClass::Server), Some(MatchPolicy::Tolerant)),
+            ),
+            ("asm.jar".to_string(), asm),
+        ]);
+        derive_required(&mut mods, &cl).unwrap();
+        let env = |f: &str| mods.iter().find(|m| m.filename == f).unwrap().env;
+        let e = |client, server| Some(ModEnv { client, server });
+        use EnvSupport::*;
+        assert_eq!(env("jei.jar"), e(Required, Required));
+        assert_eq!(env("sodium.jar"), e(Optional, Unsupported));
+        assert_eq!(env("chunky.jar"), e(Unsupported, Optional));
+        assert_eq!(env("mystery.jar"), None, "unclassified");
+        assert_eq!(env("asm.jar"), None, "not a mod");
+    }
+
+    fn with_env(mut m: ModEntry, client: EnvSupport, server: EnvSupport) -> ModEntry {
+        m.env = Some(ModEnv { client, server });
+        m
+    }
+
+    fn manifest_of(mods: Vec<ModEntry>) -> PackManifest {
+        PackManifest {
+            schema_version: SCHEMA_VERSION,
+            pack_id: "P".into(),
+            pack_version: "0.1.0".into(),
+            channel: None,
+            changelog: None,
+            changelog_i18n: None,
+            generated_at: "2026-09-28T00:00:00Z".into(),
+            fingerprint: None,
+            checks: None,
+            built_from: None,
+            minecraft: mc(),
+            loader: forge(),
+            java: JavaSpec { major: 17 },
+            auth: None,
+            mods,
+            assets: vec![],
+        }
+    }
+
+    fn names(m: &PackManifest) -> Vec<&str> {
+        m.mods.iter().map(|m| m.filename.as_str()).collect()
+    }
+
+    // A client joining somebody else's server leaves the server-only mods at
+    // home, a dedicated server the client-only ones. A mod nobody could place
+    // goes to both, since leaving it out on a guess could break either.
+    #[test]
+    fn a_slice_leaves_out_what_its_side_has_no_use_for() {
+        use EnvSupport::*;
+        let m = manifest_of(vec![
+            with_env(entry("both.jar", true, &[]), Required, Required),
+            with_env(entry("client.jar", true, &[]), Optional, Unsupported),
+            with_env(entry("server.jar", true, &[]), Unsupported, Optional),
+            entry("unplaced.jar", true, &[]),
+        ]);
+        assert_eq!(
+            names(&slice_for_side(&m, SideClass::Client)),
+            ["both.jar", "client.jar", "unplaced.jar"]
+        );
+        assert_eq!(
+            names(&slice_for_side(&m, SideClass::Server)),
+            ["both.jar", "server.jar", "unplaced.jar"]
+        );
+        assert_eq!(names(&slice_for_side(&m, SideClass::Both)), names(&m));
+    }
+
+    // A dependency the loader enforces outranks a side flag somebody set: a
+    // client slice keeps a server-flagged library that a mod it keeps cannot
+    // start without, and drops the requires row of anything it left out.
+    #[test]
+    fn a_slice_keeps_what_its_mods_hard_require_and_forgets_what_it_dropped() {
+        use EnvSupport::*;
+        let mut occultism = with_env(
+            entry("occultism.jar", true, &["smartbrainlib.jar"]),
+            Required,
+            Required,
+        );
+        occultism
+            .display
+            .as_mut()
+            .unwrap()
+            .requires
+            .push(Requirement {
+                filename: "dynmap.jar".into(),
+                version_range: None,
+                optional: true,
+            });
+        let m = manifest_of(vec![
+            occultism,
+            with_env(entry("smartbrainlib.jar", true, &[]), Unsupported, Required),
+            with_env(entry("dynmap.jar", true, &[]), Unsupported, Optional),
+        ]);
+        let client = slice_for_side(&m, SideClass::Client);
+        assert_eq!(names(&client), ["occultism.jar", "smartbrainlib.jar"]);
+        let requires: Vec<&str> = client.mods[0]
+            .display
+            .as_ref()
+            .unwrap()
+            .requires
+            .iter()
+            .map(|r| r.filename.as_str())
+            .collect();
+        assert_eq!(
+            requires,
+            ["smartbrainlib.jar"],
+            "an optional row naming a dropped mod goes with it"
+        );
+    }
+
+    // A slice is a different instance, so it fingerprints as one, and slicing
+    // the same build twice fingerprints the same way.
+    #[test]
+    fn a_slice_carries_its_own_fingerprint() {
+        use EnvSupport::*;
+        let mut m = manifest_of(vec![
+            with_env(entry("both.jar", true, &[]), Required, Required),
+            with_env(entry("server.jar", true, &[]), Unsupported, Optional),
+        ]);
+        m.fingerprint = Some(content_fingerprint(
+            &m.minecraft,
+            &m.loader,
+            &m.java,
+            &m.mods,
+            &m.assets,
+        ));
+        let client = slice_for_side(&m, SideClass::Client);
+        assert_ne!(client.fingerprint, m.fingerprint);
+        assert_eq!(
+            client.fingerprint,
+            slice_for_side(&m, SideClass::Client).fingerprint
+        );
+        assert_eq!(
+            slice_for_side(&m, SideClass::Server).fingerprint,
+            m.fingerprint,
+            "a slice that leaves nothing out is the same instance"
+        );
     }
 
     // A hard edge into a confidently client-side mod never locks it: the
@@ -994,6 +1270,7 @@ mod tests {
             source: Source::SmrtCache { url: "u".into() },
             display: None,
             slug: None,
+            env: None,
         }
     }
 

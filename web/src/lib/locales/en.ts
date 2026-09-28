@@ -230,7 +230,7 @@ export const en = {
   'resolve.unclassified': '{n} unclassified',
   'resolve.unclassifiedH': 'Match policy undecided — shipped toggleable rather than guessed',
   'resolve.serverSide': '{n} server-side',
-  'resolve.serverSideH': 'Server-side mods — the client manifest ships them opted out',
+  'resolve.serverSideH': 'Server-side mods — a client joining another server leaves them out',
   'resolve.suggestions': '{n} suggested',
   'resolve.suggestionsH': 'Recommended by present mods, not in the pack — add manually if wanted',
   'resolve.addSuggested': 'find on Modrinth',
