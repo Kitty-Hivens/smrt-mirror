@@ -35,10 +35,11 @@ pub enum MatchPolicy {
 }
 
 /// The launcher-facing presence class of one mod in one pack -- the computed
-/// output of the two axes plus the dependency graph. `Required` implies
-/// side = both by the client-mod invariant (a client-side mod is never
-/// required, a server-side mod is never required for the client); the
-/// optional classes carry the side so a launcher can badge the toggle;
+/// output of the two axes plus the dependency graph. `Required` means the
+/// graph locked the mod, and never names a client-side one (the client-mod
+/// invariant); a server-side mod reads required when an enabled mod cannot
+/// start without it. The optional classes carry the side so a launcher can
+/// badge the toggle;
 /// `Coremod` marks a jar that is not a mod at all (a bare ASM/loader plugin),
 /// which is always toggleable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, ToSchema)]

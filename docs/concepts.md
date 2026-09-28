@@ -124,6 +124,9 @@ Three orthogonal axes decide how an entry behaves in an install:
 - **Presence** (wire, advisory): `required | optional_client |
   optional_server | optional_both | coremod` -- the chip a launcher renders;
   absent = unclassified.
+- **Env** (wire): `{client, server}`, each `required | optional | unsupported`
+  in the vocabulary of a Modrinth pack file -- which installs the mod belongs
+  in. Absent for a jar nobody could place, which every install keeps.
 
 Classification runs through one decision layer (`classify_artifact`) with a
 strict source cascade:
@@ -145,12 +148,16 @@ required = { default-enabled must_match mods }            (the seeds)
          + transitive hard deps of every default-enabled mod
 ```
 
-with the side rules applied on top: server-side mods are never required and
-ship opted out; non-mod jars are never required; **a confidently client-side
-mod is never required, period** -- a hard edge into one does not lock it
-(client chains co-toggle in the launcher via the `requires` tree), and a
-classification that would force one fails the build rather than shipping a
-manifest that force-installs a client mod on a server.
+with the side rules applied on top: non-mod jars are never required; **a
+confidently client-side mod is never required, period** -- a hard edge into one
+does not lock it (client chains co-toggle in the launcher via the `requires`
+tree), and a classification that would force one fails the build rather than
+shipping a manifest that force-installs a client mod on a server.
+
+A server-side mod gets no rule of its own. A manifest describes a whole
+instance, and an instance runs its own server the moment someone opens a world,
+so a server-side mod keeps the curator's `default_enabled` and locks when an
+enabled mod hard-requires it, like any other mod.
 
 The curator's opt-out settles the seeds, not the graph. An opted-out
 `must_match` mod is not a seed -- it stays out and still reads `optional_both`
@@ -161,6 +168,18 @@ that edge. A required entry always ships enabled, so the two flags never
 contradict each other on the wire; the launcher installs a required entry
 regardless of the flag, and the content fingerprint hashes both, so a
 contradiction would also make two identical packs fingerprint differently.
+
+## Installs: whole, client, server
+
+One build serves three kinds of install. The manifest as stored is the whole
+instance -- what a launcher installs, since a player both joins servers and
+opens worlds of their own. `?side=client` is a client joining somebody else's
+server, and `?side=server` a dedicated server. A slice leaves out a mod whose
+`env` says that side has no use for it, keeps anything a mod it keeps
+hard-requires whatever that mod's `env` says (the loader enforces the
+dependency, while a side flag is only what an author set), drops `requires`
+rows naming what it left out, and carries its own fingerprint. Assets are not
+sliced.
 
 ## The dependency graph
 

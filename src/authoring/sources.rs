@@ -251,6 +251,8 @@ pub(super) async fn resolve_mod(
         source,
         display: decl.display.clone(),
         slug: decl.slug.clone(),
+        // settled by the build, from the pack's classification
+        env: None,
     })
 }
 

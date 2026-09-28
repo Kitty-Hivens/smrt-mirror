@@ -157,6 +157,7 @@ mod tests {
                         ..Default::default()
                     }),
                     slug: None,
+                    env: None,
                 },
                 ModEntry {
                     filename: "open-smrt.jar".into(),
@@ -169,6 +170,7 @@ mod tests {
                     },
                     display: None,
                     slug: None,
+                    env: None,
                 },
             ],
             assets: vec![AssetEntry {

@@ -2042,6 +2042,7 @@ mod tests {
                     source: Source::SmrtCache { url: "u".into() },
                     display: None,
                     slug: None,
+                    env: None,
                 })
                 .collect(),
             assets: vec![],

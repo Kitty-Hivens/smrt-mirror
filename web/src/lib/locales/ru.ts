@@ -227,7 +227,7 @@ export const ru: Dict = {
   'resolve.unclassified': 'без класса: {n}',
   'resolve.unclassifiedH': 'Политика соответствия не определена — оставлен переключаемым, а не угадан',
   'resolve.serverSide': 'серверных: {n}',
-  'resolve.serverSideH': 'Серверные моды — в клиентском манифесте отключены по умолчанию',
+  'resolve.serverSideH': 'Серверные моды — клиент, заходящий на чужой сервер, их не ставит',
   'resolve.suggestions': 'рекомендаций: {n}',
   'resolve.suggestionsH': 'Рекомендованы установленными модами, но не в паке — добавь вручную, если нужен',
   'resolve.addSuggested': 'найти на Modrinth',

@@ -290,13 +290,45 @@ pub(crate) async fn get_pack_summary(
     Ok(Json(summary))
 }
 
+/// Which install a manifest is read for. Absent is the whole instance, which
+/// is what a launcher installs: a client that can also open a world of its own.
+#[derive(serde::Deserialize)]
+pub(crate) struct SideParam {
+    side: Option<String>,
+}
+
+impl SideParam {
+    /// The manifest as that install takes it.
+    fn apply(&self, manifest: PackManifest) -> Result<PackManifest, ApiError> {
+        match self.side.as_deref() {
+            None => Ok(manifest),
+            Some("client") => Ok(crate::authoring::slice_for_side(
+                &manifest,
+                SideClass::Client,
+            )),
+            Some("server") => Ok(crate::authoring::slice_for_side(
+                &manifest,
+                SideClass::Server,
+            )),
+            Some(other) => Err(ApiError::BadRequest(format!(
+                "side must be client or server, not {other:?}"
+            ))),
+        }
+    }
+}
+
 #[utoipa::path(
     get,
     path = "/v1/packs/{pack_id}/manifest",
     tag = "public",
-    params(("pack_id" = String, Path, description = "Pack identifier")),
+    params(
+        ("pack_id" = String, Path, description = "Pack identifier"),
+        ("side" = Option<String>, Query,
+         description = "`client` for a client joining another server, `server` for a dedicated server; absent is the whole instance")
+    ),
     responses(
         (status = 200, description = "The pack's latest manifest", body = PackManifest),
+        (status = 400, description = "Unknown side"),
         (status = 404, description = "No such pack, or no build yet")
     )
 )]
@@ -304,9 +336,11 @@ pub(crate) async fn get_latest_manifest(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(pack_id): Path<String>,
+    Query(side): Query<SideParam>,
 ) -> Result<Json<PackManifest>, ApiError> {
     gate_pack_read(&state, &headers, &pack_id).await?;
-    Ok(Json(state.storage.load_latest_manifest(&pack_id).await?))
+    let manifest = state.storage.load_latest_manifest(&pack_id).await?;
+    Ok(Json(side.apply(manifest)?))
 }
 
 #[utoipa::path(
@@ -315,10 +349,13 @@ pub(crate) async fn get_latest_manifest(
     tag = "public",
     params(
         ("pack_id" = String, Path, description = "Pack identifier"),
-        ("version" = String, Path, description = "Exact pack version label")
+        ("version" = String, Path, description = "Exact pack version label"),
+        ("side" = Option<String>, Query,
+         description = "`client` for a client joining another server, `server` for a dedicated server; absent is the whole instance")
     ),
     responses(
         (status = 200, description = "The manifest of that build", body = PackManifest),
+        (status = 400, description = "Unknown side"),
         (status = 404, description = "No such pack or version")
     )
 )]
@@ -326,14 +363,14 @@ pub(crate) async fn get_manifest_version(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((pack_id, version)): Path<(String, String)>,
+    Query(side): Query<SideParam>,
 ) -> Result<Json<PackManifest>, ApiError> {
     gate_pack_read(&state, &headers, &pack_id).await?;
-    Ok(Json(
-        state
-            .storage
-            .load_manifest_version(&pack_id, &version)
-            .await?,
-    ))
+    let manifest = state
+        .storage
+        .load_manifest_version(&pack_id, &version)
+        .await?;
+    Ok(Json(side.apply(manifest)?))
 }
 
 #[utoipa::path(

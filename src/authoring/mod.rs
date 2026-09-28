@@ -38,7 +38,7 @@ pub mod validate;
 pub mod versions;
 
 pub use bootstrap::{BootstrapArgs, bootstrap};
-pub use build::{Built, build_manifest, make_pack_summary};
+pub use build::{Built, build_manifest, make_pack_summary, slice_for_side};
 pub use commits::{Commit, CommitSnapshot, CommitStatus, make_commit};
 pub use configdiff::{
     ChangeField, ChangeGroup, ChangeOp, ConfigChange, diff_configs, initial, uncommitted,

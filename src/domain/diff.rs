@@ -248,6 +248,7 @@ mod tests {
             },
             display: None,
             slug: None,
+            env: None,
         }
     }
 
