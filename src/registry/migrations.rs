@@ -104,6 +104,10 @@ const MIGRATIONS: &[(u32, Migration)] = &[
         26,
         Migration::Sql(include_str!("schema/0026_github_asset.sql")),
     ),
+    (
+        27,
+        Migration::Sql(include_str!("schema/0027_artifact_embedded.sql")),
+    ),
 ];
 
 /// Apply every migration newer than the recorded schema version, each in its

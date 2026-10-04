@@ -24,7 +24,7 @@ use super::curseforge::{self, CurseForge, FileInfo};
 use super::mixinscan;
 use super::modmeta;
 use super::modrinth::{Modrinth, Project};
-use crate::registry::model::{RelKind, Severity, Source};
+use crate::registry::model::{EmbeddedMod, RelKind, Severity, Source};
 use crate::registry::{Registry, queries, upsert};
 use crate::storage::Storage;
 use anyhow::Result;
@@ -103,6 +103,12 @@ pub struct JarSeed {
     // pack whose scala/kotlin mods have no provider (Scalar). See bytecode.rs.
     pub needs_runtime: Vec<String>,
     pub provides_runtime: Vec<String>,
+    /// The mods this jar embeds, from this pass's read or the last one
+    /// recorded. `None` when no harvest has opened the jar for it, which is not
+    /// the same as a jar that embeds nothing.
+    pub embedded: Option<Vec<EmbeddedMod>>,
+    /// Whether `embedded` was read in this pass, and so is to be recorded.
+    pub embedded_read: bool,
 }
 
 /// One Modrinth version dependency as the seed carries it: the target project
@@ -365,6 +371,12 @@ pub struct JarReadout {
     /// Binary names of every class the jar carries, for the digest that answers
     /// whether an artifact still has a given class (#145).
     pub class_names: Vec<String>,
+    /// The mods the jar carries inside itself, as each nested jar it lists
+    /// declares itself.
+    pub embedded: Vec<EmbeddedMod>,
+    /// Every loader the jar serves: its own marker, plus the loaders a Fabric
+    /// root reaches through jar-in-jar metadata only Forge and NeoForge read.
+    pub loaders: Vec<String>,
 }
 
 /// Open a jar's zip ONCE and derive every fact the harvest needs from it: the
@@ -381,10 +393,13 @@ pub fn read_jar(bytes: &[u8]) -> JarReadout {
         mcmod_modids: Vec::new(),
         required_mixins: Vec::new(),
         class_names: Vec::new(),
+        embedded: Vec::new(),
+        loaders: Vec::new(),
     };
     let Ok(mut zip) = zip::ZipArchive::new(std::io::Cursor::new(bytes)) else {
         return empty();
     };
+    let mut jarjar_meta: Option<Vec<u8>> = None;
 
     let mut classes = Vec::new();
     let mut mcmod_raw: Option<Vec<u8>> = None;
@@ -444,6 +459,9 @@ pub fn read_jar(bytes: &[u8]) -> JarReadout {
             "fabric.mod.json" => {
                 has_fabric = true;
                 fabric_json = read_zip_entry(&mut entry, size, &name).ok();
+            }
+            JARJAR_METADATA => {
+                jarjar_meta = read_zip_entry(&mut entry, size, &name).ok();
             }
             "META-INF/MANIFEST.MF" => {
                 if let Ok(raw) = read_zip_entry(&mut entry, size, &name) {
@@ -505,7 +523,46 @@ pub fn read_jar(bytes: &[u8]) -> JarReadout {
         &mixin_configs,
         &classes,
     );
+
+    // Only what a listing names: the loader acts on the listing, not on
+    // whatever happens to sit in the directory beside it.
+    let mut embedded: Vec<EmbeddedMod> = Vec::new();
+    let mut jarjar_loaders: Vec<String> = Vec::new();
+    let mut nested = |path: &str, listed_version: Option<&str>| -> Option<EmbeddedMod> {
+        let mut entry = zip.by_name(path).ok()?;
+        let size = entry.size();
+        let raw = read_zip_entry(&mut entry, size, path).ok()?;
+        read_nested(&raw, listed_version)
+    };
+    for (path, listed_version) in jarjar_meta
+        .as_deref()
+        .map(jarjar_listing)
+        .unwrap_or_default()
+    {
+        if let Some(e) = nested(&path, listed_version.as_deref()) {
+            if let Some(l) = e.loader.as_deref()
+                && matches!(l, "forge" | "neoforge")
+                && !jarjar_loaders.iter().any(|x| x == l)
+            {
+                jarjar_loaders.push(l.to_string());
+            }
+            embedded.push(e);
+        }
+    }
+    for path in fabric_json
+        .as_deref()
+        .map(fabric_jar_listing)
+        .unwrap_or_default()
+    {
+        if let Some(e) = nested(&path, None) {
+            embedded.push(e);
+        }
+    }
+    let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
+    embedded.retain(|e| seen.insert((e.modid.clone(), e.loader.clone())));
+
     JarReadout {
+        loaders: served_loaders(loader.as_deref(), &jarjar_loaders),
         facts: JarFacts { loader },
         bytecode,
         modmeta,
@@ -513,7 +570,117 @@ pub fn read_jar(bytes: &[u8]) -> JarReadout {
         mcmod_modids: mcmod_raw.as_deref().map(mcmod_modids).unwrap_or_default(),
         required_mixins,
         class_names,
+        embedded,
     }
+}
+
+/// Where a Forge or NeoForge jar lists its jar-in-jar.
+const JARJAR_METADATA: &str = "META-INF/jarjar/metadata.json";
+
+/// `(path, the version the listing records)` for every jar a jar-in-jar
+/// metadata file lists. The recorded version is a fallback for a nested jar
+/// whose own metadata leaves it to a build placeholder.
+fn jarjar_listing(raw: &[u8]) -> Vec<(String, Option<String>)> {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(raw) else {
+        return Vec::new();
+    };
+    v["jars"]
+        .as_array()
+        .map(|jars| {
+            jars.iter()
+                .filter_map(|j| {
+                    let path = j["path"].as_str()?.to_string();
+                    let version = j["version"]["artifactVersion"].as_str().map(str::to_string);
+                    Some((path, version))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The paths a `fabric.mod.json` lists under `jars`.
+fn fabric_jar_listing(raw: &[u8]) -> Vec<String> {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(raw) else {
+        return Vec::new();
+    };
+    v["jars"]
+        .as_array()
+        .map(|jars| {
+            jars.iter()
+                .filter_map(|j| j["file"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What one nested jar says it is: its modid, version and loader marker, read
+/// the way the outer jar's are. One level only. `None` for a jar with no mod
+/// metadata, a plain library that satisfies no modid.
+fn read_nested(raw: &[u8], listed_version: Option<&str>) -> Option<EmbeddedMod> {
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(raw)).ok()?;
+    let mut read = |name: &str| -> Option<Vec<u8>> {
+        let mut entry = zip.by_name(name).ok()?;
+        let size = entry.size();
+        read_zip_entry(&mut entry, size, name).ok()
+    };
+    let (meta, loader) = if let Some(t) = read("META-INF/neoforge.mods.toml") {
+        (
+            std::str::from_utf8(&t).map(modmeta::parse_mods_toml).ok(),
+            Some("neoforge"),
+        )
+    } else if let Some(t) = read("META-INF/mods.toml") {
+        (
+            std::str::from_utf8(&t).map(modmeta::parse_mods_toml).ok(),
+            Some("forge"),
+        )
+    } else if let Some(f) = read("fabric.mod.json") {
+        (Some(modmeta::parse_fabric_json(&f)), Some("fabric"))
+    } else {
+        (None, None)
+    };
+    let (modid, declared) = match meta {
+        Some(m) if m.modid.is_some() => (m.modid, m.version),
+        _ => {
+            let info = read("mcmod.info")
+                .as_deref()
+                .and_then(parse_mcmod_info)
+                .filter(|i| !i.modid.is_empty())?;
+            let version = (!info.version.is_empty()).then_some(info.version);
+            (Some(info.modid), version)
+        }
+    };
+    let version = match declared {
+        Some(v) if v.contains("${") => read("META-INF/MANIFEST.MF")
+            .as_deref()
+            .and_then(manifest_implementation_version)
+            .or_else(|| listed_version.map(str::to_string)),
+        Some(v) => Some(v),
+        None => listed_version.map(str::to_string),
+    };
+    Some(EmbeddedMod {
+        modid: modid?,
+        version,
+        loader: loader.map(str::to_string),
+    })
+}
+
+/// Every loader a jar serves, from its own marker and the loaders its
+/// jar-in-jar reaches. A Forge or NeoForge root is that loader whatever it
+/// nests. A Fabric root, or one with no marker at all, that also lists
+/// jar-in-jar is one jar for several loaders: Fabric loads the root, and
+/// Forge and NeoForge load the nested builds the metadata names, without any
+/// helper (More Enchantment Info ships this way).
+fn served_loaders(root: Option<&str>, jarjar_loaders: &[String]) -> Vec<String> {
+    if matches!(root, Some("forge" | "neoforge")) {
+        return root.map(str::to_string).into_iter().collect();
+    }
+    let mut out: Vec<String> = root.map(str::to_string).into_iter().collect();
+    for l in jarjar_loaders {
+        if !out.contains(l) {
+            out.push(l.clone());
+        }
+    }
+    out
 }
 
 /// Reconcile a scan into the registry, in one transaction. Pure (no I/O beyond
@@ -586,6 +753,11 @@ pub fn write_scan(conn: &Connection, scan: &ScanData, now: &str) -> Result<Harve
         )?;
         if let Some((fingerprint, found)) = scan.curseforge.get(&jar.sha1) {
             upsert::set_curseforge_file(conn, &jar.sha1, *fingerprint, found.as_ref(), now)?;
+        }
+        if jar.embedded_read
+            && let Some(embedded) = &jar.embedded
+        {
+            upsert::set_artifact_embedded(conn, &jar.sha1, embedded, now)?;
         }
         if let Some(kind) = jar.kind.as_deref() {
             upsert::set_jar_class(
@@ -808,6 +980,31 @@ pub fn write_scan(conn: &Connection, scan: &ScanData, now: &str) -> Result<Harve
                 RelKind::Requires,
                 None,
                 Source::Inferred,
+                now,
+            )?;
+        }
+
+        // The mods the jar embeds, each provided by this artifact at the
+        // version embedded, which rides in the version slot so a requirer's
+        // window can be checked against it. Ungated like the runtime edges: a
+        // Modrinth mod's curated dependencies say nothing about what its jar
+        // carries. A nested build of the jar's own mod (one jar, several
+        // loaders) is the jar itself, not something it provides.
+        for e in jar.embedded.iter().flatten() {
+            let own = jar.modid.as_deref() == Some(e.modid.as_str())
+                || jar.extra_modids.iter().any(|m| m == &e.modid);
+            if own {
+                continue;
+            }
+            upsert::upsert_relation(
+                conn,
+                mod_id,
+                Some(mod_version_id),
+                &e.modid,
+                e.version.as_deref(),
+                RelKind::Provides,
+                None,
+                Source::JarMeta,
                 now,
             )?;
         }
@@ -1088,6 +1285,9 @@ pub fn write_scan(conn: &Connection, scan: &ScanData, now: &str) -> Result<Harve
             modrinth_selfhost_links += inserted as i64;
         }
     }
+    // Kept for the resolve, which has no network: a dependency on a project the
+    // pack only carries embedded is matched to it through this slug.
+    upsert::set_modrinth_dep_slugs(conn, &scan.dep_project_slugs, now)?;
 
     // External Modrinth deps (the hybrid case) resolve once every jar is
     // registered: the filename bridge needs the full artifact table, and the
@@ -1380,6 +1580,9 @@ pub struct Known<'a> {
     /// `version_id -> (sha1, size)`. A pack's Modrinth pin found here goes into
     /// the scan without asking Modrinth which file it is.
     pub modrinth_files: &'a HashMap<String, (String, i64)>,
+    /// What each jar a harvest has opened for it embeds, by sha1. A key is a
+    /// jar read, an empty list one that embeds nothing.
+    pub embedded: &'a HashMap<String, Vec<EmbeddedMod>>,
 }
 
 /// Scan the storage tree + Modrinth into a [ScanData]. Async (FS reads + one
@@ -1398,6 +1601,7 @@ pub async fn scan(
         already_read,
         github_read,
         modrinth_files,
+        embedded: known_embedded,
     } = known;
     let inventory = storage.list_cache_inventory().await.map_err(ae)?;
     let mut size_by_sha: HashMap<String, i64> = inventory
@@ -1471,15 +1675,17 @@ pub async fn scan(
 
     let (
         mcmod_by_sha,
-        facts_by_sha,
+        loaders_by_sha,
         bytecode_by_sha,
         modmeta_by_sha,
         extra_modids_by_sha,
         readout_by_sha,
         fingerprint_by_sha,
+        mut embedded_by_sha,
     ) = tokio::task::spawn_blocking(move || {
         let mut mcmod: HashMap<String, McModInfo> = HashMap::new();
-        let mut facts: HashMap<String, JarFacts> = HashMap::new();
+        let mut loaders: HashMap<String, Vec<String>> = HashMap::new();
+        let mut embedded: HashMap<String, Vec<EmbeddedMod>> = HashMap::new();
         let mut bc: HashMap<String, bytecode::JarBytecode> = HashMap::new();
         let mut mm: HashMap<String, modmeta::ModMeta> = HashMap::new();
         let mut extra: HashMap<String, Vec<String>> = HashMap::new();
@@ -1505,7 +1711,8 @@ pub async fn scan(
                         .collect(),
                 ),
             );
-            facts.insert(sha.clone(), r.facts);
+            loaders.insert(sha.clone(), r.loaders);
+            embedded.insert(sha.clone(), r.embedded);
             bc.insert(sha.clone(), r.bytecode);
             mm.insert(sha.clone(), r.modmeta);
             if r.mcmod_modids.len() > 1 {
@@ -1515,7 +1722,16 @@ pub async fn scan(
                 mcmod.insert(sha.clone(), info);
             }
         }
-        (mcmod, facts, bc, mm, extra, readouts, fingerprints)
+        (
+            mcmod,
+            loaders,
+            bc,
+            mm,
+            extra,
+            readouts,
+            fingerprints,
+            embedded,
+        )
     })
     .await
     .map_err(|e| anyhow::anyhow!("jar scan task: {e}"))?;
@@ -1794,15 +2010,25 @@ pub async fn scan(
     // Modrinth, so its bytes are not in the local cache) by fetching its jar once
     // and reading the modid. Without this, a dependency keyed on that modid (an
     // IC2 addon requiring `ic2`) can never resolve, because the registry knows the
-    // re-upload only by its Modrinth project id. Skipped once a modid alias exists
-    // for the project, so the fetch is a one-time cost per mod, not per harvest.
+    // re-upload only by its Modrinth project id.
+    //
+    // The same read says what the jar embeds, and that is per artifact rather
+    // than per mod: Ars Nouveau 4.2.4 ships GeckoLib inside it, and a dependency
+    // on `geckolib` is met by that copy. So a jar is fetched until both are
+    // recorded, once per artifact for the life of the mirror, and the bytes are
+    // dropped after the read as they always were.
     let mut learned_modid: HashMap<String, String> = HashMap::new();
     let fetch_targets: Vec<(String, String)> = modrinth_by_sha
         .iter()
         .filter(|(sha, _)| !cache_shas.contains(sha.as_str()))
-        .filter(|(_, v)| !known_modid_projects.contains(&v.project_id))
+        .filter(|(sha, _)| !embedded_by_sha.contains_key(sha.as_str()))
+        .filter(|(sha, v)| {
+            !known_modid_projects.contains(&v.project_id)
+                || !known_embedded.contains_key(sha.as_str())
+        })
         .filter_map(|(sha, v)| v.primary_file().map(|f| (sha.clone(), f.url.clone())))
         .collect();
+    let mut modrinth_modids_learned = 0usize;
     for (sha, url) in fetch_targets {
         let bytes = match modrinth.fetch_bytes(&url).await {
             Ok(b) => b,
@@ -1811,28 +2037,35 @@ pub async fn scan(
                 continue;
             }
         };
-        let modid = tokio::task::spawn_blocking(move || {
+        let (modid, embedded) = tokio::task::spawn_blocking(move || {
             let r = read_jar(&bytes);
-            r.mcmod
+            let modid = r
+                .mcmod
                 .map(|i| i.modid)
                 .filter(|s| !s.is_empty())
                 .or(r.modmeta.modid)
-                .or(r.bytecode.mod_id)
+                .or(r.bytecode.mod_id);
+            (modid, r.embedded)
         })
         .await
         .map_err(|e| anyhow::anyhow!("modid read task: {e}"))?;
+        let project_lacked_modid = modrinth_by_sha
+            .get(&sha)
+            .is_some_and(|v| !known_modid_projects.contains(&v.project_id));
         if let Some(modid) = modid {
-            learned_modid.insert(sha, modid);
+            if project_lacked_modid {
+                modrinth_modids_learned += 1;
+            }
+            learned_modid.insert(sha.clone(), modid);
         }
+        embedded_by_sha.insert(sha, embedded);
     }
-    let modrinth_modids_learned = learned_modid.len();
 
     let jars = all_shas
         .into_iter()
         .map(|sha| {
             let info = mcmod_by_sha.get(&sha);
             let mrv = modrinth_by_sha.get(&sha);
-            let facts = facts_by_sha.get(&sha);
             let bc = bytecode_by_sha.get(&sha);
             let mm = modmeta_by_sha.get(&sha);
             // Modrinth identity: the sha1 match, else the project the pack
@@ -1878,12 +2111,12 @@ pub async fn scan(
                     .or_else(|| mm.and_then(|m| m.version.clone()))
                     .or_else(|| mrv.map(|v| v.version_number.clone())),
                 project_id,
-                // loader: Modrinth's set wins; else the jar's own marker
-                // (mcmod.info/mods.toml -> forge, fabric.mod.json -> fabric); else
-                // empty (-> 'any' downstream)
+                // loader: Modrinth's set wins; else what the jar serves (its own
+                // marker, widened by jar-in-jar a Fabric root lists for Forge
+                // and NeoForge); else empty (-> 'any' downstream)
                 loaders: match mrv.map(|v| v.loaders.clone()).filter(|l| !l.is_empty()) {
                     Some(l) => l,
-                    None => facts.and_then(|f| f.loader.clone()).into_iter().collect(),
+                    None => loaders_by_sha.get(&sha).cloned().unwrap_or_default(),
                 },
                 // mc: Modrinth's set wins; else the jar's declared mcversion when
                 // it looks like a real version (not a gradle token); else the
@@ -1970,6 +2203,11 @@ pub async fn scan(
                 provides_runtime: bc
                     .map(|b| b.provides_runtime.iter().cloned().collect())
                     .unwrap_or_default(),
+                embedded_read: embedded_by_sha.contains_key(&sha),
+                embedded: embedded_by_sha
+                    .get(&sha)
+                    .or_else(|| known_embedded.get(&sha))
+                    .cloned(),
                 sha1: sha,
             }
         })
@@ -2006,6 +2244,7 @@ pub async fn run_harvest(
         already_read,
         github_read,
         modrinth_files,
+        embedded,
     ) = tokio::task::spawn_blocking(move || {
         reg.with_conn(|c| {
             Ok((
@@ -2016,6 +2255,7 @@ pub async fn run_harvest(
                 queries::shas_read(c)?,
                 queries::github_pins_read(c)?,
                 queries::modrinth_version_files(c)?,
+                queries::artifact_embedded_all(c)?,
             ))
         })
     })
@@ -2036,6 +2276,7 @@ pub async fn run_harvest(
             already_read: &already_read,
             github_read: &github_read,
             modrinth_files: &modrinth_files,
+            embedded: &embedded,
         },
     )
     .await?;
@@ -2179,6 +2420,8 @@ mod tests {
                     loader_reqs: None,
                     needs_runtime: vec![],
                     provides_runtime: vec![],
+                    embedded: None,
+                    embedded_read: false,
                 },
                 JarSeed {
                     sha1: "sha_b".into(),
@@ -2210,6 +2453,8 @@ mod tests {
                     loader_reqs: None,
                     needs_runtime: vec![],
                     provides_runtime: vec![],
+                    embedded: None,
+                    embedded_read: false,
                 },
                 JarSeed {
                     sha1: "sha_noid".into(),
@@ -2241,6 +2486,8 @@ mod tests {
                     loader_reqs: None,
                     needs_runtime: vec![],
                     provides_runtime: vec![],
+                    embedded: None,
+                    embedded_read: false,
                 },
             ],
             packs: vec![PackSeed {
@@ -2654,6 +2901,8 @@ mod tests {
             loader_reqs: None,
             needs_runtime: vec![],
             provides_runtime: vec![],
+            embedded: None,
+            embedded_read: false,
         }
     }
 
@@ -2697,6 +2946,8 @@ mod tests {
             loader_reqs: None,
             needs_runtime: vec![],
             provides_runtime: vec![],
+            embedded: None,
+            embedded_read: false,
         }
     }
 
@@ -3446,6 +3697,176 @@ mod tests {
         assert!(r.mcmod.is_none(), "no mcmod.info in the jar");
     }
 
+    // Ars Nouveau 4.2.4: a Forge jar listing GeckoLib in its jar-in-jar
+    // metadata. The nested jar leaves its version to a gradle placeholder its
+    // own manifest answers, and a jar beside it that the listing does not name
+    // is not one the loader loads.
+    #[test]
+    fn read_jar_reads_the_mods_its_jar_in_jar_lists() {
+        use super::super::classfile::fixtures::jar;
+        let gecko = jar(&[
+            (
+                "META-INF/mods.toml",
+                b"modLoader=\"javafml\"\n[[mods]]\nmodId=\"geckolib\"\nversion=\"${file.jarVersion}\"",
+            ),
+            (
+                "META-INF/MANIFEST.MF",
+                b"Manifest-Version: 1.0\r\nImplementation-Version: 4.2.1\r\n",
+            ),
+        ]);
+        let stray = jar(&[("META-INF/mods.toml", b"[[mods]]\nmodId=\"stray\"")]);
+        let listing = br#"{"jars":[{"identifier":{"group":"software.bernie.geckolib","artifact":"geckolib-forge-1.20.1"},
+            "version":{"range":"[4.0,)","artifactVersion":"4.2.0"},"path":"META-INF/jarjar/geckolib.jar"}]}"#;
+        let bytes = jar(&[
+            (
+                "META-INF/mods.toml",
+                b"[[mods]]\nmodId=\"ars_nouveau\"\nversion=\"4.2.4\"",
+            ),
+            ("META-INF/jarjar/metadata.json", listing),
+            ("META-INF/jarjar/geckolib.jar", &gecko),
+            ("META-INF/jarjar/stray.jar", &stray),
+        ]);
+        let r = read_jar(&bytes);
+        assert_eq!(
+            r.embedded,
+            vec![EmbeddedMod {
+                modid: "geckolib".into(),
+                version: Some("4.2.1".into()),
+                loader: Some("forge".into()),
+            }],
+            "the listed jar, at the version its own manifest gives"
+        );
+        assert_eq!(
+            r.loaders,
+            vec!["forge".to_string()],
+            "a Forge jar is Forge whatever it nests"
+        );
+    }
+
+    // More Enchantment Info 0.4.2: the root is a Fabric container, and the
+    // same mod is nested once per loader. Fabric loads its build through the
+    // root's `jars`, Forge and NeoForge theirs through jar-in-jar metadata, so
+    // one jar serves all three with no helper.
+    #[test]
+    fn read_jar_reads_one_jar_for_several_loaders() {
+        use super::super::classfile::fixtures::jar;
+        let toml = b"[[mods]]\nmodId=\"more_enchantment_info\"\nversion=\"0.4.2\"";
+        let neo = jar(&[("META-INF/neoforge.mods.toml", toml)]);
+        let forge = jar(&[("META-INF/mods.toml", toml)]);
+        let fabric = jar(&[(
+            "fabric.mod.json",
+            br#"{"schemaVersion":1,"id":"more_enchantment_info","version":"0.4.2"}"#,
+        )]);
+        let root = br#"{"schemaVersion":1,"id":"more_enchantment_info_container","version":"0.4.2",
+            "jars":[{"file":"META-INF/jars/mei-fabric.jar"}]}"#;
+        let listing = br#"{"jars":[
+            {"version":{"artifactVersion":"0.4.2"},"path":"META-INF/jars/mei-forge.jar"},
+            {"version":{"artifactVersion":"0.4.2"},"path":"META-INF/jars/mei-neoforge.jar"}]}"#;
+        let bytes = jar(&[
+            ("fabric.mod.json", root),
+            ("META-INF/jarjar/metadata.json", listing),
+            ("META-INF/jars/mei-fabric.jar", &fabric),
+            ("META-INF/jars/mei-forge.jar", &forge),
+            ("META-INF/jars/mei-neoforge.jar", &neo),
+        ]);
+        let r = read_jar(&bytes);
+        assert_eq!(
+            r.facts.loader.as_deref(),
+            Some("fabric"),
+            "the root alone is a Fabric mod"
+        );
+        assert_eq!(r.loaders, vec!["fabric", "forge", "neoforge"]);
+        let mut nested: Vec<(&str, Option<&str>)> = r
+            .embedded
+            .iter()
+            .map(|e| (e.modid.as_str(), e.loader.as_deref()))
+            .collect();
+        nested.sort();
+        assert_eq!(
+            nested,
+            vec![
+                ("more_enchantment_info", Some("fabric")),
+                ("more_enchantment_info", Some("forge")),
+                ("more_enchantment_info", Some("neoforge")),
+            ]
+        );
+    }
+
+    fn embedded(modid: &str, version: &str) -> EmbeddedMod {
+        EmbeddedMod {
+            modid: modid.into(),
+            version: Some(version.into()),
+            loader: Some("forge".into()),
+        }
+    }
+
+    // What a jar embeds becomes a `provides` of each nested mod at the version
+    // embedded, recorded so a later harvest that does not open the jar again
+    // still has it. A nested build of the jar's own mod is the jar itself.
+    #[test]
+    fn write_scan_provides_what_a_jar_embeds_and_keeps_it_across_harvests() {
+        let r = Registry::open_in_memory().unwrap();
+        let mut ars = jar(
+            "sha_ars",
+            "ars_nouveau",
+            Some("4.2.4"),
+            vec!["forge".into()],
+        );
+        ars.embedded = Some(vec![
+            embedded("geckolib", "4.2.1"),
+            embedded("ars_nouveau", "4.2.4"),
+        ]);
+        ars.embedded_read = true;
+        let mut quiet = jar("sha_quiet", "quiet", Some("1"), vec!["forge".into()]);
+        quiet.embedded = Some(vec![]);
+        quiet.embedded_read = true;
+        let scan_of = |jars: Vec<JarSeed>| ScanData {
+            jars,
+            packs: vec![],
+            curseforge: HashMap::new(),
+            modrinth_modids_learned: 0,
+            dep_project_slugs: Default::default(),
+            project_envs: Default::default(),
+            github: Vec::new(),
+            modrinth_leg_ok: true,
+        };
+        let provided = |r: &Registry| -> Vec<(String, Option<String>)> {
+            r.with_conn(|c| {
+                let id = queries::mod_id_for_alias(c, "modid", "ars_nouveau")?.unwrap();
+                Ok(queries::relations_from(c, id)?
+                    .into_iter()
+                    .filter(|e| e.kind == RelKind::Provides)
+                    .map(|e| (e.target, e.version_range))
+                    .collect())
+            })
+            .unwrap()
+        };
+
+        r.with_txn(|c| write_scan(c, &scan_of(vec![ars.clone(), quiet]), "T0"))
+            .unwrap();
+        assert_eq!(
+            provided(&r),
+            vec![("geckolib".to_string(), Some("4.2.1".to_string()))]
+        );
+        let stored = r.with_conn(queries::artifact_embedded_all).unwrap();
+        assert_eq!(stored.get("sha_ars").map(Vec::len), Some(2));
+        assert_eq!(
+            stored.get("sha_quiet"),
+            Some(&vec![]),
+            "a jar that nests nothing is recorded as read"
+        );
+
+        // the next harvest does not open it, and carries the recorded list
+        ars.embedded_read = false;
+        r.with_txn(|c| write_scan(c, &scan_of(vec![ars]), "T1"))
+            .unwrap();
+        assert_eq!(
+            provided(&r),
+            vec![("geckolib".to_string(), Some("4.2.1".to_string()))],
+            "the per-artifact rewrite brings the edge back from the record"
+        );
+    }
+
     // #1: two distinct jars of one mod with no version metadata both become
     // version='unknown'; the old UNIQUE(mod_id, version, target) crashed the
     // harvest on the second. sha1 is the only identity now.
@@ -3912,5 +4333,158 @@ mod tests {
             report.missing.is_empty(),
             "still answered on the second run"
         );
+    }
+
+    // A library the pack carries only inside a Modrinth pin. Its bytes never
+    // touch the cache, so the harvest fetches the pin once to read what it
+    // embeds, and the requirement is met by the embedded copy rather than read
+    // as missing. A mirror that learned the pin's modid before embedded mods
+    // were read fetches it exactly once more, and then never again.
+    #[tokio::test]
+    async fn a_modrinth_pin_is_read_once_for_what_it_embeds() {
+        use super::super::classfile::fixtures::jar;
+        use crate::domain::{DeclaredMod, LoaderSpec, PackConfig, SourceDecl};
+
+        let gecko = jar(&[(
+            "META-INF/mods.toml",
+            b"[[mods]]\nmodId=\"geckolib\"\nversion=\"4.2.1\"",
+        )]);
+        let carrier = jar(&[
+            (
+                "META-INF/mods.toml",
+                b"[[mods]]\nmodId=\"ars_nouveau\"\nversion=\"4.2.4\"",
+            ),
+            (
+                "META-INF/jarjar/metadata.json",
+                br#"{"jars":[{"version":{"artifactVersion":"4.2.1"},"path":"META-INF/jarjar/geckolib.jar"}]}"#,
+            ),
+            ("META-INF/jarjar/geckolib.jar", &gecko),
+        ]);
+        let host = jar(&[(
+            "META-INF/mods.toml",
+            b"[[mods]]\nmodId=\"occultism\"\n[[dependencies.occultism]]\nmodId=\"geckolib\"\nmandatory=true\nversionRange=\"[4.0,)\"",
+        )]);
+        let (carrier_sha, host_sha) = (sha1_of(&carrier), sha1_of(&host));
+
+        let (base, routes, hits) = stub_modrinth().await;
+        let version = format!(
+            r#"{{"id":"VER_ARS","project_id":"PROJ_ARS","name":"n","version_number":"4.2.4",
+               "version_type":"release","game_versions":["1.20.1"],"loaders":["forge"],
+               "files":[{{"hashes":{{"sha1":"{carrier_sha}"}},"url":"{base}/files/ars.jar",
+                 "filename":"ars.jar","primary":true,"size":{}}}],"dependencies":[]}}"#,
+            carrier.len()
+        );
+        routes.lock().unwrap().extend([
+            (
+                "/v2/versions".to_string(),
+                format!("[{version}]").into_bytes(),
+            ),
+            (
+                "/v2/version_files".to_string(),
+                format!(r#"{{"{carrier_sha}":{version}}}"#).into_bytes(),
+            ),
+            ("/v2/projects".to_string(), b"[]".to_vec()),
+            ("/files/ars.jar".to_string(), carrier.clone()),
+        ]);
+        let modrinth = Modrinth::with_base(&base).unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = Storage::new(tmp.path().to_path_buf());
+        storage.save_cache_jar(&host_sha, &host).await.unwrap();
+        let row = |filename: &str, source: SourceDecl| DeclaredMod {
+            filename: filename.into(),
+            default_enabled: true,
+            source,
+            display: None,
+            slug: None,
+            pulled: false,
+        };
+        let cfg = PackConfig {
+            pack_id: "embedding".into(),
+            display_name: "embedding".into(),
+            tagline: String::new(),
+            minecraft_version: "1.20.1".into(),
+            loader: LoaderSpec {
+                name: "forge".into(),
+                version: "47.2.0".into(),
+            },
+            java_major: 17,
+            version: None,
+            tags: vec![],
+            featured: false,
+            mods: vec![
+                row(
+                    "occultism.jar",
+                    SourceDecl::SmrtCache {
+                        sha1: host_sha.clone(),
+                    },
+                ),
+                row(
+                    "ars.jar",
+                    SourceDecl::Modrinth {
+                        project_id: "PROJ_ARS".into(),
+                        version_id: "VER_ARS".into(),
+                    },
+                ),
+            ],
+            assets: vec![],
+            auth: None,
+            pack_meta: Default::default(),
+            owner: crate::domain::pack::default_owner(),
+            tier: crate::domain::pack::default_tier(),
+            visibility: crate::domain::pack::default_visibility(),
+            fork_of: None,
+        };
+        storage.save_pack_config("embedding", &cfg).await.unwrap();
+        let registry = Arc::new(Registry::open_in_memory().unwrap());
+        let fetched = || {
+            hits.lock()
+                .unwrap()
+                .get("/files/ars.jar")
+                .copied()
+                .unwrap_or(0)
+        };
+        let missing = || {
+            registry
+                .with_conn(|c| super::super::resolve_pack(c, &cfg))
+                .unwrap()
+                .missing
+                .into_iter()
+                .map(|m| m.target)
+                .collect::<Vec<_>>()
+        };
+
+        run_harvest(&storage, &modrinth, None, registry.clone())
+            .await
+            .unwrap();
+        assert_eq!(fetched(), 1);
+        assert!(
+            missing().is_empty(),
+            "the embedded copy answers geckolib: {:?}",
+            missing()
+        );
+
+        run_harvest(&storage, &modrinth, None, registry.clone())
+            .await
+            .unwrap();
+        assert_eq!(fetched(), 1, "read once per artifact, not per harvest");
+        assert!(missing().is_empty(), "and still answered from the record");
+
+        // a mirror that knew the modid before embedded mods were read
+        registry
+            .with_conn_mut(|c| {
+                c.execute("DELETE FROM artifact_embedded", [])?;
+                Ok(())
+            })
+            .unwrap();
+        run_harvest(&storage, &modrinth, None, registry.clone())
+            .await
+            .unwrap();
+        assert_eq!(fetched(), 2, "fetched once more to read what it embeds");
+        run_harvest(&storage, &modrinth, None, registry.clone())
+            .await
+            .unwrap();
+        assert_eq!(fetched(), 2);
+        assert!(missing().is_empty());
     }
 }

@@ -1936,6 +1936,64 @@ pub fn github_pins_read(conn: &Connection) -> Result<Vec<(String, String, String
     Ok(out)
 }
 
+/// What every jar a harvest has opened for it carries inside itself, by sha1.
+/// A jar read and found to nest nothing maps to an empty list, so presence of
+/// the key is what says the jar was read.
+pub fn artifact_embedded_all(conn: &Connection) -> Result<HashMap<String, Vec<EmbeddedMod>>> {
+    let mut stmt = conn.prepare("SELECT sha1, modid, loader, version FROM artifact_embedded")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    let mut out: HashMap<String, Vec<EmbeddedMod>> = HashMap::new();
+    for row in rows {
+        let (sha1, modid, loader, version) = row?;
+        let list = out.entry(sha1).or_default();
+        if !modid.is_empty() {
+            list.push(EmbeddedMod {
+                modid,
+                version,
+                loader: (!loader.is_empty()).then_some(loader),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// The modids a `modrinth:<project>` dependency may be met under by a mod a
+/// jar embeds. An embedded mod is known by its modid alone, so the project has
+/// to be turned into one: the modid aliases and slug of the mod owning the
+/// project, or for a project nothing owns, the slug a harvest recorded for it.
+pub fn modids_for_modrinth_project(conn: &Connection, project_id: &str) -> Result<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    if let Some(mod_id) = mod_id_for_alias(conn, "modrinth", project_id)? {
+        let mut stmt = conn.prepare(
+            "SELECT external_key FROM mod_alias WHERE mod_id = ?1 AND source = 'modid'
+             UNION
+             SELECT slug FROM mods WHERE id = ?1 AND slug IS NOT NULL AND slug != ''",
+        )?;
+        for key in stmt.query_map(params![mod_id], |r| r.get::<_, String>(0))? {
+            out.push(key?);
+        }
+        return Ok(out);
+    }
+    if let Some(slug) = conn
+        .query_row(
+            "SELECT slug FROM modrinth_dep_slug WHERE project_id = ?1",
+            params![project_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?
+    {
+        out.push(slug);
+    }
+    Ok(out)
+}
+
 /// Scanned jars that still owe a CurseForge answer: never asked, or asked and
 /// matched nothing long enough ago to be worth asking again.
 ///
