@@ -517,8 +517,8 @@ pub fn make_pack_summary(
         latest_pack_version: pack_version.to_string(),
         tags: cfg.tags.clone(),
         featured: cfg.featured,
-        icon_url: cfg.pack_meta.icon_url.as_deref().map(&resolve),
-        banner_url: cfg.pack_meta.banner_url.as_deref().map(&resolve),
+        icon_url: cfg.pack_meta.icon_url.as_deref().map(resolve),
+        banner_url: cfg.pack_meta.banner_url.as_deref().map(resolve),
         gallery_urls: cfg
             .pack_meta
             .gallery_urls
