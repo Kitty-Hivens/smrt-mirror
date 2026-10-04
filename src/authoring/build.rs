@@ -315,8 +315,48 @@ fn derive_required(
         }
     }
 
+    // Which installs a low-confidence client verdict belongs in is settled by
+    // the same edges that overrule it for `required`. A mod that runs on the
+    // server and hard-requires it makes it a library the server loads, so it
+    // ships both-sided: a client mod requiring it is a client-internal chain
+    // and leaves the verdict as it was. Followed through, because a settled
+    // library is itself a mod that runs on the server.
+    let requires_of = |m: &ModEntry| -> Vec<usize> {
+        m.display
+            .as_ref()
+            .map(|d| {
+                d.requires
+                    .iter()
+                    .filter(|r| !r.optional)
+                    .filter_map(|r| idx.get(&r.filename).copied())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let soft_client = |i: usize| {
+        classifications
+            .get(&mods[i].filename)
+            .is_some_and(|c| c.client_verdict_is_soft())
+    };
+    let mut both_sided: HashSet<usize> = HashSet::new();
+    let mut queue: Vec<usize> = mods
+        .iter()
+        .filter(|m| side(m) != Some(SideClass::Client))
+        .flat_map(requires_of)
+        .collect();
+    while let Some(i) = queue.pop() {
+        if soft_client(i) && both_sided.insert(i) {
+            queue.extend(requires_of(&mods[i]));
+        }
+    }
+
     for (i, m) in mods.iter_mut().enumerate() {
         m.required = required.contains(&i);
+        let settled = if both_sided.contains(&i) {
+            Some(SideClass::Both)
+        } else {
+            side(m)
+        };
         // Locked by the graph over an opt-out: the launcher installs it either
         // way, so the entry says so rather than carrying a toggle state nothing
         // reads.
@@ -328,7 +368,7 @@ fn derive_required(
         // entry -- and a stale value from a previous build never lingers.
         let presence = match classifications.get(&m.filename) {
             Some(c) if c.is_non_mod() => Some(PresenceClass::Coremod),
-            Some(c) => match c.side {
+            Some(_) => match settled {
                 // a required client survivor exists only via the soft-verdict
                 // override; it reads required, not client
                 Some(SideClass::Client) if !m.required => Some(PresenceClass::OptionalClient),
@@ -352,7 +392,7 @@ fn derive_required(
                 }
             }
         }
-        m.env = mod_env(side(m), non_mod(m), m.required);
+        m.env = mod_env(settled, non_mod(m), m.required);
     }
     Ok(())
 }
@@ -1212,6 +1252,111 @@ mod tests {
             presence,
             Some(PresenceClass::Required),
             "a required survivor reads required, not client"
+        );
+    }
+
+    fn soft_client() -> Classification {
+        let mut c = cls(Some(SideClass::Client), Some(MatchPolicy::Tolerant));
+        c.side_confidence = Some("low".into());
+        c
+    }
+
+    // Cupboard: no side of its own, read as client by the surface heuristic,
+    // and hard-required by mods a dedicated server loads. The edges that lock
+    // it required also settle where it goes, so it ships both-sided rather
+    // than as a client mod a server slice would only keep by accident. Its
+    // dependency follows it.
+    #[test]
+    fn a_soft_client_library_a_server_mod_requires_ships_both_sided() {
+        let mut mods = vec![
+            entry("cursery.jar", true, &["cupboard.jar"]),
+            entry("cupboard.jar", true, &["corelib.jar"]),
+            entry("corelib.jar", true, &[]),
+        ];
+        let cl = HashMap::from([
+            (
+                "cursery.jar".to_string(),
+                cls(Some(SideClass::Both), Some(MatchPolicy::MustMatch)),
+            ),
+            ("cupboard.jar".to_string(), soft_client()),
+            ("corelib.jar".to_string(), soft_client()),
+        ]);
+        derive_required(&mut mods, &cl).unwrap();
+        use EnvSupport::*;
+        for f in ["cupboard.jar", "corelib.jar"] {
+            let m = mods.iter().find(|m| m.filename == f).unwrap();
+            assert!(m.required, "{f} is locked by the edge");
+            assert_eq!(
+                m.env,
+                Some(ModEnv {
+                    client: Required,
+                    server: Required
+                }),
+                "{f} goes to both installs"
+            );
+        }
+    }
+
+    // The same edge from an opted-out server mod locks nothing, but a server
+    // that enables that mod still needs the library, so it is an optional
+    // both-side mod rather than a client one.
+    #[test]
+    fn a_soft_client_library_an_optional_server_mod_requires_is_optional_both() {
+        let mut mods = vec![
+            entry("forgivingworld.jar", false, &["cupboard.jar"]),
+            entry("cupboard.jar", true, &[]),
+        ];
+        let cl = HashMap::from([
+            (
+                "forgivingworld.jar".to_string(),
+                cls(Some(SideClass::Server), Some(MatchPolicy::Tolerant)),
+            ),
+            ("cupboard.jar".to_string(), soft_client()),
+        ]);
+        derive_required(&mut mods, &cl).unwrap();
+        let cupboard = &mods[1];
+        assert!(!cupboard.required);
+        assert_eq!(
+            cupboard.display.as_ref().and_then(|d| d.presence),
+            Some(PresenceClass::OptionalBoth)
+        );
+        use EnvSupport::*;
+        assert_eq!(
+            cupboard.env,
+            Some(ModEnv {
+                client: Optional,
+                server: Optional
+            })
+        );
+    }
+
+    // A client mod requiring a soft-client library is a client-internal chain:
+    // the library is locked for the client install and stays off the server.
+    #[test]
+    fn a_soft_client_library_only_client_mods_require_stays_client() {
+        let mut mods = vec![
+            entry("minimap.jar", true, &["guilib.jar"]),
+            entry("guilib.jar", true, &[]),
+        ];
+        let cl = HashMap::from([
+            (
+                "minimap.jar".to_string(),
+                cls(Some(SideClass::Client), Some(MatchPolicy::Tolerant)),
+            ),
+            ("guilib.jar".to_string(), soft_client()),
+        ]);
+        derive_required(&mut mods, &cl).unwrap();
+        use EnvSupport::*;
+        assert!(
+            mods[1].required,
+            "the client install cannot start the map without it"
+        );
+        assert_eq!(
+            mods[1].env,
+            Some(ModEnv {
+                client: Required,
+                server: Unsupported
+            })
         );
     }
 
