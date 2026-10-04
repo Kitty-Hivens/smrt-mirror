@@ -846,9 +846,15 @@ pub fn resolve_pack(conn: &Connection, cfg: &PackConfig) -> Result<ResolveReport
                             // the pair. A client mod requiring another client
                             // mod is a normal launcher-co-toggled chain and is
                             // not reported.
+                            // A low-confidence client verdict is the exception:
+                            // the build lets this edge lock the target and ship
+                            // it both-sided, so the dependency is enforced.
                             if e.source != crate::registry::model::Source::Inferred
                                 && class_of.get(&b.mod_id).and_then(|c| c.side)
                                     == Some(SideClass::Client)
+                                && !class_of
+                                    .get(&b.mod_id)
+                                    .is_some_and(|c| c.client_verdict_is_soft())
                                 && class_of.get(&a.mod_id).and_then(|c| c.side)
                                     != Some(SideClass::Client)
                             {
@@ -2275,6 +2281,49 @@ mod tests {
         assert!(
             rep.forced_client_attempts.is_empty(),
             "client -> client is not reported: {:?}",
+            rep.forced_client_attempts
+        );
+    }
+
+    // A client verdict from the surface heuristic alone is the one the build
+    // lets a declared edge overrule: it locks the target and ships it to both
+    // installs. Reporting the edge as one that cannot be enforced would then be
+    // noise about a question the graph has already settled.
+    #[test]
+    fn declared_hard_edge_into_a_soft_client_verdict_is_not_reported() {
+        use crate::registry::model::Source;
+        let r = Registry::open_in_memory().unwrap();
+        let a = add_mod(&r, "cursery", "1.0", "sha_a");
+        add_mod(&r, "cupboard", "1.0", "sha_cb");
+        r.with_conn_mut(|c| {
+            crate::registry::upsert::set_jar_class(
+                c,
+                "sha_cb",
+                "mod",
+                Some("client"),
+                Some("tolerant"),
+                Some("low"),
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        relate(
+            &r,
+            a,
+            "cupboard",
+            None,
+            RelKind::Requires,
+            None,
+            Source::JarMeta,
+        );
+        let cfg = config(vec![
+            declared("cursery.jar", true, cache("sha_a")),
+            declared("cupboard.jar", true, cache("sha_cb")),
+        ]);
+        let rep = r.with_conn(|c| resolve_pack(c, &cfg)).unwrap();
+        assert!(
+            rep.forced_client_attempts.is_empty(),
+            "the build enforces this edge: {:?}",
             rep.forced_client_attempts
         );
     }
