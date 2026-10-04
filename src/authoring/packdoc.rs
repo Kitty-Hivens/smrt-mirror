@@ -38,8 +38,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use yrs::updates::decoder::Decode;
 use yrs::{
-    Any, Array, ArrayPrelim, ArrayRef, Doc, GetString, In, Map, MapPrelim, MapRef, Out, ReadTxn,
-    TextPrelim, Transact, Update,
+    Any, Array, ArrayPrelim, ArrayRef, Doc, GetString, In, Map, MapPrelim, MapRef, Number, Out,
+    ReadTxn, TextPrelim, Transact, Update,
 };
 
 /// The document's one root. A single named map rather than a root per field:
@@ -173,18 +173,16 @@ fn input(path: &str, value: &Value) -> In {
         Value::String(s) if is_prose(path) => In::Text(TextPrelim::new(s.clone()).into()),
         Value::String(s) => In::Any(Any::String(s.as_str().into())),
         Value::Bool(b) => In::Any(Any::Bool(*b)),
-        // Every number goes in as a double, including the whole ones.
+        // A whole number goes in as an integer while a double can still hold it
+        // exactly, and as a double past that.
         //
-        // The other half of this panel reads the same config over REST, where a
-        // browser's JSON.parse gives it doubles -- so the document has to give
-        // doubles too, or the two halves disagree about the same field. Yjs
-        // decodes yrs's BigInt as a JavaScript BigInt, which is a value JSON
+        // Yjs decodes the 64-bit integer tag as a JavaScript BigInt, which JSON
         // cannot serialize at all: the editor merged an update and then threw on
-        // the next save, with the config's own owner id as the poison.
-        //
-        // Nothing a pack config carries comes near the range where a double
-        // stops being exact -- the largest is a GitHub uid.
-        Value::Number(n) => In::Any(Any::Number(n.as_f64().unwrap_or_default())),
+        // the next save, with the config's own owner id as the poison. yrs writes
+        // that tag only for an integer no double can hold, and `try_i64` never
+        // hands it one. Every other tag reaches the browser as a plain number,
+        // which is what the REST half of the panel reads for the same field.
+        Value::Number(n) => In::Any(Any::Number(Number::try_i64(n.as_f64().unwrap_or_default()))),
         Value::Null => In::Any(Any::Null),
     }
 }
@@ -230,17 +228,15 @@ fn any_value(any: &Any) -> Value {
     match any {
         Any::Null | Any::Undefined => Value::Null,
         Any::Bool(b) => Value::Bool(*b),
-        // A whole double comes back as a whole number, not as `21.0`. The value
-        // is on its way into a `PackConfig`, where `java_major` is a u32 and a
-        // float refuses to deserialize -- so a round trip through the document
-        // would fail on a field nobody touched.
-        Any::Number(n) => whole(*n)
+        Any::Number(Number::Int(i)) => Value::Number((*i).into()),
+        // A whole double comes back as a whole number, not as `21.0`. The browser
+        // sends a large whole number as a double, and the value is on its way
+        // into a `PackConfig`, where `java_major` is a u32 and a float refuses to
+        // deserialize. A round trip would otherwise fail on a field nobody touched.
+        Any::Number(Number::Float(f)) => whole(*f)
             .map(|i| Value::Number(i.into()))
-            .or_else(|| serde_json::Number::from_f64(*n).map(Value::Number))
+            .or_else(|| serde_json::Number::from_f64(*f).map(Value::Number))
             .unwrap_or(Value::Null),
-        // Still read: documents this process is already holding were seeded
-        // before numbers went in as doubles, and they outlive the change.
-        Any::BigInt(i) => Value::Number((*i).into()),
         Any::String(s) => Value::String(s.to_string()),
         Any::Array(items) => Value::Array(items.iter().map(any_value).collect()),
         Any::Map(entries) => Value::Object(
@@ -589,9 +585,8 @@ mod tests {
 
         fn walk<T: ReadTxn>(at: &str, out: &Out, txn: &T, found: &mut Vec<String>) {
             match out {
-                Out::Any(Any::BigInt(_)) => found.push(at.to_string()),
-                Out::Any(Any::Array(items)) => {
-                    if items.iter().any(|a| matches!(a, Any::BigInt(_))) {
+                Out::Any(any) => {
+                    if encodes_a_bigint(any) {
                         found.push(at.to_string());
                     }
                 }
@@ -608,6 +603,59 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+    /// The lib0 type tag yjs decodes as a JavaScript BigInt.
+    const BIGINT_TAG: u8 = 122;
+
+    /// Whether this value, or any number inside it, goes over the wire under
+    /// the BigInt tag. Asked of the encoding rather than of the value, because
+    /// the tag is chosen at encode time and only the tag reaches the browser.
+    fn encodes_a_bigint(any: &Any) -> bool {
+        match any {
+            Any::Number(_) => {
+                let mut buf = Vec::new();
+                any.encode(&mut buf);
+                buf.first() == Some(&BIGINT_TAG)
+            }
+            Any::Array(items) => items.iter().any(encodes_a_bigint),
+            Any::Map(entries) => entries.values().any(encodes_a_bigint),
+            _ => false,
+        }
+    }
+
+    // The sizes a config can carry, and past them: an int32, a GitHub uid past
+    // the int32 range, the last integer a double holds exactly, and one beyond
+    // it. None may reach the browser as a BigInt, and each must come back as
+    // the number it went in as.
+    #[test]
+    fn no_number_size_encodes_as_a_bigint_or_changes_on_the_way_back() {
+        for n in [
+            8i64,
+            211_033_194,
+            4_000_000_000,
+            9_007_199_254_740_991,
+            -9_007_199_254_740_991,
+        ] {
+            let In::Any(any) = input("java_major", &Value::Number(n.into())) else {
+                panic!("a number goes in as a plain value");
+            };
+            assert!(!encodes_a_bigint(&any), "{n} would arrive as a BigInt");
+            assert_eq!(any_value(&any), Value::Number(n.into()), "{n} round trips");
+        }
+        let past = Value::Number(9_007_199_254_740_993i64.into());
+        let In::Any(any) = input("java_major", &past) else {
+            panic!("a number goes in as a plain value");
+        };
+        assert!(
+            !encodes_a_bigint(&any),
+            "past what a double holds it goes in as a double, not as a BigInt"
+        );
+        assert_eq!(
+            any_value(&Any::Number(Number::Float(0.5))),
+            serde_json::json!(0.5),
+            "a fraction stays a fraction"
+        );
     }
 
     // A whole double must come back a whole number: the value is on its way into
