@@ -150,12 +150,28 @@ pub struct JarClassRow {
 #[derive(Debug, Clone)]
 pub struct RelationRow {
     pub target: String,
+    /// The window a dependency accepts. On a jar-meta `provides` edge, which
+    /// is a mod the jar embeds, it is instead the version embedded, the thing
+    /// a requirer's window is checked against.
     pub version_range: Option<String>,
     pub kind: RelKind,
     /// Set exactly when `kind` is [`RelKind::Conflicts`] (#129).
     pub severity: Option<Severity>,
     pub source: Source,
     pub confidence: i64,
+}
+
+/// A mod one jar carries inside itself, read from the nested jar's own
+/// metadata: a Forge or NeoForge jar-in-jar, or a Fabric `jars` entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddedMod {
+    pub modid: String,
+    /// What the nested jar declares, its gradle placeholder resolved. `None`
+    /// when neither the nested jar nor the outer listing names one.
+    pub version: Option<String>,
+    /// The loader the nested jar's metadata is for, `None` when it has none
+    /// of the known marker files.
+    pub loader: Option<String>,
 }
 
 /// Q1: a (pack build, version, filename) that ships a given mod.

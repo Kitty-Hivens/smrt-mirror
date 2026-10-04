@@ -606,6 +606,60 @@ pub fn set_artifact_loader_reqs(
     Ok(())
 }
 
+/// Record what a jar carries inside itself, replacing what an earlier read
+/// recorded. An empty list is written as the negative row, so a jar that nests
+/// nothing reads as read rather than as never opened.
+pub fn set_artifact_embedded(
+    conn: &Connection,
+    sha1: &str,
+    embedded: &[crate::registry::model::EmbeddedMod],
+    now: &str,
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM artifact_embedded WHERE sha1 = ?1",
+        params![sha1],
+    )?;
+    if embedded.is_empty() {
+        conn.execute(
+            "INSERT INTO artifact_embedded (sha1, modid, loader, version, read_at)
+             VALUES (?1, '', '', NULL, ?2)",
+            params![sha1, now],
+        )?;
+        return Ok(());
+    }
+    for e in embedded {
+        conn.execute(
+            "INSERT OR REPLACE INTO artifact_embedded (sha1, modid, loader, version, read_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                sha1,
+                e.modid,
+                e.loader.as_deref().unwrap_or(""),
+                e.version,
+                now
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// Record the slug of each Modrinth project a dependency names that no mod
+/// owns, as this harvest read it.
+pub fn set_modrinth_dep_slugs(
+    conn: &Connection,
+    slugs: &std::collections::HashMap<String, String>,
+    now: &str,
+) -> Result<()> {
+    for (project_id, slug) in slugs {
+        conn.execute(
+            "INSERT INTO modrinth_dep_slug (project_id, slug, read_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(project_id) DO UPDATE SET slug = excluded.slug, read_at = excluded.read_at",
+            params![project_id, slug, now],
+        )?;
+    }
+    Ok(())
+}
+
 pub fn upsert_pack(conn: &Connection, pack_id: &str, now: &str) -> Result<()> {
     conn.execute(
         "INSERT INTO pack (id, created_at, updated_at)

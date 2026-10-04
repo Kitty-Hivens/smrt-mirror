@@ -102,15 +102,20 @@ async fn plan_for(
     read: &mut WireReads,
 ) -> Result<Pass> {
     let snapshot = cfg.clone();
-    let (mut plan, declared) = registry
+    let (mut plan, declared, embedded) = registry
         .read(move |c| {
             Ok((
                 resolve::dependency_fill_plan(c, &snapshot)?,
                 resolve::declared_mods(c, &snapshot)?,
+                resolve::declared_embedded(c, &snapshot)?,
             ))
         })
         .await?;
-    merge_wire_deps(&mut plan, cfg, registry, modrinth, read, &declared).await;
+    let held = Held {
+        mods: &declared,
+        embedded: &embedded,
+    };
+    merge_wire_deps(&mut plan, cfg, registry, modrinth, read, &held).await;
     Ok(Pass { plan, declared })
 }
 
@@ -124,6 +129,14 @@ struct Pass {
     plan: resolve::DepFillPlan,
     /// `mod_id -> the filename the pack declares it under`.
     declared: HashMap<i64, String>,
+}
+
+/// What the pack already holds, as the wire pass matches against it.
+struct Held<'a> {
+    /// `mod_id -> the filename the pack declares it under`.
+    mods: &'a HashMap<i64, String>,
+    /// `lowercase modid -> the filename of a declared jar embedding it`.
+    embedded: &'a HashMap<String, String>,
 }
 
 /// What one fill has read from Modrinth, kept across its passes. A pass that
@@ -170,10 +183,10 @@ async fn merge_wire_deps(
     registry: &Arc<Registry>,
     modrinth: &Modrinth,
     read: &mut WireReads,
-    declared: &HashMap<i64, String>,
+    held: &Held<'_>,
 ) {
     let deps = wire_deps(cfg, registry, modrinth, &mut read.versions).await;
-    let providers = wire_providers(&deps, registry, modrinth, &mut read.slugs, declared).await;
+    let providers = wire_providers(&deps, registry, modrinth, &mut read.slugs, held).await;
     let known: HashSet<&str> = plan.missing.iter().map(|t| t.selector.as_str()).collect();
     let mut extra: Vec<resolve::MissingTarget> = Vec::new();
     for d in &deps {
@@ -223,13 +236,19 @@ async fn merge_wire_deps(
 /// the panel is exactly the one nothing has harvested yet. So a project the
 /// alias does not answer is asked for its slug, and a declared mod whose modid
 /// is that slug is the provider: the rule `write_scan` already links them by.
+///
+/// Last, a declared jar may carry the mod inside it rather than the pack
+/// shipping it at all, and the copy it embeds is known by its modid alone. So a
+/// project still unanswered is turned into the modids it may go by, the owning
+/// mod's or the slug, and a declared jar embedding one of them is the provider.
 async fn wire_providers(
     deps: &[WireDep],
     registry: &Arc<Registry>,
     modrinth: &Modrinth,
     slugs: &mut HashMap<String, Option<String>>,
-    declared: &HashMap<i64, String>,
+    held: &Held<'_>,
 ) -> HashMap<String, String> {
+    let declared = held.mods;
     let projects: HashSet<String> = deps.iter().map(|d| d.project_id.clone()).collect();
     if projects.is_empty() || declared.is_empty() {
         return HashMap::new();
@@ -290,21 +309,55 @@ async fn wire_providers(
         .into_iter()
         .filter_map(|p| slugs.get(&p).cloned().flatten().map(|s| (p, s)))
         .collect();
-    if by_slug.is_empty() {
+    if !by_slug.is_empty() {
+        let candidates: Vec<(String, Vec<i64>)> = registry
+            .read(move |c| {
+                let mut out = Vec::new();
+                for (p, slug) in by_slug {
+                    out.push((p, queries::mod_ids_for_selector(c, &slug)?));
+                }
+                Ok(out)
+            })
+            .await
+            .unwrap_or_default();
+        for (p, ids) in candidates {
+            if let Some(f) = ids.iter().find_map(|id| declared.get(id)) {
+                found.insert(p, f.clone());
+            }
+        }
+    }
+
+    if held.embedded.is_empty() {
         return found;
     }
-    let candidates: Vec<(String, Vec<i64>)> = registry
+    let unanswered: Vec<(String, Option<String>)> = deps
+        .iter()
+        .map(|d| d.project_id.clone())
+        .filter(|p| !found.contains_key(p))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .map(|p| {
+            let slug = slugs.get(&p).cloned().flatten();
+            (p, slug)
+        })
+        .collect();
+    let names: Vec<(String, Vec<String>)> = registry
         .read(move |c| {
             let mut out = Vec::new();
-            for (p, slug) in by_slug {
-                out.push((p, queries::mod_ids_for_selector(c, &slug)?));
+            for (p, slug) in unanswered {
+                let mut modids = queries::modids_for_modrinth_project(c, &p)?;
+                modids.extend(slug);
+                out.push((p, modids));
             }
             Ok(out)
         })
         .await
         .unwrap_or_default();
-    for (p, ids) in candidates {
-        if let Some(f) = ids.iter().find_map(|id| declared.get(id)) {
+    for (p, modids) in names {
+        if let Some(f) = modids
+            .iter()
+            .find_map(|m| held.embedded.get(&m.to_ascii_lowercase()))
+        {
             found.insert(p, f.clone());
         }
     }
@@ -1692,6 +1745,84 @@ mod tests {
             reqs.iter().map(|q| q.filename.as_str()).collect::<Vec<_>>(),
             vec!["curios-forge-5.2.0-beta.3.jar"],
             "and the requires edge points at the CurseForge row"
+        );
+    }
+
+    // The library is not shipped at all, only carried inside another declared
+    // jar. A pin just picked names it by project, the copy is known by its
+    // modid, and the project's slug joins them, so nothing is pulled and the
+    // build locks the jar that carries it.
+    #[tokio::test]
+    async fn a_wire_dependency_on_a_library_another_jar_embeds_is_not_pulled() {
+        let r = Arc::new(Registry::open_in_memory().unwrap());
+        let ars = add_artifact(&r, "ars_nouveau", "4.2.4", &sha("sha_ars"), "ars.jar");
+        r.with_conn_mut(|c| {
+            upsert::upsert_relation(
+                c,
+                ars,
+                None,
+                "geckolib",
+                Some("4.2.1"),
+                RelKind::Provides,
+                None,
+                Source::JarMeta,
+                NOW,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let pin = version_json(
+            "PROJ_OCC",
+            "VER_OCC",
+            "occultism.jar",
+            r#"{"project_id":"PROJ_GECKO","version_id":"VER_GECKO","dependency_type":"required"}"#,
+        );
+        let standalone = version_json("PROJ_GECKO", "VER_GECKO", "geckolib-4.8.4.jar", "");
+        let base = stub_modrinth(vec![
+            ("/v2/versions".to_string(), format!("[{pin}]")),
+            (
+                "/v2/projects".to_string(),
+                r#"[{"id":"PROJ_GECKO","slug":"geckolib","title":"GeckoLib","team":"t"}]"#
+                    .to_string(),
+            ),
+            (
+                "/v2/project/PROJ_GECKO/version/VER_GECKO".to_string(),
+                standalone,
+            ),
+        ])
+        .await;
+        let modrinth = Modrinth::with_base(&base).unwrap();
+
+        let mut c = cfg(vec![
+            DeclaredMod {
+                filename: "occultism.jar".into(),
+                default_enabled: true,
+                source: SourceDecl::Modrinth {
+                    project_id: "PROJ_OCC".into(),
+                    version_id: "VER_OCC".into(),
+                },
+                display: None,
+                slug: None,
+                pulled: false,
+            },
+            cache_mod("ars.jar", &sha("sha_ars")),
+        ]);
+        let (_tmp, store) = cache_holding(&["sha_ars"]).await;
+
+        let added = fill_dependencies(&mut c, &r, &modrinth, &store)
+            .await
+            .unwrap();
+        assert_eq!(
+            added,
+            0,
+            "Ars Nouveau carries GeckoLib: {:?}",
+            c.mods.iter().map(|m| &m.filename).collect::<Vec<_>>()
+        );
+        let reqs = &c.mods[0].display.as_ref().unwrap().requires;
+        assert_eq!(
+            reqs.iter().map(|q| q.filename.as_str()).collect::<Vec<_>>(),
+            vec!["ars.jar"]
         );
     }
 

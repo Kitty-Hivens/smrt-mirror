@@ -19,7 +19,7 @@
 
 use crate::domain::{PackConfig, SideClass, SourceDecl};
 use crate::registry::classify::{Classification, classify_artifact};
-use crate::registry::model::{GraphData, GraphEdge, RelKind, Severity, Source};
+use crate::registry::model::{GraphData, GraphEdge, RelKind, RelationRow, Severity, Source};
 use crate::registry::{queries, semver};
 use anyhow::Result;
 use rusqlite::Connection;
@@ -334,6 +334,55 @@ fn selector_present(
     Ok(None)
 }
 
+/// The mods the pack's artifacts embed, by lowercase modid: each copy as the
+/// filename carrying it and the version it carries. Several mods embedding one
+/// library is how jar-in-jar is meant to work, and the loader keeps one copy.
+type EmbeddedCopies = HashMap<String, Vec<(String, Option<String>)>>;
+
+/// Note an artifact's jar-meta `provides` edges, which are the mods it embeds.
+fn note_embedded(embedded: &mut EmbeddedCopies, filename: &str, e: &RelationRow) {
+    if e.kind == RelKind::Provides && e.source == Source::JarMeta {
+        embedded
+            .entry(e.target.to_ascii_lowercase())
+            .or_default()
+            .push((filename.to_string(), e.version_range.clone()));
+    }
+}
+
+/// The embedded copies that answer a hard dependency on `target`. A bare
+/// modid is looked up as itself. A `modrinth:<project>` has to become a modid
+/// first, since an embedded mod is known by nothing else: through the mod that
+/// owns the project, or the slug a harvest recorded for one nothing owns.
+fn embedded_copies<'a>(
+    conn: &Connection,
+    target: &str,
+    embedded: &'a EmbeddedCopies,
+) -> Result<Vec<&'a (String, Option<String>)>> {
+    if embedded.is_empty() {
+        return Ok(Vec::new());
+    }
+    let bare = target.split('@').next().unwrap_or(target);
+    let modids = match bare.strip_prefix("modrinth:") {
+        Some(pid) => queries::modids_for_modrinth_project(conn, pid)?,
+        None => vec![bare.to_string()],
+    };
+    Ok(modids
+        .iter()
+        .filter_map(|m| embedded.get(&m.to_ascii_lowercase()))
+        .flatten()
+        .collect())
+}
+
+/// Whether an embedded copy's version may satisfy a requirer's window. An
+/// unknown or incomparable version passes, as everywhere else here: never act
+/// on a guess.
+fn copy_fits(version: Option<&str>, range: Option<&str>) -> bool {
+    match (version, range) {
+        (Some(v), Some(r)) => semver::in_range(v, r) != Some(false),
+        _ => true,
+    }
+}
+
 /// A declared jar mod placed on the graph.
 struct Present {
     filename: String,
@@ -516,6 +565,21 @@ pub fn declared_mods(conn: &Connection, cfg: &PackConfig) -> Result<HashMap<i64,
     Ok(out)
 }
 
+/// The mods the pack's declared artifacts embed, as `lowercase modid -> the
+/// filename carrying it`. The first carrier wins, as in [`declared_mods`].
+pub fn declared_embedded(conn: &Connection, cfg: &PackConfig) -> Result<HashMap<String, String>> {
+    let mut embedded: EmbeddedCopies = HashMap::new();
+    for p in place_mods(conn, cfg)?.present {
+        for e in queries::relations_for_artifact(conn, p.mod_version_id.unwrap_or(-1), p.mod_id)? {
+            note_embedded(&mut embedded, &p.filename, &e);
+        }
+    }
+    Ok(embedded
+        .into_iter()
+        .filter_map(|(modid, copies)| copies.into_iter().next().map(|(f, _)| (modid, f)))
+        .collect())
+}
+
 /// The outcome of placing a pack's declared mods on the registry graph.
 struct PlacedMods {
     /// Mods the registry has an identity for -- reasoned about fully.
@@ -638,9 +702,21 @@ pub fn dependency_fill_plan(conn: &Connection, cfg: &PackConfig) -> Result<DepFi
     let mut missing: BTreeMap<String, Option<String>> = BTreeMap::new();
     let mut requires: Vec<(String, String)> = Vec::new();
     let mut suggested: BTreeSet<String> = BTreeSet::new();
-    for a in &placed.present {
+    // Read up front: a provider may come after the mod that needs it.
+    let edges: Vec<Vec<RelationRow>> = placed
+        .present
+        .iter()
+        .map(|a| queries::relations_for_artifact(conn, a.mod_version_id.unwrap_or(-1), a.mod_id))
+        .collect::<Result<_>>()?;
+    let mut embedded: EmbeddedCopies = HashMap::new();
+    for (a, rows) in placed.present.iter().zip(&edges) {
+        for e in rows {
+            note_embedded(&mut embedded, &a.filename, e);
+        }
+    }
+    for (a, rows) in placed.present.iter().zip(edges) {
         let mut seen: HashSet<String> = HashSet::new();
-        for e in queries::relations_for_artifact(conn, a.mod_version_id.unwrap_or(-1), a.mod_id)? {
+        for e in rows {
             if !seen.insert(format!("{}\x1f{}", e.kind.as_str(), e.target)) {
                 continue;
             }
@@ -695,6 +771,17 @@ pub fn dependency_fill_plan(conn: &Connection, cfg: &PackConfig) -> Result<DepFi
                     if let Some(pid) = e.target.strip_prefix("modrinth:")
                         && pinned.contains(pid.split('@').next().unwrap_or(pid))
                     {
+                        continue;
+                    }
+                    // A copy another present jar embeds answers it, and the
+                    // edge goes to that jar so the build locks what carries
+                    // the copy. One outside the requirer's window does not:
+                    // a standalone build that fits is what the pack needs.
+                    if let Some((carrier, _)) = embedded_copies(conn, &e.target, &embedded)?
+                        .into_iter()
+                        .find(|(_, v)| copy_fits(v.as_deref(), e.version_range.as_deref()))
+                    {
+                        requires.push((a.filename.clone(), carrier.clone()));
                         continue;
                     }
                     // first requirer's window wins (highest-confidence edge)
@@ -798,6 +885,7 @@ pub fn resolve_pack(conn: &Connection, cfg: &PackConfig) -> Result<ResolveReport
     let mut optional_conflicts: Vec<ActiveConflict> = Vec::new();
     let mut conflict_seen: HashSet<(usize, usize)> = HashSet::new();
     let mut provides: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut embedded: EmbeddedCopies = HashMap::new();
     let mut version_issues: Vec<VersionIssue> = Vec::new();
     let mut forced_client: BTreeMap<String, ForcedClientEdge> = BTreeMap::new();
     let mut suggestions: BTreeSet<String> = BTreeSet::new();
@@ -941,6 +1029,11 @@ pub fn resolve_pack(conn: &Connection, cfg: &PackConfig) -> Result<ResolveReport
                         }
                     }
                 }
+                // a mod the jar embeds, kept apart from the capabilities: two
+                // jars carrying one library is not an overlap to report
+                RelKind::Provides if e.source == Source::JarMeta => {
+                    note_embedded(&mut embedded, &a.filename, &e);
+                }
                 RelKind::Provides => {
                     provides
                         .entry(e.target.clone())
@@ -975,6 +1068,32 @@ pub fn resolve_pack(conn: &Connection, cfg: &PackConfig) -> Result<ResolveReport
             && !loader_provided.contains(&bare(target))
             && !bridged_provided.contains(&bare(target))
     });
+    // So, last, is one a present jar embeds. The copy is in the pack, so a
+    // window it falls outside is a version issue against the jar carrying it,
+    // the way it would be against a standalone copy, rather than a missing mod.
+    let mut carried: Vec<String> = Vec::new();
+    for (target, dep) in &missing {
+        let copies = embedded_copies(conn, target, &embedded)?;
+        let Some((carrier, version)) = copies.first().copied() else {
+            continue;
+        };
+        carried.push(target.clone());
+        let range = dep.version_range.as_deref();
+        if copies.iter().any(|(_, v)| copy_fits(v.as_deref(), range)) {
+            if range.is_some() && copies.iter().all(|(_, v)| v.is_none()) {
+                unchecked += 1;
+            }
+            continue;
+        }
+        version_issues.push(VersionIssue {
+            target: target.clone(),
+            filename: carrier.clone(),
+            present_version: version.clone().unwrap_or_default(),
+            required_range: range.unwrap_or_default().to_string(),
+            needed_by: dep.needed_by.clone(),
+        });
+    }
+    missing.retain(|target, _| !carried.contains(target));
 
     // Loader eligibility (#50). A pack natively runs its own loader and whatever
     // that loader inherits from; anything else needs a bridge. A bridge is a
@@ -1242,6 +1361,160 @@ mod tests {
             Ok(id)
         })
         .unwrap()
+    }
+
+    /// Occultism requiring GeckoLib in `window`, and Ars Nouveau embedding
+    /// GeckoLib 4.2.1, with no GeckoLib jar in the pack.
+    fn embedding_pack(window: &str) -> (Registry, PackConfig) {
+        use crate::registry::model::Source;
+        let r = Registry::open_in_memory().unwrap();
+        let occultism = add_mod(&r, "occultism", "1.0", "sha_occ");
+        let ars = add_mod(&r, "ars_nouveau", "4.2.4", "sha_ars");
+        relate(
+            &r,
+            occultism,
+            "geckolib",
+            Some(window),
+            RelKind::Requires,
+            None,
+            Source::JarMeta,
+        );
+        relate(
+            &r,
+            ars,
+            "geckolib",
+            Some("4.2.1"),
+            RelKind::Provides,
+            None,
+            Source::JarMeta,
+        );
+        let cfg = config(vec![
+            declared("occultism.jar", true, cache("sha_occ")),
+            declared("ars.jar", true, cache("sha_ars")),
+        ]);
+        (r, cfg)
+    }
+
+    // A copy a present jar embeds is in the pack: the dependency is met, and
+    // the build is told to lock the jar carrying it rather than pull another.
+    #[test]
+    fn an_embedded_copy_answers_a_dependency() {
+        let (r, cfg) = embedding_pack("[4.0,)");
+        let rep = r.with_conn(|c| resolve_pack(c, &cfg)).unwrap();
+        assert!(rep.missing.is_empty(), "{:?}", rep.missing);
+        assert!(rep.version_issues.is_empty());
+        let plan = r.with_conn(|c| dependency_fill_plan(c, &cfg)).unwrap();
+        assert!(
+            plan.missing.is_empty(),
+            "nothing to pull: {:?}",
+            plan.missing
+        );
+        assert_eq!(
+            plan.requires,
+            vec![("occultism.jar".to_string(), "ars.jar".to_string())]
+        );
+    }
+
+    // Outside the requirer's window the copy is still in the pack, so the
+    // report names it as a version issue against its carrier, and the fill
+    // plan asks for a standalone build that does fit.
+    #[test]
+    fn an_embedded_copy_outside_the_window_is_a_version_issue_and_a_pull() {
+        let (r, cfg) = embedding_pack("[4.4,)");
+        let rep = r.with_conn(|c| resolve_pack(c, &cfg)).unwrap();
+        assert!(rep.missing.is_empty(), "{:?}", rep.missing);
+        assert_eq!(rep.version_issues.len(), 1);
+        let issue = &rep.version_issues[0];
+        assert_eq!(issue.filename, "ars.jar");
+        assert_eq!(issue.present_version, "4.2.1");
+        assert_eq!(issue.required_range, "[4.4,)");
+        assert_eq!(issue.needed_by, vec!["occultism.jar"]);
+        let plan = r.with_conn(|c| dependency_fill_plan(c, &cfg)).unwrap();
+        assert_eq!(
+            plan.missing
+                .iter()
+                .map(|t| t.selector.as_str())
+                .collect::<Vec<_>>(),
+            vec!["geckolib"]
+        );
+    }
+
+    // A Modrinth mod names GeckoLib by its project, and nothing in the
+    // registry owns that project when the pack only ever carried it embedded.
+    // The slug a harvest recorded for the project is what joins the two.
+    #[test]
+    fn a_modrinth_dependency_reaches_an_embedded_copy_through_the_project_slug() {
+        use crate::registry::model::Source;
+        let (r, cfg) = embedding_pack("[4.0,)");
+        let occultism = r
+            .with_conn(|c| queries::mod_id_for_alias(c, "modid", "occultism"))
+            .unwrap()
+            .unwrap();
+        r.with_conn_mut(|c| {
+            c.execute("DELETE FROM relation WHERE kind = 'requires'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        relate(
+            &r,
+            occultism,
+            "modrinth:8BmcQJ2H",
+            None,
+            RelKind::Requires,
+            None,
+            Source::Modrinth,
+        );
+        let missing = |r: &Registry| {
+            r.with_conn(|c| resolve_pack(c, &cfg))
+                .unwrap()
+                .missing
+                .into_iter()
+                .map(|m| m.target)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            missing(&r),
+            vec!["modrinth:8BmcQJ2H"],
+            "with no slug there is nothing to join on"
+        );
+        r.with_conn_mut(|c| {
+            upsert::set_modrinth_dep_slugs(
+                c,
+                &HashMap::from([("8BmcQJ2H".to_string(), "geckolib".to_string())]),
+                NOW,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(missing(&r).is_empty());
+        let plan = r.with_conn(|c| dependency_fill_plan(c, &cfg)).unwrap();
+        assert_eq!(
+            plan.requires,
+            vec![("occultism.jar".to_string(), "ars.jar".to_string())]
+        );
+    }
+
+    // Two jars embedding one library is how jar-in-jar is meant to work: the
+    // loader keeps one copy. It is not a capability overlap to report.
+    #[test]
+    fn two_jars_embedding_one_library_is_not_an_overlap() {
+        use crate::registry::model::Source;
+        let (r, mut cfg) = embedding_pack("[4.0,)");
+        let other = add_mod(&r, "iron_spells", "1.0", "sha_iron");
+        relate(
+            &r,
+            other,
+            "geckolib",
+            Some("4.2.1"),
+            RelKind::Provides,
+            None,
+            Source::JarMeta,
+        );
+        cfg.mods
+            .push(declared("iron_spells.jar", true, cache("sha_iron")));
+        let rep = r.with_conn(|c| resolve_pack(c, &cfg)).unwrap();
+        assert!(rep.overlaps.is_empty(), "{:?}", rep.overlaps);
+        assert!(rep.missing.is_empty());
     }
 
     // Two eras of one mod each hold their own spelling of the modid, and a
