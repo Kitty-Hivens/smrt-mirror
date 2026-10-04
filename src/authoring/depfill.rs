@@ -37,7 +37,7 @@ pub async fn fill_dependencies(
     // Read once, reused by every pass: the wire pass below walks the same pins
     // each time round, and a pass that adds nothing must not cost a round trip.
     // The separate version cache serves the pinned-dependency leg of the resolve.
-    let mut read: HashMap<String, MrVersion> = HashMap::new();
+    let mut read = WireReads::default();
     let versions = ModrinthCache::default();
     let mut added_total = 0;
     for _ in 0..MAX_PASSES {
@@ -99,7 +99,7 @@ async fn plan_for(
     cfg: &PackConfig,
     registry: &Arc<Registry>,
     modrinth: &Modrinth,
-    read: &mut HashMap<String, MrVersion>,
+    read: &mut WireReads,
 ) -> Result<Pass> {
     let snapshot = cfg.clone();
     let (mut plan, declared) = registry
@@ -124,6 +124,19 @@ struct Pass {
     plan: resolve::DepFillPlan,
     /// `mod_id -> the filename the pack declares it under`.
     declared: HashMap<i64, String>,
+}
+
+/// What one fill has read from Modrinth, kept across its passes. A pass that
+/// adds nothing must not cost a round trip, and a project no pass can place
+/// would otherwise be asked about once per pass.
+#[derive(Default)]
+struct WireReads {
+    /// Pinned versions, by version id.
+    versions: HashMap<String, MrVersion>,
+    /// Dependency projects asked for their slug, by project id. `None` is a
+    /// project that has none or that Modrinth did not return, so it is not
+    /// asked again in this fill either.
+    slugs: HashMap<String, Option<String>>,
 }
 
 /// One hard dependency read straight off a Modrinth version, before the mirror
@@ -156,11 +169,11 @@ async fn merge_wire_deps(
     cfg: &PackConfig,
     registry: &Arc<Registry>,
     modrinth: &Modrinth,
-    read: &mut HashMap<String, MrVersion>,
+    read: &mut WireReads,
     declared: &HashMap<i64, String>,
 ) {
-    let deps = wire_deps(cfg, registry, modrinth, read).await;
-    let providers = wire_providers(&deps, registry, declared).await;
+    let deps = wire_deps(cfg, registry, modrinth, &mut read.versions).await;
+    let providers = wire_providers(&deps, registry, modrinth, &mut read.slugs, declared).await;
     let known: HashSet<&str> = plan.missing.iter().map(|t| t.selector.as_str()).collect();
     let mut extra: Vec<resolve::MissingTarget> = Vec::new();
     for d in &deps {
@@ -203,9 +216,18 @@ async fn merge_wire_deps(
 /// of the mirror's own cache reads as absent, and what follows from that is a
 /// second copy of a mod that is already there plus a missing requires edge on
 /// the one that is.
+///
+/// A project is found by its `modrinth` alias first. A provider pinned from
+/// somewhere else carries that alias only once a harvest has linked it, which
+/// needs a harvested Modrinth mod that depends on it, and a pin just picked in
+/// the panel is exactly the one nothing has harvested yet. So a project the
+/// alias does not answer is asked for its slug, and a declared mod whose modid
+/// is that slug is the provider: the rule `write_scan` already links them by.
 async fn wire_providers(
     deps: &[WireDep],
     registry: &Arc<Registry>,
+    modrinth: &Modrinth,
+    slugs: &mut HashMap<String, Option<String>>,
     declared: &HashMap<i64, String>,
 ) -> HashMap<String, String> {
     let projects: HashSet<String> = deps.iter().map(|d| d.project_id.clone()).collect();
@@ -213,22 +235,80 @@ async fn wire_providers(
         return HashMap::new();
     }
     let ids: Vec<String> = projects.into_iter().collect();
-    let found: Vec<(String, i64)> = registry
+    let by_alias: HashMap<String, i64> = registry
         .read(move |c| {
-            let mut out = Vec::new();
+            let mut out = HashMap::new();
             for p in ids {
                 if let Some(id) = queries::mod_id_for_alias(c, "modrinth", &p)? {
-                    out.push((p, id));
+                    out.insert(p, id);
                 }
             }
             Ok(out)
         })
         .await
         .unwrap_or_default();
-    found
+    let mut found: HashMap<String, String> = by_alias
+        .iter()
+        .filter_map(|(p, id)| declared.get(id).map(|f| (p.clone(), f.clone())))
+        .collect();
+
+    // A project some mod already owns is that mod, here or not: the slug is
+    // asked only about the ones no alias names.
+    let unowned: Vec<String> = deps
+        .iter()
+        .map(|d| d.project_id.clone())
+        .filter(|p| !by_alias.contains_key(p))
+        .collect::<HashSet<_>>()
         .into_iter()
-        .filter_map(|(p, id)| declared.get(&id).map(|f| (p, f.clone())))
-        .collect()
+        .collect();
+    let unasked: Vec<String> = unowned
+        .iter()
+        .filter(|p| !slugs.contains_key(*p))
+        .cloned()
+        .collect();
+    if !unasked.is_empty() {
+        match modrinth.projects_by_ids(&unasked).await {
+            Ok(projects) => {
+                for p in unasked {
+                    let slug = projects
+                        .get(&p)
+                        .map(|proj| proj.slug.clone())
+                        .filter(|s| !s.is_empty());
+                    slugs.insert(p, slug);
+                }
+            }
+            // Not recorded, so the next pass asks again: an outage is not an
+            // answer about the project.
+            Err(e) => tracing::warn!(
+                projects = unasked.len(),
+                error = %e,
+                "could not read dependency project slugs; providers pinned elsewhere go unmatched this pass"
+            ),
+        }
+    }
+    let by_slug: Vec<(String, String)> = unowned
+        .into_iter()
+        .filter_map(|p| slugs.get(&p).cloned().flatten().map(|s| (p, s)))
+        .collect();
+    if by_slug.is_empty() {
+        return found;
+    }
+    let candidates: Vec<(String, Vec<i64>)> = registry
+        .read(move |c| {
+            let mut out = Vec::new();
+            for (p, slug) in by_slug {
+                out.push((p, queries::mod_ids_for_selector(c, &slug)?));
+            }
+            Ok(out)
+        })
+        .await
+        .unwrap_or_default();
+    for (p, ids) in candidates {
+        if let Some(f) = ids.iter().find_map(|id| declared.get(id)) {
+            found.insert(p, f.clone());
+        }
+    }
+    found
 }
 
 /// Read the required dependencies of every Modrinth pin the registry has not
@@ -1507,6 +1587,111 @@ mod tests {
             reqs.iter().map(|q| q.filename.as_str()).collect::<Vec<_>>(),
             vec!["lib-cached.jar"],
             "and the build is told to lock the copy the pack actually ships"
+        );
+    }
+
+    // The same duplicate one step earlier. The pack takes its library from
+    // CurseForge, as bytes Modrinth does not know, so the registry has the mod
+    // under its modid only: the `modrinth` alias arrives when a harvest links
+    // it, and the pin that would make the harvest do so is the one just added.
+    // Read off the wire, the dependency names a project no alias answers, and
+    // without the slug the library read as absent and a second copy was pulled.
+    #[tokio::test]
+    async fn a_wire_dependency_on_a_library_pinned_from_curseforge_is_not_pulled_again() {
+        let r = Arc::new(Registry::open_in_memory().unwrap());
+        r.with_conn_mut(|c| {
+            let curios = upsert::upsert_mod_by_alias(c, &[("modid", "curios")], NOW)?;
+            upsert::upsert_mod_version(
+                c,
+                curios,
+                "5.2.0-beta.3",
+                &["forge"],
+                &sha("sha_curios_cf"),
+                10,
+                Some("curios-forge-5.2.0-beta.3.jar"),
+                None,
+                NOW,
+            )?;
+            upsert::set_curseforge_file(
+                c,
+                &sha("sha_curios_cf"),
+                1,
+                Some(&crate::authoring::curseforge::Match {
+                    project_id: 309927,
+                    file_id: 4590487,
+                    display_name: "Curios 5.2.0-beta.3".into(),
+                    file_name: "curios-forge-5.2.0-beta.3.jar".into(),
+                    download_url: None,
+                    game_versions: vec![],
+                }),
+                NOW,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let pin = version_json(
+            "PROJ_OCC",
+            "VER_OCC",
+            "occultism.jar",
+            r#"{"project_id":"PROJ_CURIOS","version_id":"VER_CURIOS","dependency_type":"required"}"#,
+        );
+        // what a pull would take, so a regression pulls rather than failing quietly
+        let newer = version_json("PROJ_CURIOS", "VER_CURIOS", "curios-5.14.1.jar", "");
+        let base = stub_modrinth(vec![
+            ("/v2/versions".to_string(), format!("[{pin}]")),
+            (
+                "/v2/projects".to_string(),
+                r#"[{"id":"PROJ_CURIOS","slug":"curios","title":"Curios API","team":"t"}]"#
+                    .to_string(),
+            ),
+            (
+                "/v2/project/PROJ_CURIOS/version/VER_CURIOS".to_string(),
+                newer,
+            ),
+        ])
+        .await;
+        let modrinth = Modrinth::with_base(&base).unwrap();
+
+        let mut c = cfg(vec![
+            DeclaredMod {
+                filename: "occultism.jar".into(),
+                default_enabled: true,
+                source: SourceDecl::Modrinth {
+                    project_id: "PROJ_OCC".into(),
+                    version_id: "VER_OCC".into(),
+                },
+                display: None,
+                slug: None,
+                pulled: false,
+            },
+            DeclaredMod {
+                filename: "curios-forge-5.2.0-beta.3.jar".into(),
+                default_enabled: true,
+                source: SourceDecl::CurseForge {
+                    project_id: 309927,
+                    file_id: 4590487,
+                },
+                display: None,
+                slug: None,
+                pulled: false,
+            },
+        ]);
+
+        let added = fill_dependencies(&mut c, &r, &modrinth, &empty_cache().1)
+            .await
+            .unwrap();
+        assert_eq!(
+            added,
+            0,
+            "the pack already ships Curios from CurseForge: {:?}",
+            c.mods.iter().map(|m| &m.filename).collect::<Vec<_>>()
+        );
+        let reqs = &c.mods[0].display.as_ref().unwrap().requires;
+        assert_eq!(
+            reqs.iter().map(|q| q.filename.as_str()).collect::<Vec<_>>(),
+            vec!["curios-forge-5.2.0-beta.3.jar"],
+            "and the requires edge points at the CurseForge row"
         );
     }
 
