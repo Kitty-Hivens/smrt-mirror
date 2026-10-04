@@ -38,7 +38,7 @@ rust-embed = "8"
 async-stream = "0.3"
 ts-rs = { version = "12", features = ["no-serde-warnings"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
-utoipa = { version = "5", features = ["preserve_order"] }
+utoipa = { version = "6", features = ["preserve_order"] }
 yrs = "0.27.3"
 base64 = "0.23.0"
 
