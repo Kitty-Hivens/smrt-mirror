@@ -23,7 +23,7 @@
     "@dagrejs/dagre": "^3.1.1",
     "@tanstack/svelte-table": "9.2.4",
     "@xyflow/svelte": "^1.7.0",
-    "bits-ui": "^2.19.3",
+    "bits-ui": "^2.19.4",
     "yjs": "^13.6.33"
   }
 }
