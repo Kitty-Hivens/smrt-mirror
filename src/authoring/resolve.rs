@@ -777,10 +777,18 @@ pub fn dependency_fill_plan(conn: &Connection, cfg: &PackConfig) -> Result<DepFi
                     // edge goes to that jar so the build locks what carries
                     // the copy. One outside the requirer's window does not:
                     // a standalone build that fits is what the pack needs.
-                    if let Some((carrier, _)) = embedded_copies(conn, &e.target, &embedded)?
-                        .into_iter()
-                        .find(|(_, v)| copy_fits(v.as_deref(), e.version_range.as_deref()))
-                    {
+                    // A copy the requirer carries itself answers it with no
+                    // edge at all, since an edge onto itself would lock the
+                    // requirer as its own dependency.
+                    let fitting: Vec<&(String, Option<String>)> =
+                        embedded_copies(conn, &e.target, &embedded)?
+                            .into_iter()
+                            .filter(|(_, v)| copy_fits(v.as_deref(), e.version_range.as_deref()))
+                            .collect();
+                    if fitting.iter().any(|(carrier, _)| *carrier == a.filename) {
+                        continue;
+                    }
+                    if let Some((carrier, _)) = fitting.first() {
                         requires.push((a.filename.clone(), carrier.clone()));
                         continue;
                     }

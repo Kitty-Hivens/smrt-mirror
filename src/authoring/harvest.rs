@@ -377,6 +377,12 @@ pub struct JarReadout {
     /// Every loader the jar serves: its own marker, plus the loaders a Fabric
     /// root reaches through jar-in-jar metadata only Forge and NeoForge read.
     pub loaders: Vec<String>,
+    /// The mods a distribution wrapper stands for, when the jar is one: no mod
+    /// of its own, no classes, only nested jars (MezzConfig's standalone build).
+    /// Such a jar is published as the mod it carries, so that mod is its
+    /// identity. Empty for every other jar, a mod embedding libraries beside its
+    /// own code included.
+    pub wrapped_modids: Vec<String>,
 }
 
 /// Open a jar's zip ONCE and derive every fact the harvest needs from it: the
@@ -395,6 +401,7 @@ pub fn read_jar(bytes: &[u8]) -> JarReadout {
         class_names: Vec::new(),
         embedded: Vec::new(),
         loaders: Vec::new(),
+        wrapped_modids: Vec::new(),
     };
     let Ok(mut zip) = zip::ZipArchive::new(std::io::Cursor::new(bytes)) else {
         return empty();
@@ -561,6 +568,19 @@ pub fn read_jar(bytes: &[u8]) -> JarReadout {
     let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
     embedded.retain(|e| seen.insert((e.modid.clone(), e.loader.clone())));
 
+    let mut wrapped_modids: Vec<String> = Vec::new();
+    if mcmod.is_none()
+        && modmeta.modid.is_none()
+        && bytecode.mod_id.is_none()
+        && class_names.is_empty()
+    {
+        for e in &embedded {
+            if !wrapped_modids.contains(&e.modid) {
+                wrapped_modids.push(e.modid.clone());
+            }
+        }
+    }
+
     JarReadout {
         loaders: served_loaders(loader.as_deref(), &jarjar_loaders),
         facts: JarFacts { loader },
@@ -571,6 +591,7 @@ pub fn read_jar(bytes: &[u8]) -> JarReadout {
         required_mixins,
         class_names,
         embedded,
+        wrapped_modids,
     }
 }
 
@@ -1717,6 +1738,8 @@ pub async fn scan(
             mm.insert(sha.clone(), r.modmeta);
             if r.mcmod_modids.len() > 1 {
                 extra.insert(sha.clone(), r.mcmod_modids);
+            } else if !r.wrapped_modids.is_empty() {
+                extra.insert(sha.clone(), r.wrapped_modids);
             }
             if let Some(info) = r.mcmod {
                 mcmod.insert(sha.clone(), info);
@@ -2044,7 +2067,8 @@ pub async fn scan(
                 .map(|i| i.modid)
                 .filter(|s| !s.is_empty())
                 .or(r.modmeta.modid)
-                .or(r.bytecode.mod_id);
+                .or(r.bytecode.mod_id)
+                .or_else(|| r.wrapped_modids.first().cloned());
             (modid, r.embedded)
         })
         .await
@@ -2103,7 +2127,12 @@ pub async fn scan(
                     .filter(|s| !s.is_empty())
                     .or_else(|| mm.and_then(|m| m.modid.clone()))
                     .or_else(|| bc.and_then(|b| b.mod_id.clone()))
-                    .or_else(|| learned_modid.get(&sha).cloned()),
+                    .or_else(|| learned_modid.get(&sha).cloned())
+                    .or_else(|| {
+                        extra_modids_by_sha
+                            .get(&sha)
+                            .and_then(|m| m.first().cloned())
+                    }),
                 extra_modids: extra_modids_by_sha.get(&sha).cloned().unwrap_or_default(),
                 version: info
                     .map(|i| i.version.clone())
@@ -3740,6 +3769,49 @@ mod tests {
             r.loaders,
             vec!["forge".to_string()],
             "a Forge jar is Forge whatever it nests"
+        );
+    }
+
+    // MezzConfig's standalone build: no metadata and no classes of its own, the
+    // mod itself nested through jar-in-jar. Published as that mod, so that mod
+    // is its identity. A jar with code of its own embedding the same thing is a
+    // mod carrying a library, and stays itself.
+    #[test]
+    fn read_jar_names_a_distribution_wrapper_by_the_mod_it_carries() {
+        use super::super::classfile::fixtures::{build_class, jar};
+        let inner = jar(&[(
+            "META-INF/neoforge.mods.toml",
+            b"modLoader=\"javafml\"\n[[mods]]\nmodId=\"mezz_config\"\nversion=\"0.7.1\"",
+        )]);
+        let listing = br#"{"jars":[{"version":{"artifactVersion":"0.7.1"},
+            "path":"META-INF/jarjar/mezz_config-1.21.1-neoforge-0.7.1.jar"}]}"#;
+        let wrapper = jar(&[
+            (
+                "META-INF/MANIFEST.MF",
+                b"Manifest-Version: 1.0\r\nFMLModType: GAMELIBRARY\r\n",
+            ),
+            ("META-INF/jarjar/metadata.json", listing),
+            (
+                "META-INF/jarjar/mezz_config-1.21.1-neoforge-0.7.1.jar",
+                &inner,
+            ),
+        ]);
+        let r = read_jar(&wrapper);
+        assert_eq!(r.wrapped_modids, vec!["mezz_config".to_string()]);
+        assert_eq!(r.loaders, vec!["neoforge".to_string()]);
+
+        let cls = build_class("mezz/jei/Jei", &[], false, None);
+        let carrier = jar(&[
+            ("mezz/jei/Jei.class", &cls),
+            ("META-INF/jarjar/metadata.json", listing),
+            (
+                "META-INF/jarjar/mezz_config-1.21.1-neoforge-0.7.1.jar",
+                &inner,
+            ),
+        ]);
+        assert!(
+            read_jar(&carrier).wrapped_modids.is_empty(),
+            "a jar with code of its own is not a wrapper"
         );
     }
 
