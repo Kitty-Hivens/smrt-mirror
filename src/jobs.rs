@@ -447,6 +447,11 @@ async fn run_build(
     crate::authoring::loader_windows(&cfg, storage.root(), registry, modrinth)
         .await
         .apply(&mut report);
+    // Modrinth lists one set of dependencies for every loader a version is
+    // published for. Those with no build where their requirer runs do not apply
+    // there.
+    job.line("checking unmet Modrinth dependencies against the loader each requirer runs on");
+    crate::authoring::scope_modrinth_deps(&cfg, &mut report, registry, modrinth).await;
 
     // The gate (#108). Two findings mean the pack cannot start and stop a
     // publish; the rest are recorded onto the build. A dry run runs the same

@@ -216,6 +216,8 @@ export const ru: Dict = {
   'resolve.loaderWindowH': 'Приколотая сборка загрузчика вне окна, которое требует мод (загрузчик не стартует)',
   'resolve.loaderNeeds': 'требует {loader} {range}, в паке {pinned}',
   'resolve.bridgedBy': 'мод для {loaders}, везёт {by}',
+  'resolve.notOnLoader': 'не для этого загрузчика: {n}',
+  'resolve.notOnLoaderH': 'На Modrinth указаны как обязательные, но сборки под загрузчик требующего мода для этой версии игры нет, поэтому здесь они не требуются',
   'resolve.unchecked': 'окон версий не сравнить: {n}, пропущено',
   'resolve.forcedClient': 'принудительно клиентских: {n}',
   'resolve.forcedClientH': 'Объявленная жёсткая зависимость от клиентского мода (сборка откажется его залочить)',

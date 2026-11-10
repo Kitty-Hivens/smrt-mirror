@@ -219,6 +219,8 @@ export const en = {
   'resolve.loaderWindowH': 'The pinned loader build is outside a window a mod declares (the loader refuses to start)',
   'resolve.loaderNeeds': 'needs {loader} {range}, pack pins {pinned}',
   'resolve.bridgedBy': '{loaders} mod, carried by {by}',
+  'resolve.notOnLoader': '{n} not for this loader',
+  'resolve.notOnLoaderH': 'Listed as required on Modrinth, but has no build for the loader its requirer runs on at this game version, so it is not required here',
   'resolve.unchecked': { one: '{n} version window not comparable, left unchecked', other: '{n} version windows not comparable, left unchecked' },
   'resolve.forcedClient': '{n} forced client',
   'resolve.forcedClientH': 'Declared hard dependency on a client-side mod (the build will refuse to lock it)',

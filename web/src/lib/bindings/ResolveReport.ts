@@ -58,6 +58,14 @@ version_issues: Array<VersionIssue>,
  */
 loader_version_issues: Array<LoaderVersionIssue>, 
 /**
+ * Unmet Modrinth dependencies that do not apply where their requirer runs:
+ * the project publishes no build for that loader at the pack's game
+ * version, so they do not apply there. Moved here out of
+ * `missing` by [`super::depscope::scope_modrinth_deps`], not by
+ * [`resolve_pack`], because the answer is on Modrinth.
+ */
+not_on_loader: Array<MissingDep>, 
+/**
  * Declared artifacts this pack's loader cannot run, with nothing present to
  * bridge them -- they will not load at all (#50).
  */

@@ -65,6 +65,13 @@ pub struct ResolveReport {
     /// the same as every other fact the mirror has not looked up.
     #[serde(default)]
     pub loader_version_issues: Vec<LoaderVersionIssue>,
+    /// Unmet Modrinth dependencies that do not apply where their requirer runs:
+    /// the project publishes no build for that loader at the pack's game
+    /// version, so they do not apply there. Moved here out of
+    /// `missing` by [`super::depscope::scope_modrinth_deps`], not by
+    /// [`resolve_pack`], because the answer is on Modrinth.
+    #[serde(default)]
+    pub not_on_loader: Vec<MissingDep>,
     /// Declared artifacts this pack's loader cannot run, with nothing present to
     /// bridge them -- they will not load at all (#50).
     pub loader_mismatch: Vec<LoaderMismatch>,
@@ -1264,6 +1271,7 @@ pub fn resolve_pack(conn: &Connection, cfg: &PackConfig) -> Result<ResolveReport
         version_issues,
         // the async pass fills this one; a pure resolve has not looked
         loader_version_issues: Vec::new(),
+        not_on_loader: Vec::new(),
         loader_mismatch,
         loader_bridged,
         mixin_gaps,
