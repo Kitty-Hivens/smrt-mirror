@@ -521,8 +521,13 @@ async fn run_build(
     // has a shell on the box ran it -- so it is recorded on the manifest and in
     // this process's log, and not in the account audit trail, which is about
     // identities.
-    let mut checks =
-        registry.with_conn(|c| authoring::resolve_pack(c, &cfg).map(|r| gate::check(&r)))?;
+    let modrinth = Arc::new(Modrinth::new()?);
+    let mut report = registry.with_conn(|c| authoring::resolve_pack(c, &cfg))?;
+    authoring::loader_windows(&cfg, storage, &registry, &modrinth)
+        .await
+        .apply(&mut report);
+    authoring::scope_modrinth_deps(&cfg, &mut report, &registry, &modrinth).await;
+    let mut checks = gate::check(&report);
     for line in &checks.blocking {
         warn!("blocking: {line}");
     }
@@ -543,7 +548,6 @@ async fn run_build(
         );
     }
 
-    let modrinth = Modrinth::new()?;
     // The CLI builds the same packs the panel does, so a CurseForge pin has to
     // resolve here too. Built from the environment rather than passed in: this
     // binary has no AppState to carry one.

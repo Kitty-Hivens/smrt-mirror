@@ -25,22 +25,28 @@ use crate::registry::{Registry, queries};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-/// Version loaders that suit every mod loader: a data pack loads through any
-/// of them, and `minecraft` marks content that needs no
-/// loader at all.
-const UNIVERSAL_LOADERS: [&str; 2] = ["minecraft", "datapack"];
+/// Version loaders that do not depend on the mod loader: a data pack loads
+/// through any of them, `minecraft` marks content that needs no loader at all,
+/// and a shader pack is loaded by a shader mod whatever runs it.
+const UNIVERSAL_LOADERS: [&str; 5] = ["minecraft", "datapack", "iris", "optifine", "canvas"];
+
+/// Concurrent project lookups. A pack with unmet dependencies has a handful,
+/// and the panel waits on them.
+const LOOKUP_CONCURRENCY: usize = 6;
 
 /// Move every unmet Modrinth dependency that has no build for its requirer's
 /// loader at the pack's game version out of `missing` and into
 /// `not_on_loader`.
 ///
 /// Never fails the caller. A project Modrinth does not answer for stays
-/// missing: an outage is not evidence that the dependency does not apply.
+/// missing: an outage is not evidence that the dependency does not apply. So
+/// does one with no version at all at the pack's game version, which says
+/// nothing about loaders and may well be a dependency the pack cannot meet.
 pub async fn scope_modrinth_deps(
     cfg: &PackConfig,
     report: &mut ResolveReport,
     registry: &Arc<Registry>,
-    modrinth: &Modrinth,
+    modrinth: &Arc<Modrinth>,
 ) {
     let projects: HashSet<String> = report
         .missing
@@ -53,24 +59,39 @@ pub async fn scope_modrinth_deps(
     }
     let chain = pack_loaders(cfg, registry).await;
     let mut published: HashMap<String, HashSet<String>> = HashMap::new();
-    for project in projects {
-        match modrinth
-            .project_versions(&project, Some(&cfg.minecraft_version))
-            .await
-        {
-            Ok(versions) => {
-                let loaders = versions
-                    .into_iter()
-                    .flat_map(|v| v.loaders)
-                    .map(|l| l.to_ascii_lowercase())
-                    .collect();
-                published.insert(project, loaders);
+    let projects: Vec<String> = projects.into_iter().collect();
+    for chunk in projects.chunks(LOOKUP_CONCURRENCY) {
+        let mut set = tokio::task::JoinSet::new();
+        for project in chunk {
+            let (project, modrinth, mc) = (
+                project.clone(),
+                modrinth.clone(),
+                cfg.minecraft_version.clone(),
+            );
+            set.spawn(async move {
+                let read = modrinth.project_versions(&project, Some(&mc)).await;
+                (project, read)
+            });
+        }
+        while let Some(joined) = set.join_next().await {
+            match joined {
+                Ok((project, Ok(versions))) => {
+                    let loaders: HashSet<String> = versions
+                        .into_iter()
+                        .flat_map(|v| v.loaders)
+                        .map(|l| l.to_ascii_lowercase())
+                        .collect();
+                    if !loaders.is_empty() {
+                        published.insert(project, loaders);
+                    }
+                }
+                Ok((project, Err(e))) => tracing::warn!(
+                    project = %project,
+                    error = %format!("{e:#}"),
+                    "could not read which loaders a dependency is published for, so it stays missing"
+                ),
+                Err(e) => tracing::warn!(error = %e, "dependency loader lookup task failed"),
             }
-            Err(e) => tracing::warn!(
-                project = %project,
-                error = %format!("{e:#}"),
-                "could not read which loaders a dependency is published for; it stays missing"
-            ),
         }
     }
     let missing = std::mem::take(&mut report.missing);

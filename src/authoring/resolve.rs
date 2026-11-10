@@ -1017,6 +1017,23 @@ pub fn resolve_pack(conn: &Connection, cfg: &PackConfig) -> Result<ResolveReport
                                         version_range: e.version_range.clone(),
                                         source: e.source.as_str().to_string(),
                                     });
+                            // One entry stands for every requirer. When the first
+                            // to arrive named the project without pinning it, a
+                            // later requirer that pins it, or declares it some
+                            // other way, speaks for the entry: the loader scoping
+                            // pass may only drop it when no requirer holds it.
+                            let unpinned_modrinth =
+                                entry.source == "modrinth" && entry.version_range.is_none();
+                            let firmer = (e.source == Source::Modrinth
+                                && e.version_range.is_some())
+                                || !matches!(
+                                    e.source,
+                                    Source::Modrinth | Source::Inferred | Source::Harvested
+                                );
+                            if unpinned_modrinth && firmer {
+                                entry.version_range = e.version_range.clone();
+                                entry.source = e.source.as_str().to_string();
+                            }
                             entry.needed_by.push(a.filename.clone());
                         }
                     }
@@ -1409,6 +1426,64 @@ mod tests {
             declared("ars.jar", true, cache("sha_ars")),
         ]);
         (r, cfg)
+    }
+
+    // One missing entry stands for every requirer. A requirer that pins the
+    // project, or declares it in its own metadata, keeps the entry pinned or
+    // declared whichever requirer the pack happens to list first, so the loader
+    // scoping pass cannot drop a dependency somebody holds firmly.
+    #[test]
+    fn a_firm_requirer_speaks_for_a_merged_missing_entry() {
+        use crate::registry::model::Source;
+        let r = Registry::open_in_memory().unwrap();
+        let loose = add_mod(&r, "loose", "1.0", "sha_loose");
+        let pinning = add_mod(&r, "pinning", "1.0", "sha_pin");
+        let declaring = add_mod(&r, "declaring", "1.0", "sha_decl");
+        for (from, range, src) in [
+            (loose, None, Source::Modrinth),
+            (pinning, Some("VERSIONID"), Source::Modrinth),
+        ] {
+            relate(
+                &r,
+                from,
+                "modrinth:LIB",
+                range,
+                RelKind::Requires,
+                None,
+                src,
+            );
+        }
+        relate(
+            &r,
+            declaring,
+            "modrinth:OTHER",
+            None,
+            RelKind::Requires,
+            None,
+            Source::JarMeta,
+        );
+        relate(
+            &r,
+            loose,
+            "modrinth:OTHER",
+            None,
+            RelKind::Requires,
+            None,
+            Source::Modrinth,
+        );
+        let cfg = config(vec![
+            declared("loose.jar", true, cache("sha_loose")),
+            declared("pinning.jar", true, cache("sha_pin")),
+            declared("declaring.jar", true, cache("sha_decl")),
+        ]);
+        let rep = r.with_conn(|c| resolve_pack(c, &cfg)).unwrap();
+        let entry = |t: &str| rep.missing.iter().find(|m| m.target == t).unwrap();
+        assert_eq!(
+            entry("modrinth:LIB").version_range.as_deref(),
+            Some("VERSIONID")
+        );
+        assert_eq!(entry("modrinth:LIB").needed_by.len(), 2);
+        assert_eq!(entry("modrinth:OTHER").source, "jar-meta");
     }
 
     // A copy a present jar embeds is in the pack: the dependency is met, and
