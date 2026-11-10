@@ -722,9 +722,12 @@ pub fn dependency_fill_plan(conn: &Connection, cfg: &PackConfig) -> Result<DepFi
         }
     }
     for (a, rows) in placed.present.iter().zip(edges) {
+        // First edge per target wins, as in `resolve_pack`: the rows come
+        // ordered by confidence, so an authored `optional_dep` keeps a weaker
+        // `requires` on the same target from pulling it.
         let mut seen: HashSet<String> = HashSet::new();
         for e in rows {
-            if !seen.insert(format!("{}\x1f{}", e.kind.as_str(), e.target)) {
+            if !seen.insert(e.target.clone()) {
                 continue;
             }
             // a Recommends target the pack lacks is a curator suggestion,
@@ -1484,6 +1487,39 @@ mod tests {
         );
         assert_eq!(entry("modrinth:LIB").needed_by.len(), 2);
         assert_eq!(entry("modrinth:OTHER").source, "jar-meta");
+    }
+
+    // The per-edge escape hatch holds on the pull path too: an authored
+    // optional dependency outranks a Modrinth requires on the same target, so
+    // the fill plan does not pull what the report no longer calls missing.
+    #[test]
+    fn an_authored_optional_dep_keeps_the_fill_from_pulling() {
+        use crate::registry::model::Source;
+        let r = Registry::open_in_memory().unwrap();
+        let a = add_mod(&r, "moda", "1.0", "sha_a");
+        relate(
+            &r,
+            a,
+            "modrinth:LIB",
+            None,
+            RelKind::Requires,
+            None,
+            Source::Modrinth,
+        );
+        relate(
+            &r,
+            a,
+            "modrinth:LIB",
+            None,
+            RelKind::OptionalDep,
+            None,
+            Source::Authored,
+        );
+        let cfg = config(vec![declared("a.jar", true, cache("sha_a"))]);
+        let rep = r.with_conn(|c| resolve_pack(c, &cfg)).unwrap();
+        assert!(rep.missing.is_empty(), "{:?}", rep.missing);
+        let plan = r.with_conn(|c| dependency_fill_plan(c, &cfg)).unwrap();
+        assert!(plan.missing.is_empty(), "{:?}", plan.missing);
     }
 
     // A copy a present jar embeds is in the pack: the dependency is met, and
