@@ -377,12 +377,6 @@ pub struct JarReadout {
     /// Every loader the jar serves: its own marker, plus the loaders a Fabric
     /// root reaches through jar-in-jar metadata only Forge and NeoForge read.
     pub loaders: Vec<String>,
-    /// The mods a distribution wrapper stands for, when the jar is one: no mod
-    /// of its own, no classes, only nested jars (MezzConfig's standalone build).
-    /// Such a jar is published as the mod it carries, so that mod is its
-    /// identity. Empty for every other jar, a mod embedding libraries beside its
-    /// own code included.
-    pub wrapped_modids: Vec<String>,
 }
 
 /// Open a jar's zip ONCE and derive every fact the harvest needs from it: the
@@ -401,7 +395,6 @@ pub fn read_jar(bytes: &[u8]) -> JarReadout {
         class_names: Vec::new(),
         embedded: Vec::new(),
         loaders: Vec::new(),
-        wrapped_modids: Vec::new(),
     };
     let Ok(mut zip) = zip::ZipArchive::new(std::io::Cursor::new(bytes)) else {
         return empty();
@@ -568,16 +561,21 @@ pub fn read_jar(bytes: &[u8]) -> JarReadout {
     let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
     embedded.retain(|e| seen.insert((e.modid.clone(), e.loader.clone())));
 
-    let mut wrapped_modids: Vec<String> = Vec::new();
+    // A distribution wrapper declares no mod and carries no classes, only the
+    // mod it is published as, nested once per loader (MezzConfig's standalone
+    // build). That mod is its identity, read from the nested copy. A jar
+    // nesting several different mods stays without one: naming it after any of
+    // them would fold distinct mods into one registry identity.
     if mcmod.is_none()
         && modmeta.modid.is_none()
         && bytecode.mod_id.is_none()
         && class_names.is_empty()
+        && let Some(first) = embedded.first()
+        && embedded.iter().all(|e| e.modid == first.modid)
     {
-        for e in &embedded {
-            if !wrapped_modids.contains(&e.modid) {
-                wrapped_modids.push(e.modid.clone());
-            }
+        modmeta.modid = Some(first.modid.clone());
+        if modmeta.version.is_none() {
+            modmeta.version = embedded.iter().find_map(|e| e.version.clone());
         }
     }
 
@@ -591,7 +589,6 @@ pub fn read_jar(bytes: &[u8]) -> JarReadout {
         required_mixins,
         class_names,
         embedded,
-        wrapped_modids,
     }
 }
 
@@ -1738,8 +1735,6 @@ pub async fn scan(
             mm.insert(sha.clone(), r.modmeta);
             if r.mcmod_modids.len() > 1 {
                 extra.insert(sha.clone(), r.mcmod_modids);
-            } else if !r.wrapped_modids.is_empty() {
-                extra.insert(sha.clone(), r.wrapped_modids);
             }
             if let Some(info) = r.mcmod {
                 mcmod.insert(sha.clone(), info);
@@ -2067,8 +2062,7 @@ pub async fn scan(
                 .map(|i| i.modid)
                 .filter(|s| !s.is_empty())
                 .or(r.modmeta.modid)
-                .or(r.bytecode.mod_id)
-                .or_else(|| r.wrapped_modids.first().cloned());
+                .or(r.bytecode.mod_id);
             (modid, r.embedded)
         })
         .await
@@ -2127,12 +2121,7 @@ pub async fn scan(
                     .filter(|s| !s.is_empty())
                     .or_else(|| mm.and_then(|m| m.modid.clone()))
                     .or_else(|| bc.and_then(|b| b.mod_id.clone()))
-                    .or_else(|| learned_modid.get(&sha).cloned())
-                    .or_else(|| {
-                        extra_modids_by_sha
-                            .get(&sha)
-                            .and_then(|m| m.first().cloned())
-                    }),
+                    .or_else(|| learned_modid.get(&sha).cloned()),
                 extra_modids: extra_modids_by_sha.get(&sha).cloned().unwrap_or_default(),
                 version: info
                     .map(|i| i.version.clone())
@@ -3797,7 +3786,12 @@ mod tests {
             ),
         ]);
         let r = read_jar(&wrapper);
-        assert_eq!(r.wrapped_modids, vec!["mezz_config".to_string()]);
+        assert_eq!(r.modmeta.modid.as_deref(), Some("mezz_config"));
+        assert_eq!(
+            r.modmeta.version.as_deref(),
+            Some("0.7.1"),
+            "the version is the nested copy's"
+        );
         assert_eq!(r.loaders, vec!["neoforge".to_string()]);
 
         let cls = build_class("mezz/jei/Jei", &[], false, None);
@@ -3810,9 +3804,27 @@ mod tests {
             ),
         ]);
         assert!(
-            read_jar(&carrier).wrapped_modids.is_empty(),
+            read_jar(&carrier).modmeta.modid.is_none(),
             "a jar with code of its own is not a wrapper"
         );
+
+        // two different mods nested: naming the jar after either would fold
+        // the two into one registry identity
+        let other = jar(&[(
+            "META-INF/neoforge.mods.toml",
+            b"[[mods]]\nmodId=\"mixinextras\"\nversion=\"0.4.1\"",
+        )]);
+        let two = br#"{"jars":[
+            {"version":{"artifactVersion":"0.7.1"},"path":"META-INF/jarjar/a.jar"},
+            {"version":{"artifactVersion":"0.4.1"},"path":"META-INF/jarjar/b.jar"}]}"#;
+        let bundle = jar(&[
+            ("META-INF/jarjar/metadata.json", two),
+            ("META-INF/jarjar/a.jar", &inner),
+            ("META-INF/jarjar/b.jar", &other),
+        ]);
+        let r = read_jar(&bundle);
+        assert_eq!(r.embedded.len(), 2);
+        assert!(r.modmeta.modid.is_none(), "{:?}", r.modmeta.modid);
     }
 
     // More Enchantment Info 0.4.2: the root is a Fabric container, and the
