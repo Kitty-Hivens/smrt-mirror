@@ -117,7 +117,9 @@ pub fn scan_jar(jar_bytes: &[u8]) -> Vec<RequiredMixins> {
         if !entry.is_file() {
             continue;
         }
-        let name = entry.name().to_string();
+        let Ok(name) = entry.name().map(|n| n.into_owned()) else {
+            continue;
+        };
         let size = entry.size();
         let Ok(bytes) = read_zip_entry(&mut entry, size, &name) else {
             continue;

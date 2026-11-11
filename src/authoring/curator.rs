@@ -169,9 +169,9 @@ pub fn jar_facts(jar_bytes: &[u8]) -> JarFacts {
         if !entry.is_file() {
             continue;
         }
-        match entry.name() {
-            "mcmod.info" | "META-INF/mods.toml" => has_forge = true,
-            "fabric.mod.json" => has_fabric = true,
+        match entry.name().as_deref() {
+            Ok("mcmod.info" | "META-INF/mods.toml") => has_forge = true,
+            Ok("fabric.mod.json") => has_fabric = true,
             _ => {}
         }
     }

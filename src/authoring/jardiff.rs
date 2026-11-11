@@ -38,7 +38,10 @@ fn crc_index(bytes: &[u8]) -> Result<HashMap<String, u32>> {
         if entry.is_dir() {
             continue;
         }
-        out.insert(entry.name().to_string(), entry.crc32());
+        let Ok(name) = entry.name().map(|n| n.into_owned()) else {
+            continue;
+        };
+        out.insert(name, entry.crc32());
     }
     Ok(out)
 }

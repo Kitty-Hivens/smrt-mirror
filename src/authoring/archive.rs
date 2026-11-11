@@ -53,7 +53,9 @@ pub(super) fn extract_mods(archive_bytes: &[u8]) -> Result<Vec<DiscoveredMod>> {
         if !entry.is_file() {
             continue;
         }
-        let name = entry.name().to_string();
+        let Ok(name) = entry.name().map(|n| n.into_owned()) else {
+            continue;
+        };
         let segments: Vec<&str> = name.split('/').collect();
         let is_mod = segments.first() == Some(&"mods")
             && name.ends_with(".jar")
@@ -93,7 +95,9 @@ pub(super) fn extract_extra_assets(archive_bytes: &[u8]) -> Result<Vec<Discovere
         if !entry.is_file() {
             continue;
         }
-        let name = entry.name().to_string();
+        let Ok(name) = entry.name().map(|n| n.into_owned()) else {
+            continue;
+        };
         if name.contains("..") || name.starts_with('/') {
             warn!(path = %name, "skipping suspicious extra.zip entry");
             continue;
