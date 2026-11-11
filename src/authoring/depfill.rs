@@ -1895,6 +1895,75 @@ mod tests {
         );
     }
 
+    // The same pack after the fill had already pulled the standalone MezzConfig:
+    // the pulled jar is present and answers JEI's dependency first, which kept
+    // it reached and so kept it in the pack. The copy JEI carries answers it as
+    // well, so the pulled jar is reached by nothing and is pruned.
+    #[tokio::test]
+    async fn a_pulled_dependency_the_requirer_carries_itself_is_pruned() {
+        let r = Arc::new(Registry::open_in_memory().unwrap());
+        let jei = add_artifact(&r, "jei", "19.70.0.469", &sha("sha_jei"), "jei.jar");
+        r.with_conn_mut(|c| {
+            let mezz = upsert::upsert_mod_by_alias(
+                c,
+                &[("modid", "mezz_config"), ("modrinth", "PROJ_MEZZ")],
+                NOW,
+            )?;
+            upsert::upsert_mod_version(
+                c,
+                mezz,
+                "0.7.1",
+                &["neoforge"],
+                &sha("sha_mezz"),
+                10,
+                Some("mezz-standalone.jar"),
+                None,
+                NOW,
+            )?;
+            upsert::upsert_relation(
+                c,
+                jei,
+                None,
+                "mezz_config",
+                Some("0.6.10"),
+                RelKind::Provides,
+                None,
+                Source::JarMeta,
+                NOW,
+            )?;
+            upsert::upsert_relation(
+                c,
+                jei,
+                None,
+                "modrinth:PROJ_MEZZ",
+                None,
+                RelKind::Requires,
+                None,
+                Source::Modrinth,
+                NOW,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let mut standalone = cache_mod("mezz-standalone.jar", &sha("sha_mezz"));
+        standalone.pulled = true;
+        let mut c = cfg(vec![cache_mod("jei.jar", &sha("sha_jei")), standalone]);
+        let modrinth = Modrinth::with_base("http://127.0.0.1:9").unwrap();
+        let (_tmp, store) = cache_holding(&["sha_jei", "sha_mezz"]).await;
+
+        fill_dependencies(&mut c, &r, &modrinth, &store)
+            .await
+            .unwrap();
+        assert_eq!(
+            c.mods
+                .iter()
+                .map(|m| m.filename.as_str())
+                .collect::<Vec<_>>(),
+            vec!["jei.jar"],
+            "the pulled standalone is pruned"
+        );
+    }
+
     // Upstream sometimes publishes a version whose jar never landed (metadata
     // listed, `files` empty). Pinning one only fails at build time, so it is not
     // a candidate however new it is.

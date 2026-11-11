@@ -887,6 +887,12 @@ pub fn dependency_fill_plan(conn: &Connection, cfg: &PackConfig) -> Result<DepFi
     let mut requires: Vec<(String, String)> = Vec::new();
     let mut suggested: BTreeSet<String> = BTreeSet::new();
     // Read up front: a provider may come after the mod that needs it.
+    let pulled: HashSet<&str> = cfg
+        .mods
+        .iter()
+        .filter(|m| m.pulled)
+        .map(|m| m.filename.as_str())
+        .collect();
     let chain = queries::loader_chain(conn, &cfg.loader.name)?;
     let edges: Vec<Vec<RelationRow>> = placed
         .present
@@ -960,7 +966,29 @@ pub fn dependency_fill_plan(conn: &Connection, cfg: &PackConfig) -> Result<DepFi
                 // lock it as its own requirement
                 Some((id, _)) if id == a.mod_id => {}
                 Some((_, bi)) => {
-                    requires.push((a.filename.clone(), placed.present[bi].filename.clone()))
+                    let provider = &placed.present[bi].filename;
+                    // A pulled jar is there only to answer a dependency. When a
+                    // copy the pack's own jars carry answers it as well, the
+                    // edge goes to that copy, so the pulled jar is reached by
+                    // nothing and the fill prunes it.
+                    if pulled.contains(provider.as_str()) {
+                        let fitting: Vec<&(String, Option<String>)> =
+                            embedded_copies(conn, &e.target, &embedded)?
+                                .into_iter()
+                                .filter(|(carrier, v)| {
+                                    !pulled.contains(carrier.as_str())
+                                        && copy_fits(v.as_deref(), e.version_range.as_deref())
+                                })
+                                .collect();
+                        if fitting.iter().any(|(carrier, _)| *carrier == a.filename) {
+                            continue;
+                        }
+                        if let Some((carrier, _)) = fitting.first() {
+                            requires.push((a.filename.clone(), carrier.clone()));
+                            continue;
+                        }
+                    }
+                    requires.push((a.filename.clone(), provider.clone()))
                 }
                 None => {
                     if let Some(pid) = e.target.strip_prefix("modrinth:")
