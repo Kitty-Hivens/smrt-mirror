@@ -437,7 +437,9 @@ fn read_jar_at(bytes: &[u8], nest: bool) -> JarReadout {
         if !entry.is_file() {
             continue;
         }
-        let name = entry.name().to_string();
+        let Ok(name) = entry.name().map(|n| n.into_owned()) else {
+            continue;
+        };
         let size = entry.size();
         if name.ends_with(".class") {
             // A jar shipping the runtime classes loose (`scala/...`,

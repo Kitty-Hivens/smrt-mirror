@@ -27,7 +27,7 @@ thiserror = "2"
 time = { version = "0.3", features = ["formatting"] }
 clap = { version = "4", features = ["derive"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 sha1 = "0.11"
 hex = "0.4"
 rand = "0.8"

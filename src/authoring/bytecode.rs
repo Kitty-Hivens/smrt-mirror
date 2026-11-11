@@ -262,7 +262,9 @@ fn scan_signals(jar_bytes: &[u8]) -> JarSignals {
         if !entry.is_file() {
             continue;
         }
-        let name = entry.name().to_string();
+        let Ok(name) = entry.name().map(|n| n.into_owned()) else {
+            continue;
+        };
         if is_mixin_config_name(&name) {
             signals.mixin_configs += 1;
         }
@@ -399,7 +401,9 @@ fn read_classes(jar_bytes: &[u8]) -> Vec<ClassInfo> {
         if !entry.is_file() {
             continue;
         }
-        let name = entry.name().to_string();
+        let Ok(name) = entry.name().map(|n| n.into_owned()) else {
+            continue;
+        };
         if !name.ends_with(".class") {
             continue;
         }
