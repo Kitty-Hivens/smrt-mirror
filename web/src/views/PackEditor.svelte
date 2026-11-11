@@ -325,6 +325,8 @@
   // resolve the saved config against the registry dependency graph
   let resolving = $state(false);
   let resReport = $state<ResolveReport | null>(null);
+  // recompute the pulled dependencies of the saved config
+  let refilling = $state(false);
 
   // published build versions, for "revert config to build" (config edits autosave
   // with no undo, so the last built state is the recovery point). The picker is an
@@ -877,6 +879,47 @@
       resReport = null;
     } finally {
       resolving = false;
+    }
+  }
+
+  // A save fills dependencies only when the declared mods change, so what the
+  // registry has learned since -- a library a declared jar turns out to carry,
+  // a build whose own code settles a dependency -- reaches the pack only when
+  // someone asks. Like resolving, it works on the saved config, so a pending
+  // save goes first.
+  async function onRefill() {
+    if (!cfg) return;
+    refilling = true;
+    try {
+      const s = sig();
+      if (s !== lastSig) {
+        clearTimeout(saveTimer);
+        await doSave(s);
+        if (saveState === 'error' || saveState === 'conflict') return;
+      }
+      const before = new Set(cfg.mods.filter((m) => m.pulled).map((m) => m.filename));
+      const { config } = await api.fillPackDependencies(packId, rev);
+      const after = config.mods.filter((m) => m.pulled).map((m) => m.filename);
+      const added = after.filter((f) => !before.has(f));
+      const dropped = [...before].filter((f) => !after.includes(f));
+      // the mirror settled the document to write this, so the editor rejoins
+      // rather than carrying on against a session that is gone
+      await load();
+      toasts.push({
+        kind: 'info',
+        text:
+          added.length || dropped.length
+            ? t('pe.refilled', { added: added.length, dropped: dropped.length })
+            : t('pe.refilledNone'),
+        detail:
+          [...dropped.map((f) => `- ${f}`), ...added.map((f) => `+ ${f}`)].join(', ') ||
+          undefined,
+      });
+      if (resReport) resReport = await api.resolvePack(packId);
+    } catch (x) {
+      fail(x);
+    } finally {
+      refilling = false;
     }
   }
 
@@ -1485,6 +1528,11 @@
             <button class="sm" onclick={onResolve} disabled={resolving} title={t('resolve.hint')}>
               {resolving ? t('resolve.resolving') : t('resolve.resolve')}
             </button>
+            {#if canEdit}
+              <button class="sm" onclick={onRefill} disabled={refilling} title={t('pe.refillHint')}>
+                {refilling ? t('pe.refilling') : t('pe.refill')}
+              </button>
+            {/if}
             <label class="sm valbtn">
               {validating ? t('pe.validating') : t('pe.validate')}
               <input type="file" accept=".zip" onchange={onValidate} disabled={validating} hidden />
