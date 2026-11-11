@@ -464,6 +464,15 @@ fn build_edges(
         if owned.is_empty() {
             continue;
         }
+        // The bytecode pass drops references into the requirer's own packages,
+        // so where the two share a prefix (one author's namespace) a reference
+        // to the target would not show: no evidence either way.
+        if owned
+            .iter()
+            .any(|o| build.owned.iter().any(|mine| package_hit(o, mine)))
+        {
+            continue;
+        }
         if build
             .refs
             .iter()
@@ -478,24 +487,32 @@ fn build_edges(
             .iter()
             .find(|(name, _, _)| name.eq_ignore_ascii_case(lang));
         let modid = known.map_or(lang, |(_, m, _)| *m).to_string();
+        let provider = selector_present(conn, &modid, by_mod_id)?;
+        // Kotlin for Forge's own mod loads through the language it provides.
+        let is_provider = provider.is_some_and(|(id, _)| id == a.mod_id);
         let target = match known {
-            Some((_, _, project)) if selector_present(conn, &modid, by_mod_id)?.is_none() => {
-                format!("modrinth:{project}")
-            }
+            Some((_, _, project)) if provider.is_none() => format!("modrinth:{project}"),
             _ => modid,
         };
-        let already = rows
-            .iter()
-            .any(|e| e.kind == RelKind::Requires && e.target == target);
-        if !already {
-            rows.push(RelationRow {
-                target,
-                version_range: None,
-                kind: RelKind::Requires,
-                severity: None,
-                source: Source::JarMeta,
-                confidence: BUILD_DEP_RANK,
-            });
+        if !is_provider {
+            // One edge per target is read, so a softer one already there would
+            // win over this. The loader's word outranks Modrinth's, and only
+            // the operator's own edge outranks the loader.
+            match rows.iter_mut().find(|e| e.target == target) {
+                Some(e) if matches!(e.source, Source::Authored | Source::Curator) => {}
+                Some(e) if matches!(e.kind, RelKind::OptionalDep | RelKind::Recommends) => {
+                    e.kind = RelKind::Requires;
+                }
+                Some(_) => {}
+                None => rows.push(RelationRow {
+                    target,
+                    version_range: None,
+                    kind: RelKind::Requires,
+                    severity: None,
+                    source: Source::JarMeta,
+                    confidence: BUILD_DEP_RANK,
+                }),
+            }
         }
     }
     Ok(rows)
@@ -939,6 +956,9 @@ pub fn dependency_fill_plan(conn: &Connection, cfg: &PackConfig) -> Result<DepFi
                 }
             }
             match hit {
+                // a mod answering its own dependency needs no edge, which would
+                // lock it as its own requirement
+                Some((id, _)) if id == a.mod_id => {}
                 Some((_, bi)) => {
                     requires.push((a.filename.clone(), placed.present[bi].filename.clone()))
                 }
@@ -1014,9 +1034,15 @@ pub fn pack_graph(conn: &Connection, cfg: &PackConfig) -> Result<GraphData> {
         }
     }
 
+    let mut by_mod_id: HashMap<i64, usize> = HashMap::new();
+    for (i, p) in present.iter().enumerate() {
+        by_mod_id.entry(p.mod_id).or_insert(i);
+    }
+    let chain = queries::loader_chain(conn, &cfg.loader.name)?;
     let mut edges = Vec::new();
     for p in &present {
-        for e in queries::relations_for_artifact(conn, p.mod_version_id.unwrap_or(-1), p.mod_id)? {
+        let rows = queries::relations_for_artifact(conn, p.mod_version_id.unwrap_or(-1), p.mod_id)?;
+        for e in build_edges(conn, p, rows, &chain, &by_mod_id)? {
             let to = queries::mod_ids_for_selector(conn, &e.target)?
                 .into_iter()
                 .find(|t| in_pack.contains(t));
@@ -1730,6 +1756,68 @@ mod tests {
         cfg.loader.name = "fabric".into();
         let (report, _) = missing_targets(&r, &cfg);
         assert!(report.contains(&"modrinth:PT".to_string()), "{report:?}");
+    }
+
+    // Two mods of one author share a package root, and the bytecode pass drops
+    // references into the requirer's own packages: no evidence, Modrinth stands.
+    #[test]
+    fn a_target_sharing_the_requirers_packages_is_not_relaxed() {
+        let (r, cfg) = mei_pack(&["kotlin"], &["settingdust"]);
+        let (report, _) = missing_targets(&r, &cfg);
+        assert!(report.contains(&"modrinth:PT".to_string()), "{report:?}");
+    }
+
+    // The language loader outranks a softer edge Modrinth lists for the same
+    // provider, and a provider's own build names no dependency on itself.
+    #[test]
+    fn the_language_loader_is_hard_and_never_points_at_its_provider() {
+        use crate::registry::model::{BuildFacts, Source};
+        let r = Registry::open_in_memory().unwrap();
+        let m = add_mod_for(&r, "mymod", "sha_m", &["neoforge"]);
+        add_mod_for(&r, "kotlinforforge", "sha_kff", &["neoforge"]);
+        r.with_conn_mut(|c| {
+            for (sha, lang) in [("sha_m", "klf"), ("sha_kff", "kotlinforforge")] {
+                upsert::set_artifact_builds(
+                    c,
+                    sha,
+                    &[BuildFacts {
+                        loader: "neoforge".into(),
+                        language: Some(lang.into()),
+                        ..BuildFacts::default()
+                    }],
+                    NOW,
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        relate(
+            &r,
+            m,
+            "modrinth:1vrSzlao",
+            None,
+            RelKind::OptionalDep,
+            None,
+            Source::Modrinth,
+        );
+        let mut cfg = config(vec![
+            declared("m.jar", true, cache("sha_m")),
+            declared("kff.jar", true, cache("sha_kff")),
+        ]);
+        cfg.loader.name = "neoforge".into();
+        let plan = r.with_conn(|c| dependency_fill_plan(c, &cfg)).unwrap();
+        assert!(
+            plan.missing
+                .iter()
+                .any(|t| t.selector == "modrinth:1vrSzlao"),
+            "{:?}",
+            plan.missing
+        );
+        assert!(
+            !plan.requires.iter().any(|(a, b)| a == b),
+            "{:?}",
+            plan.requires
+        );
     }
 
     // A KotlinLangForge the pack already ships, from any publisher, answers
