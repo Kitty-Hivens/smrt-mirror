@@ -643,6 +643,33 @@ pub fn set_artifact_embedded(
     Ok(())
 }
 
+/// Record the builds a jar carries, replacing what an earlier read recorded.
+/// An empty list is written as the negative row, so a jar with no build reads
+/// as read rather than as never opened.
+pub fn set_artifact_builds(
+    conn: &Connection,
+    sha1: &str,
+    builds: &[crate::registry::model::BuildFacts],
+    now: &str,
+) -> Result<()> {
+    conn.execute("DELETE FROM artifact_build WHERE sha1 = ?1", params![sha1])?;
+    if builds.is_empty() {
+        conn.execute(
+            "INSERT INTO artifact_build (sha1, loader, facts, read_at) VALUES (?1, '', '{}', ?2)",
+            params![sha1, now],
+        )?;
+        return Ok(());
+    }
+    for b in builds {
+        conn.execute(
+            "INSERT OR REPLACE INTO artifact_build (sha1, loader, facts, read_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![sha1, b.loader, serde_json::to_string(b)?, now],
+        )?;
+    }
+    Ok(())
+}
+
 /// Record the slug of each Modrinth project a dependency names that no mod
 /// owns, as this harvest read it.
 pub fn set_modrinth_dep_slugs(

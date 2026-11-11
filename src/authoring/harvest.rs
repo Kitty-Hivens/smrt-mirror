@@ -24,7 +24,7 @@ use super::curseforge::{self, CurseForge, FileInfo};
 use super::mixinscan;
 use super::modmeta;
 use super::modrinth::{Modrinth, Project};
-use crate::registry::model::{EmbeddedMod, RelKind, Severity, Source};
+use crate::registry::model::{BuildFacts, EmbeddedMod, RelKind, Severity, Source};
 use crate::registry::{Registry, queries, upsert};
 use crate::storage::Storage;
 use anyhow::Result;
@@ -109,6 +109,9 @@ pub struct JarSeed {
     pub embedded: Option<Vec<EmbeddedMod>>,
     /// Whether `embedded` was read in this pass, and so is to be recorded.
     pub embedded_read: bool,
+    /// The jar's builds, when this pass read the jar. `None` leaves what an
+    /// earlier read recorded in place.
+    pub builds: Option<Vec<BuildFacts>>,
 }
 
 /// One Modrinth version dependency as the seed carries it: the target project
@@ -377,6 +380,10 @@ pub struct JarReadout {
     /// Every loader the jar serves: its own marker, plus the loaders a Fabric
     /// root reaches through jar-in-jar metadata only Forge and NeoForge read.
     pub loaders: Vec<String>,
+    /// One per loader: what the jar's build for that loader declares and what
+    /// its code references. The jar itself when it has code, otherwise the
+    /// builds it nests.
+    pub builds: Vec<BuildFacts>,
 }
 
 /// Open a jar's zip ONCE and derive every fact the harvest needs from it: the
@@ -385,6 +392,12 @@ pub struct JarReadout {
 /// several separate zip opens per jar. Best-effort -- a non-zip or truncated
 /// jar yields empty facts.
 pub fn read_jar(bytes: &[u8]) -> JarReadout {
+    read_jar_at(bytes, true)
+}
+
+/// [`read_jar`], reading nested builds only when `nest` is set, so a nested
+/// jar is read for its own build and no deeper.
+fn read_jar_at(bytes: &[u8], nest: bool) -> JarReadout {
     let empty = || JarReadout {
         facts: JarFacts::default(),
         bytecode: bytecode::JarBytecode::default(),
@@ -395,6 +408,7 @@ pub fn read_jar(bytes: &[u8]) -> JarReadout {
         class_names: Vec::new(),
         embedded: Vec::new(),
         loaders: Vec::new(),
+        builds: Vec::new(),
     };
     let Ok(mut zip) = zip::ZipArchive::new(std::io::Cursor::new(bytes)) else {
         return empty();
@@ -528,10 +542,25 @@ pub fn read_jar(bytes: &[u8]) -> JarReadout {
     // whatever happens to sit in the directory beside it.
     let mut embedded: Vec<EmbeddedMod> = Vec::new();
     let mut jarjar_loaders: Vec<String> = Vec::new();
+    // A jar with no code of its own is a container: the builds it nests are
+    // its builds. A jar with code is its own build, and what it nests are
+    // libraries it carries.
+    let container = nest && class_names.is_empty();
+    let mut nested_builds: Vec<BuildFacts> = Vec::new();
     let mut nested = |path: &str, listed_version: Option<&str>| -> Option<EmbeddedMod> {
         let mut entry = zip.by_name(path).ok()?;
         let size = entry.size();
         let raw = read_zip_entry(&mut entry, size, path).ok()?;
+        if container {
+            let inner = read_jar_at(&raw, false);
+            if let Some(b) = build_of(
+                inner.facts.loader.as_deref(),
+                &inner.modmeta,
+                &inner.bytecode,
+            ) {
+                nested_builds.push(b);
+            }
+        }
         read_nested(&raw, listed_version)
     };
     for (path, listed_version) in jarjar_meta
@@ -561,6 +590,22 @@ pub fn read_jar(bytes: &[u8]) -> JarReadout {
     let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
     embedded.retain(|e| seen.insert((e.modid.clone(), e.loader.clone())));
 
+    let mut builds: Vec<BuildFacts> = Vec::new();
+    if nest {
+        let own = build_of(loader.as_deref(), &modmeta, &bytecode).filter(|b| {
+            !class_names.is_empty()
+                || !b.requires.is_empty()
+                || !b.optional.is_empty()
+                || b.language.is_some()
+        });
+        for b in own.into_iter().chain(nested_builds) {
+            match builds.iter_mut().find(|x| x.loader == b.loader) {
+                Some(x) => x.merge(b),
+                None => builds.push(b),
+            }
+        }
+    }
+
     // A distribution wrapper declares no mod and carries no classes, only the
     // mod it is published as, nested once per loader (MezzConfig's standalone
     // build). That mod is its identity, read from the nested copy. A jar
@@ -589,7 +634,33 @@ pub fn read_jar(bytes: &[u8]) -> JarReadout {
         required_mixins,
         class_names,
         embedded,
+        builds,
     }
+}
+
+/// One build's dependency facts: what its manifest declares and what its code
+/// owns and references. `None` for a jar with no loader marker, which is no
+/// build of anything.
+fn build_of(
+    loader: Option<&str>,
+    meta: &modmeta::ModMeta,
+    bc: &bytecode::JarBytecode,
+) -> Option<BuildFacts> {
+    let pick = |kind: RelKind| -> Vec<String> {
+        meta.deps
+            .iter()
+            .filter(|d| d.kind == kind)
+            .map(|d| d.modid.clone())
+            .collect()
+    };
+    Some(BuildFacts {
+        loader: loader?.to_string(),
+        requires: pick(RelKind::Requires),
+        optional: pick(RelKind::OptionalDep),
+        language: meta.language_loader.clone(),
+        owned: bc.owned.iter().cloned().collect(),
+        refs: bc.hard_refs.iter().cloned().collect(),
+    })
 }
 
 /// Where a Forge or NeoForge jar lists its jar-in-jar.
@@ -776,6 +847,9 @@ pub fn write_scan(conn: &Connection, scan: &ScanData, now: &str) -> Result<Harve
             && let Some(embedded) = &jar.embedded
         {
             upsert::set_artifact_embedded(conn, &jar.sha1, embedded, now)?;
+        }
+        if let Some(builds) = &jar.builds {
+            upsert::set_artifact_builds(conn, &jar.sha1, builds, now)?;
         }
         if let Some(kind) = jar.kind.as_deref() {
             upsert::set_jar_class(
@@ -1601,6 +1675,8 @@ pub struct Known<'a> {
     /// What each jar a harvest has opened for it embeds, by sha1. A key is a
     /// jar read, an empty list one that embeds nothing.
     pub embedded: &'a HashMap<String, Vec<EmbeddedMod>>,
+    /// Jars whose builds a harvest has recorded.
+    pub builds: &'a HashSet<String>,
 }
 
 /// Scan the storage tree + Modrinth into a [ScanData]. Async (FS reads + one
@@ -1620,6 +1696,7 @@ pub async fn scan(
         github_read,
         modrinth_files,
         embedded: known_embedded,
+        builds: known_builds,
     } = known;
     let inventory = storage.list_cache_inventory().await.map_err(ae)?;
     let mut size_by_sha: HashMap<String, i64> = inventory
@@ -1700,10 +1777,12 @@ pub async fn scan(
         readout_by_sha,
         fingerprint_by_sha,
         mut embedded_by_sha,
+        mut builds_by_sha,
     ) = tokio::task::spawn_blocking(move || {
         let mut mcmod: HashMap<String, McModInfo> = HashMap::new();
         let mut loaders: HashMap<String, Vec<String>> = HashMap::new();
         let mut embedded: HashMap<String, Vec<EmbeddedMod>> = HashMap::new();
+        let mut builds: HashMap<String, Vec<BuildFacts>> = HashMap::new();
         let mut bc: HashMap<String, bytecode::JarBytecode> = HashMap::new();
         let mut mm: HashMap<String, modmeta::ModMeta> = HashMap::new();
         let mut extra: HashMap<String, Vec<String>> = HashMap::new();
@@ -1731,6 +1810,7 @@ pub async fn scan(
             );
             loaders.insert(sha.clone(), r.loaders);
             embedded.insert(sha.clone(), r.embedded);
+            builds.insert(sha.clone(), r.builds);
             bc.insert(sha.clone(), r.bytecode);
             mm.insert(sha.clone(), r.modmeta);
             if r.mcmod_modids.len() > 1 {
@@ -1749,6 +1829,7 @@ pub async fn scan(
             readouts,
             fingerprints,
             embedded,
+            builds,
         )
     })
     .await
@@ -2043,6 +2124,7 @@ pub async fn scan(
         .filter(|(sha, v)| {
             !known_modid_projects.contains(&v.project_id)
                 || !known_embedded.contains_key(sha.as_str())
+                || !known_builds.contains(sha.as_str())
         })
         .filter_map(|(sha, v)| v.primary_file().map(|f| (sha.clone(), f.url.clone())))
         .collect();
@@ -2055,7 +2137,7 @@ pub async fn scan(
                 continue;
             }
         };
-        let (modid, embedded) = tokio::task::spawn_blocking(move || {
+        let (modid, embedded, builds) = tokio::task::spawn_blocking(move || {
             let r = read_jar(&bytes);
             let modid = r
                 .mcmod
@@ -2063,7 +2145,7 @@ pub async fn scan(
                 .filter(|s| !s.is_empty())
                 .or(r.modmeta.modid)
                 .or(r.bytecode.mod_id);
-            (modid, r.embedded)
+            (modid, r.embedded, r.builds)
         })
         .await
         .map_err(|e| anyhow::anyhow!("modid read task: {e}"))?;
@@ -2076,6 +2158,7 @@ pub async fn scan(
             }
             learned_modid.insert(sha.clone(), modid);
         }
+        builds_by_sha.insert(sha.clone(), builds);
         embedded_by_sha.insert(sha, embedded);
     }
 
@@ -2226,6 +2309,7 @@ pub async fn scan(
                     .get(&sha)
                     .or_else(|| known_embedded.get(&sha))
                     .cloned(),
+                builds: builds_by_sha.remove(&sha),
                 sha1: sha,
             }
         })
@@ -2263,6 +2347,7 @@ pub async fn run_harvest(
         github_read,
         modrinth_files,
         embedded,
+        known_builds,
     ) = tokio::task::spawn_blocking(move || {
         reg.with_conn(|c| {
             Ok((
@@ -2274,6 +2359,7 @@ pub async fn run_harvest(
                 queries::github_pins_read(c)?,
                 queries::modrinth_version_files(c)?,
                 queries::artifact_embedded_all(c)?,
+                queries::artifact_build_shas(c)?,
             ))
         })
     })
@@ -2295,6 +2381,7 @@ pub async fn run_harvest(
             github_read: &github_read,
             modrinth_files: &modrinth_files,
             embedded: &embedded,
+            builds: &known_builds,
         },
     )
     .await?;
@@ -2440,6 +2527,7 @@ mod tests {
                     provides_runtime: vec![],
                     embedded: None,
                     embedded_read: false,
+                    builds: None,
                 },
                 JarSeed {
                     sha1: "sha_b".into(),
@@ -2473,6 +2561,7 @@ mod tests {
                     provides_runtime: vec![],
                     embedded: None,
                     embedded_read: false,
+                    builds: None,
                 },
                 JarSeed {
                     sha1: "sha_noid".into(),
@@ -2506,6 +2595,7 @@ mod tests {
                     provides_runtime: vec![],
                     embedded: None,
                     embedded_read: false,
+                    builds: None,
                 },
             ],
             packs: vec![PackSeed {
@@ -2921,6 +3011,7 @@ mod tests {
             provides_runtime: vec![],
             embedded: None,
             embedded_read: false,
+            builds: None,
         }
     }
 
@@ -2966,6 +3057,7 @@ mod tests {
             provides_runtime: vec![],
             embedded: None,
             embedded_read: false,
+            builds: None,
         }
     }
 
@@ -3827,6 +3919,58 @@ mod tests {
         assert!(r.modmeta.modid.is_none(), "{:?}", r.modmeta.modid);
     }
 
+    // More Enchantment Info 0.4.2: the container has no code, so its builds
+    // are the ones it nests, one per loader. The NeoForge build loads through
+    // `klf`, names Preloading Tricks optional and never references it.
+    #[test]
+    fn read_jar_takes_a_containers_builds_from_what_it_nests() {
+        use super::super::classfile::fixtures::{build_class, jar};
+        let neo_class = build_class(
+            "settingdust/mei/neoforge/Entry",
+            &["dev/foreign/api/Thing"],
+            false,
+            None,
+        );
+        let neo = jar(&[
+            ("settingdust/mei/neoforge/Entry.class", &neo_class),
+            (
+                "META-INF/neoforge.mods.toml",
+                b"modLoader = \"klf\"\n[[mods]]\nmodId=\"more_enchantment_info\"\n[[dependencies.more_enchantment_info]]\nmodId=\"preloading_tricks\"\ntype=\"optional\"",
+            ),
+        ]);
+        let fabric = jar(&[(
+            "fabric.mod.json",
+            br#"{"schemaVersion":1,"id":"more_enchantment_info","depends":{"fabric-api":"*"}}"#,
+        )]);
+        let root = br#"{"schemaVersion":1,"id":"more_enchantment_info_container",
+            "jars":[{"file":"META-INF/jars/fabric.jar"}]}"#;
+        let listing = br#"{"jars":[{"path":"META-INF/jars/neo.jar"}]}"#;
+        let bytes = jar(&[
+            ("fabric.mod.json", root),
+            ("META-INF/jarjar/metadata.json", listing),
+            ("META-INF/jars/fabric.jar", &fabric),
+            ("META-INF/jars/neo.jar", &neo),
+        ]);
+        let r = read_jar(&bytes);
+        let build = |l: &str| r.builds.iter().find(|b| b.loader == l).unwrap();
+        let neo = build("neoforge");
+        assert_eq!(neo.language.as_deref(), Some("klf"));
+        assert_eq!(neo.optional, vec!["preloading_tricks".to_string()]);
+        assert!(neo.requires.is_empty());
+        assert!(
+            neo.refs.iter().any(|p| p.starts_with("dev/foreign")),
+            "{:?}",
+            neo.refs
+        );
+        assert!(!neo.owned.is_empty());
+        assert_eq!(build("fabric").requires, vec!["fabric-api".to_string()]);
+        assert_eq!(
+            r.builds.len(),
+            2,
+            "the code-less root is no build of its own"
+        );
+    }
+
     // More Enchantment Info 0.4.2: the root is a Fabric container, and the
     // same mod is nested once per loader. Fabric loads its build through the
     // root's `jars`, Forge and NeoForge theirs through jar-in-jar metadata, so
@@ -3949,6 +4093,50 @@ mod tests {
             vec![("geckolib".to_string(), Some("4.2.1".to_string()))],
             "the per-artifact rewrite brings the edge back from the record"
         );
+    }
+
+    // A jar's builds are recorded when this pass read it, and a later pass that
+    // did not open it again leaves the record alone. A jar with no build is
+    // recorded as read, so a Modrinth pin is not fetched again to find that out.
+    #[test]
+    fn write_scan_records_builds_and_keeps_them_across_harvests() {
+        let r = Registry::open_in_memory().unwrap();
+        let mut mei = jar(
+            "sha_mei",
+            "more_enchantment_info",
+            Some("0.4.2"),
+            vec!["neoforge".into()],
+        );
+        mei.builds = Some(vec![BuildFacts {
+            loader: "neoforge".into(),
+            optional: vec!["preloading_tricks".into()],
+            language: Some("klf".into()),
+            ..BuildFacts::default()
+        }]);
+        let mut bare = jar("sha_bare", "bare", Some("1"), vec!["neoforge".into()]);
+        bare.builds = Some(vec![]);
+        let scan_of = |jars: Vec<JarSeed>| ScanData {
+            jars,
+            packs: vec![],
+            curseforge: HashMap::new(),
+            modrinth_modids_learned: 0,
+            dep_project_slugs: Default::default(),
+            project_envs: Default::default(),
+            github: Vec::new(),
+            modrinth_leg_ok: true,
+        };
+        r.with_txn(|c| write_scan(c, &scan_of(vec![mei.clone(), bare]), "T0"))
+            .unwrap();
+        let builds = |sha: &str| r.with_conn(|c| queries::artifact_builds(c, sha)).unwrap();
+        assert_eq!(builds("sha_mei")[0].language.as_deref(), Some("klf"));
+        assert!(builds("sha_bare").is_empty());
+        let read = r.with_conn(queries::artifact_build_shas).unwrap();
+        assert!(read.contains("sha_mei") && read.contains("sha_bare"));
+
+        mei.builds = None;
+        r.with_txn(|c| write_scan(c, &scan_of(vec![mei]), "T1"))
+            .unwrap();
+        assert_eq!(builds("sha_mei").len(), 1, "not read this pass, kept");
     }
 
     // #1: two distinct jars of one mod with no version metadata both become
