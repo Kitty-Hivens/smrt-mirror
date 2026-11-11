@@ -21,6 +21,9 @@ pub struct Modrinth {
     /// without this the panel spends an upstream round trip per row -- on every
     /// render, for an answer that was already had.
     icons: Mutex<HashMap<String, (Instant, Option<String>)>>,
+    /// How long a download may go without a byte arriving before it fails.
+    /// There is no total deadline: a large jar on a slow link takes long.
+    stall: Duration,
 }
 
 /// How long a remembered icon url is trusted. Long, because the cost of being
@@ -80,6 +83,7 @@ impl Modrinth {
             http,
             base: base.to_string(),
             icons: Mutex::new(HashMap::new()),
+            stall: Duration::from_secs(60),
         })
     }
 
@@ -418,7 +422,14 @@ impl Modrinth {
         // cap the response so a huge or malicious release asset can't OOM the
         // mirror; GitHub release downloads always send a content-length
         const MAX_BYTES: u64 = 512 * 1024 * 1024;
-        let mut resp = self.http.get(url).send().await.context("asset GET")?;
+        // An answer that stops arriving fails the fetch rather than holding the
+        // harvest that waits on it.
+        let stall = self.stall;
+        let stalled = || anyhow!("asset at {url} stalled for {}s", stall.as_secs());
+        let mut resp = tokio::time::timeout(stall, self.http.get(url).send())
+            .await
+            .map_err(|_| stalled())?
+            .context("asset GET")?;
         let status = resp.status();
         if !status.is_success() {
             return Err(anyhow!("asset HTTP {status} for {url}"));
@@ -434,7 +445,13 @@ impl Modrinth {
             ));
         }
         let mut buf: Vec<u8> = Vec::new();
-        while let Some(chunk) = resp.chunk().await.context("asset body")? {
+        loop {
+            let next = tokio::time::timeout(stall, resp.chunk())
+                .await
+                .map_err(|_| stalled())?;
+            let Some(chunk) = next.context("asset body")? else {
+                break;
+            };
             if buf.len() as u64 + chunk.len() as u64 > MAX_BYTES {
                 return Err(anyhow!(
                     "asset at {url} exceeds the {} MiB cap",
@@ -692,6 +709,30 @@ impl Version {
 
 #[cfg(test)]
 mod tests {
+    // A body that stops arriving fails the download. Without this a stalled
+    // server held the harvest, and every build waiting on it, until a restart.
+    #[tokio::test]
+    async fn a_download_that_stops_arriving_fails() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/x.jar", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await;
+            let _ = sock
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\nhalf")
+                .await;
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        let mut mr = Modrinth::with_base("http://127.0.0.1:9").unwrap();
+        mr.stall = Duration::from_millis(300);
+        let started = Instant::now();
+        let err = mr.fetch_bytes(&url).await.unwrap_err();
+        assert!(err.to_string().contains("stalled"), "{err:#}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
     use super::*;
 
     /// A client pointed at a port nothing listens on: any call that actually

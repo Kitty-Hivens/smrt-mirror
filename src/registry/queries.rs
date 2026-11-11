@@ -1904,9 +1904,12 @@ pub fn shas_read(conn: &Connection) -> Result<Vec<String>> {
     // was read before the pin was recorded: it is never fetched again, so the
     // fingerprint is never taken, so the pin row is never written, and the pack
     // that points at it resolves to nothing for good.
+    // And its builds recorded: a jar read before builds were recorded is
+    // fetched once more, or the pin stays without them for good.
     let mut stmt = conn.prepare(
-        "SELECT j.sha1 FROM jar_read j
+        "SELECT DISTINCT j.sha1 FROM jar_read j
            JOIN curseforge_file cf ON cf.sha1 = j.sha1
+           JOIN artifact_build b ON b.sha1 = j.sha1
           WHERE cf.project_id IS NOT NULL",
     )?;
     let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
@@ -1925,8 +1928,9 @@ pub fn shas_read(conn: &Connection) -> Result<Vec<String>> {
 /// `jar_read` alone leaves a pack pointing at bytes no pin maps to.
 pub fn github_pins_read(conn: &Connection) -> Result<Vec<(String, String, String)>> {
     let mut stmt = conn.prepare(
-        "SELECT g.repo, g.tag, g.asset FROM github_asset g
-           JOIN jar_read j ON j.sha1 = g.sha1",
+        "SELECT DISTINCT g.repo, g.tag, g.asset FROM github_asset g
+           JOIN jar_read j ON j.sha1 = g.sha1
+           JOIN artifact_build b ON b.sha1 = g.sha1",
     )?;
     let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
     let mut out = Vec::new();
@@ -1959,6 +1963,31 @@ pub fn artifact_embedded_all(conn: &Connection) -> Result<HashMap<String, Vec<Em
                 version,
                 loader: (!loader.is_empty()).then_some(loader),
             });
+        }
+    }
+    Ok(out)
+}
+
+/// Every sha1 a harvest has recorded builds for, read or found to have none.
+pub fn artifact_build_shas(conn: &Connection) -> Result<HashSet<String>> {
+    let mut stmt = conn.prepare("SELECT DISTINCT sha1 FROM artifact_build")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// The builds one jar carries, as the harvest recorded them. Empty for a jar
+/// never read or read and found to have none.
+pub fn artifact_builds(
+    conn: &Connection,
+    sha1: &str,
+) -> Result<Vec<crate::registry::model::BuildFacts>> {
+    let mut stmt =
+        conn.prepare("SELECT facts FROM artifact_build WHERE sha1 = ?1 AND loader != ''")?;
+    let rows = stmt.query_map(params![sha1], |r| r.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for raw in rows {
+        if let Ok(b) = serde_json::from_str(&raw?) {
+            out.push(b);
         }
     }
     Ok(out)

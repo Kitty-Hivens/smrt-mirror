@@ -65,6 +65,13 @@ pub struct ResolveReport {
     /// the same as every other fact the mirror has not looked up.
     #[serde(default)]
     pub loader_version_issues: Vec<LoaderVersionIssue>,
+    /// Unmet Modrinth dependencies that do not apply where their requirer runs:
+    /// the project publishes no build for that loader at the pack's game
+    /// version, so they do not apply there. Moved here out of
+    /// `missing` by [`super::depscope::scope_modrinth_deps`], not by
+    /// [`resolve_pack`], because the answer is on Modrinth.
+    #[serde(default)]
+    pub not_on_loader: Vec<MissingDep>,
     /// Declared artifacts this pack's loader cannot run, with nothing present to
     /// bridge them -- they will not load at all (#50).
     pub loader_mismatch: Vec<LoaderMismatch>,
@@ -278,6 +285,20 @@ fn is_loader_dep(target: &str) -> bool {
 /// `is_loader_dep` already answers.
 const FABRIC_API: [&str; 2] = ["modrinth:P7dR8mSH", "fabric-api"];
 
+/// Language loaders a separate mod provides, as `(modLoader name, provider
+/// modid, provider's Modrinth project)`. The loader refuses a mod whose
+/// language it has no provider for, so a build naming one depends on the
+/// provider. The project is where the fill takes it from when the pack has no
+/// copy, since the registry may not have met the provider yet.
+const LANGUAGE_PROVIDERS: [(&str, &str, &str); 2] = [
+    ("klf", "klf", "1vrSzlao"),
+    ("kotlinforforge", "kotlinforforge", "ordsPcFz"),
+];
+
+/// Rank of a dependency read off a build's own manifest, as the harvest ranks
+/// a manifest edge.
+const BUILD_DEP_RANK: i64 = 55;
+
 /// Selectors naming Forgified Fabric API: its Modrinth project, and the modid
 /// its jar declares.
 const FORGIFIED_FABRIC_API: [&str; 2] = ["modrinth:Aqlf1Shp", "fabric_api"];
@@ -332,6 +353,169 @@ fn selector_present(
         }
     }
     Ok(None)
+}
+
+/// The loaders whose builds an artifact runs as in this pack: the pack's own
+/// chain, or for an artifact built only for loaders outside it (one a
+/// connector carries), the loaders it was built for.
+fn runs_on(conn: &Connection, a: &Present, chain: &HashSet<String>) -> Result<HashSet<String>> {
+    let Some(mv) = a.mod_version_id else {
+        return Ok(chain.clone());
+    };
+    let targets: Vec<String> = queries::targets_for_artifact(conn, mv)?
+        .into_iter()
+        .map(|t| t.to_ascii_lowercase())
+        .collect();
+    if targets.is_empty() || targets.iter().any(|t| t == "any" || chain.contains(t)) {
+        return Ok(chain.clone());
+    }
+    Ok(targets.into_iter().collect())
+}
+
+/// The modids a dependency selector may name: itself, or for a
+/// `modrinth:<project>` the modids the registry knows the project by.
+fn selector_modids(conn: &Connection, target: &str) -> Result<Vec<String>> {
+    let bare = target.split('@').next().unwrap_or(target);
+    match bare.strip_prefix("modrinth:") {
+        Some(pid) => queries::modids_for_modrinth_project(conn, pid),
+        None => Ok(vec![bare.to_string()]),
+    }
+}
+
+/// Every package prefix the builds of the mod a selector names own, across
+/// every artifact of it the harvest has read. Empty when none was read.
+fn selector_packages(conn: &Connection, target: &str) -> Result<Vec<String>> {
+    let bare = target.split('@').next().unwrap_or(target);
+    let mut out: Vec<String> = Vec::new();
+    for id in queries::mod_ids_for_selector(conn, bare)? {
+        for v in queries::versions_of_mod_by_id(conn, id)? {
+            for b in queries::artifact_builds(conn, &v.sha1)? {
+                for p in b.owned {
+                    if !out.contains(&p) {
+                        out.push(p);
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Whether a referenced package prefix falls inside an owned one, or the other
+/// way round: the two are cut at different depths.
+fn package_hit(referenced: &str, owned: &str) -> bool {
+    referenced == owned
+        || referenced
+            .strip_prefix(owned)
+            .is_some_and(|rest| rest.starts_with('/'))
+        || owned
+            .strip_prefix(referenced)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// An artifact's edges as the build it runs as in this pack reads them.
+///
+/// Modrinth lists one set of dependencies for every loader a version is
+/// published for, and its list is complete, so it stays the base. Two things
+/// come from the build itself. A requirement Modrinth lists that the build's
+/// own manifest declares optional is settled by the build's code: when the
+/// mod's packages are known and the code references none of them, it is
+/// optional for this build. Without that evidence Modrinth's word stands. And
+/// the language loader the build's manifest names is a hard dependency on the
+/// mod that provides it, since the loader refuses the build without one.
+fn build_edges(
+    conn: &Connection,
+    a: &Present,
+    mut rows: Vec<RelationRow>,
+    chain: &HashSet<String>,
+    by_mod_id: &HashMap<i64, usize>,
+) -> Result<Vec<RelationRow>> {
+    let Some(sha) = a.sha1.as_deref() else {
+        return Ok(rows);
+    };
+    let on = runs_on(conn, a, chain)?;
+    let mut build: Option<crate::registry::model::BuildFacts> = None;
+    for b in queries::artifact_builds(conn, sha)? {
+        if !on.contains(&b.loader) {
+            continue;
+        }
+        match &mut build {
+            Some(x) => x.merge(b),
+            None => build = Some(b),
+        }
+    }
+    let Some(build) = build else {
+        return Ok(rows);
+    };
+    let declares = |list: &[String], modids: &[String]| {
+        modids
+            .iter()
+            .any(|m| list.iter().any(|d| d.eq_ignore_ascii_case(m)))
+    };
+    for e in rows.iter_mut() {
+        if e.kind != RelKind::Requires || e.source != Source::Modrinth {
+            continue;
+        }
+        let modids = selector_modids(conn, &e.target)?;
+        if !declares(&build.optional, &modids) || declares(&build.requires, &modids) {
+            continue;
+        }
+        let owned = selector_packages(conn, &e.target)?;
+        if owned.is_empty() {
+            continue;
+        }
+        // The bytecode pass drops references into the requirer's own packages,
+        // so where the two share a prefix (one author's namespace) a reference
+        // to the target would not show: no evidence either way.
+        if owned
+            .iter()
+            .any(|o| build.owned.iter().any(|mine| package_hit(o, mine)))
+        {
+            continue;
+        }
+        if build
+            .refs
+            .iter()
+            .any(|r| owned.iter().any(|o| package_hit(r, o)))
+        {
+            continue;
+        }
+        e.kind = RelKind::OptionalDep;
+    }
+    if let Some(lang) = build.language.as_deref() {
+        let known = LANGUAGE_PROVIDERS
+            .iter()
+            .find(|(name, _, _)| name.eq_ignore_ascii_case(lang));
+        let modid = known.map_or(lang, |(_, m, _)| *m).to_string();
+        let provider = selector_present(conn, &modid, by_mod_id)?;
+        // Kotlin for Forge's own mod loads through the language it provides.
+        let is_provider = provider.is_some_and(|(id, _)| id == a.mod_id);
+        let target = match known {
+            Some((_, _, project)) if provider.is_none() => format!("modrinth:{project}"),
+            _ => modid,
+        };
+        if !is_provider {
+            // One edge per target is read, so a softer one already there would
+            // win over this. The loader's word outranks Modrinth's, and only
+            // the operator's own edge outranks the loader.
+            match rows.iter_mut().find(|e| e.target == target) {
+                Some(e) if matches!(e.source, Source::Authored | Source::Curator) => {}
+                Some(e) if matches!(e.kind, RelKind::OptionalDep | RelKind::Recommends) => {
+                    e.kind = RelKind::Requires;
+                }
+                Some(_) => {}
+                None => rows.push(RelationRow {
+                    target,
+                    version_range: None,
+                    kind: RelKind::Requires,
+                    severity: None,
+                    source: Source::JarMeta,
+                    confidence: BUILD_DEP_RANK,
+                }),
+            }
+        }
+    }
+    Ok(rows)
 }
 
 /// The mods the pack's artifacts embed, by lowercase modid: each copy as the
@@ -703,10 +887,15 @@ pub fn dependency_fill_plan(conn: &Connection, cfg: &PackConfig) -> Result<DepFi
     let mut requires: Vec<(String, String)> = Vec::new();
     let mut suggested: BTreeSet<String> = BTreeSet::new();
     // Read up front: a provider may come after the mod that needs it.
+    let chain = queries::loader_chain(conn, &cfg.loader.name)?;
     let edges: Vec<Vec<RelationRow>> = placed
         .present
         .iter()
-        .map(|a| queries::relations_for_artifact(conn, a.mod_version_id.unwrap_or(-1), a.mod_id))
+        .map(|a| {
+            let rows =
+                queries::relations_for_artifact(conn, a.mod_version_id.unwrap_or(-1), a.mod_id)?;
+            build_edges(conn, a, rows, &chain, &by_mod_id)
+        })
         .collect::<Result<_>>()?;
     let mut embedded: EmbeddedCopies = HashMap::new();
     for (a, rows) in placed.present.iter().zip(&edges) {
@@ -715,9 +904,12 @@ pub fn dependency_fill_plan(conn: &Connection, cfg: &PackConfig) -> Result<DepFi
         }
     }
     for (a, rows) in placed.present.iter().zip(edges) {
+        // First edge per target wins, as in `resolve_pack`: the rows come
+        // ordered by confidence, so an authored `optional_dep` keeps a weaker
+        // `requires` on the same target from pulling it.
         let mut seen: HashSet<String> = HashSet::new();
         for e in rows {
-            if !seen.insert(format!("{}\x1f{}", e.kind.as_str(), e.target)) {
+            if !seen.insert(e.target.clone()) {
                 continue;
             }
             // a Recommends target the pack lacks is a curator suggestion,
@@ -764,6 +956,9 @@ pub fn dependency_fill_plan(conn: &Connection, cfg: &PackConfig) -> Result<DepFi
                 }
             }
             match hit {
+                // a mod answering its own dependency needs no edge, which would
+                // lock it as its own requirement
+                Some((id, _)) if id == a.mod_id => {}
                 Some((_, bi)) => {
                     requires.push((a.filename.clone(), placed.present[bi].filename.clone()))
                 }
@@ -777,10 +972,18 @@ pub fn dependency_fill_plan(conn: &Connection, cfg: &PackConfig) -> Result<DepFi
                     // edge goes to that jar so the build locks what carries
                     // the copy. One outside the requirer's window does not:
                     // a standalone build that fits is what the pack needs.
-                    if let Some((carrier, _)) = embedded_copies(conn, &e.target, &embedded)?
-                        .into_iter()
-                        .find(|(_, v)| copy_fits(v.as_deref(), e.version_range.as_deref()))
-                    {
+                    // A copy the requirer carries itself answers it with no
+                    // edge at all, since an edge onto itself would lock the
+                    // requirer as its own dependency.
+                    let fitting: Vec<&(String, Option<String>)> =
+                        embedded_copies(conn, &e.target, &embedded)?
+                            .into_iter()
+                            .filter(|(_, v)| copy_fits(v.as_deref(), e.version_range.as_deref()))
+                            .collect();
+                    if fitting.iter().any(|(carrier, _)| *carrier == a.filename) {
+                        continue;
+                    }
+                    if let Some((carrier, _)) = fitting.first() {
                         requires.push((a.filename.clone(), carrier.clone()));
                         continue;
                     }
@@ -831,9 +1034,15 @@ pub fn pack_graph(conn: &Connection, cfg: &PackConfig) -> Result<GraphData> {
         }
     }
 
+    let mut by_mod_id: HashMap<i64, usize> = HashMap::new();
+    for (i, p) in present.iter().enumerate() {
+        by_mod_id.entry(p.mod_id).or_insert(i);
+    }
+    let chain = queries::loader_chain(conn, &cfg.loader.name)?;
     let mut edges = Vec::new();
     for p in &present {
-        for e in queries::relations_for_artifact(conn, p.mod_version_id.unwrap_or(-1), p.mod_id)? {
+        let rows = queries::relations_for_artifact(conn, p.mod_version_id.unwrap_or(-1), p.mod_id)?;
+        for e in build_edges(conn, p, rows, &chain, &by_mod_id)? {
             let to = queries::mod_ids_for_selector(conn, &e.target)?
                 .into_iter()
                 .find(|t| in_pack.contains(t));
@@ -891,6 +1100,7 @@ pub fn resolve_pack(conn: &Connection, cfg: &PackConfig) -> Result<ResolveReport
     let mut suggestions: BTreeSet<String> = BTreeSet::new();
     let mut unchecked = 0usize;
 
+    let chain = queries::loader_chain(conn, &cfg.loader.name)?;
     for (ai, a) in present.iter().enumerate() {
         // Scoped to the artifact the pack actually ships, plus the mod-level facts
         // (#48): a sibling version's dependencies are not this file's. `-1` matches
@@ -901,7 +1111,8 @@ pub fn resolve_pack(conn: &Connection, cfg: &PackConfig) -> Result<ResolveReport
         // one -- an authored optional_dep suppresses an inferred requires for the
         // same target, and so on.
         let mut seen_target: HashSet<String> = HashSet::new();
-        for e in queries::relations_for_artifact(conn, a.mod_version_id.unwrap_or(-1), a.mod_id)? {
+        let rows = queries::relations_for_artifact(conn, a.mod_version_id.unwrap_or(-1), a.mod_id)?;
+        for e in build_edges(conn, a, rows, &chain, &by_mod_id)? {
             if !seen_target.insert(e.target.clone()) {
                 continue;
             }
@@ -1002,6 +1213,23 @@ pub fn resolve_pack(conn: &Connection, cfg: &PackConfig) -> Result<ResolveReport
                                         version_range: e.version_range.clone(),
                                         source: e.source.as_str().to_string(),
                                     });
+                            // One entry stands for every requirer. When the first
+                            // to arrive named the project without pinning it, a
+                            // later requirer that pins it, or declares it some
+                            // other way, speaks for the entry: the loader scoping
+                            // pass may only drop it when no requirer holds it.
+                            let unpinned_modrinth =
+                                entry.source == "modrinth" && entry.version_range.is_none();
+                            let firmer = (e.source == Source::Modrinth
+                                && e.version_range.is_some())
+                                || !matches!(
+                                    e.source,
+                                    Source::Modrinth | Source::Inferred | Source::Harvested
+                                );
+                            if unpinned_modrinth && firmer {
+                                entry.version_range = e.version_range.clone();
+                                entry.source = e.source.as_str().to_string();
+                            }
                             entry.needed_by.push(a.filename.clone());
                         }
                     }
@@ -1104,7 +1332,6 @@ pub fn resolve_pack(conn: &Connection, cfg: &PackConfig) -> Result<ResolveReport
     // on the connector rather than on any one mod -- there is nothing to derive per
     // mod, so nothing is claimed. Listing them is still worth it: these are the
     // mods that all go at once if the connector leaves the pack.
-    let chain = queries::loader_chain(conn, &cfg.loader.name)?;
     let mut loader_mismatch: Vec<LoaderMismatch> = Vec::new();
     let mut loader_bridged: Vec<LoaderMismatch> = Vec::new();
     for a in &present {
@@ -1256,6 +1483,7 @@ pub fn resolve_pack(conn: &Connection, cfg: &PackConfig) -> Result<ResolveReport
         version_issues,
         // the async pass fills this one; a pure resolve has not looked
         loader_version_issues: Vec::new(),
+        not_on_loader: Vec::new(),
         loader_mismatch,
         loader_bridged,
         mixin_gaps,
@@ -1393,6 +1621,310 @@ mod tests {
             declared("ars.jar", true, cache("sha_ars")),
         ]);
         (r, cfg)
+    }
+
+    /// More Enchantment Info 0.4.2 as the registry holds it on a NeoForge pack:
+    /// Modrinth lists Preloading Tricks and KotlinLangForge as required, and
+    /// the NeoForge build's manifest names Preloading Tricks optional and loads
+    /// through `klf`. `mei_refs` is what its code references, and
+    /// `pt_packages` the packages Preloading Tricks' builds own (empty: never
+    /// read).
+    fn mei_pack(mei_refs: &[&str], pt_packages: &[&str]) -> (Registry, PackConfig) {
+        use crate::registry::model::{BuildFacts, Source};
+        let r = Registry::open_in_memory().unwrap();
+        let mei = add_mod_for(
+            &r,
+            "more_enchantment_info",
+            "sha_mei",
+            &["fabric", "forge", "neoforge"],
+        );
+        let strs = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        r.with_conn_mut(|c| {
+            upsert::set_artifact_builds(
+                c,
+                "sha_mei",
+                &[
+                    BuildFacts {
+                        loader: "neoforge".into(),
+                        optional: strs(&["preloading_tricks"]),
+                        language: Some("klf".into()),
+                        owned: strs(&["settingdust/more_enchantment_info"]),
+                        refs: strs(mei_refs),
+                        ..BuildFacts::default()
+                    },
+                    BuildFacts {
+                        loader: "fabric".into(),
+                        requires: strs(&["fabric-api", "fabric-language-kotlin"]),
+                        ..BuildFacts::default()
+                    },
+                ],
+                NOW,
+            )?;
+            let pt = upsert::upsert_mod_by_alias(
+                c,
+                &[("modid", "preloading_tricks"), ("modrinth", "PT")],
+                NOW,
+            )?;
+            upsert::upsert_mod_version(
+                c,
+                pt,
+                "3.7.3",
+                &["neoforge"],
+                "sha_pt",
+                10,
+                None,
+                None,
+                NOW,
+            )?;
+            if !pt_packages.is_empty() {
+                upsert::set_artifact_builds(
+                    c,
+                    "sha_pt",
+                    &[BuildFacts {
+                        loader: "neoforge".into(),
+                        owned: strs(pt_packages),
+                        ..BuildFacts::default()
+                    }],
+                    NOW,
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        for target in ["modrinth:PT", "modrinth:1vrSzlao"] {
+            relate(
+                &r,
+                mei,
+                target,
+                None,
+                RelKind::Requires,
+                None,
+                Source::Modrinth,
+            );
+        }
+        let mut cfg = config(vec![declared("mei.jar", true, cache("sha_mei"))]);
+        cfg.loader.name = "neoforge".into();
+        (r, cfg)
+    }
+
+    fn missing_targets(r: &Registry, cfg: &PackConfig) -> (Vec<String>, Vec<String>) {
+        let rep = r.with_conn(|c| resolve_pack(c, cfg)).unwrap();
+        let plan = r.with_conn(|c| dependency_fill_plan(c, cfg)).unwrap();
+        (
+            rep.missing.into_iter().map(|m| m.target).collect(),
+            plan.missing.into_iter().map(|m| m.selector).collect(),
+        )
+    }
+
+    // The build declares Preloading Tricks optional and its code never touches
+    // it, so on NeoForge it is optional whatever Modrinth's shared list says.
+    // KotlinLangForge stays required, from Modrinth and from `modLoader`.
+    #[test]
+    fn a_build_that_declares_a_dependency_optional_and_never_uses_it_relaxes_modrinth() {
+        let (r, cfg) = mei_pack(&["kotlin"], &["settingdust/preloading_tricks"]);
+        let (report, plan) = missing_targets(&r, &cfg);
+        assert_eq!(report, vec!["modrinth:1vrSzlao".to_string()]);
+        assert_eq!(plan, vec!["modrinth:1vrSzlao".to_string()]);
+    }
+
+    // Each half of the evidence is needed: code that does reference the mod,
+    // or a mod whose packages were never read, leaves Modrinth's word.
+    #[test]
+    fn without_the_code_agreeing_modrinth_stands() {
+        let (r, cfg) = mei_pack(
+            &["kotlin", "settingdust/preloading_tricks/api"],
+            &["settingdust/preloading_tricks"],
+        );
+        assert!(
+            missing_targets(&r, &cfg)
+                .0
+                .contains(&"modrinth:PT".to_string())
+        );
+        let (r, cfg) = mei_pack(&["kotlin"], &[]);
+        assert!(
+            missing_targets(&r, &cfg)
+                .1
+                .contains(&"modrinth:PT".to_string())
+        );
+    }
+
+    // On Fabric the Fabric build is the one that runs, and it says nothing of
+    // Preloading Tricks, so Modrinth's list stands there.
+    #[test]
+    fn the_build_judged_is_the_one_for_the_pack_loader() {
+        let (r, mut cfg) = mei_pack(&["kotlin"], &["settingdust/preloading_tricks"]);
+        cfg.loader.name = "fabric".into();
+        let (report, _) = missing_targets(&r, &cfg);
+        assert!(report.contains(&"modrinth:PT".to_string()), "{report:?}");
+    }
+
+    // Two mods of one author share a package root, and the bytecode pass drops
+    // references into the requirer's own packages: no evidence, Modrinth stands.
+    #[test]
+    fn a_target_sharing_the_requirers_packages_is_not_relaxed() {
+        let (r, cfg) = mei_pack(&["kotlin"], &["settingdust"]);
+        let (report, _) = missing_targets(&r, &cfg);
+        assert!(report.contains(&"modrinth:PT".to_string()), "{report:?}");
+    }
+
+    // The language loader outranks a softer edge Modrinth lists for the same
+    // provider, and a provider's own build names no dependency on itself.
+    #[test]
+    fn the_language_loader_is_hard_and_never_points_at_its_provider() {
+        use crate::registry::model::{BuildFacts, Source};
+        let r = Registry::open_in_memory().unwrap();
+        let m = add_mod_for(&r, "mymod", "sha_m", &["neoforge"]);
+        add_mod_for(&r, "kotlinforforge", "sha_kff", &["neoforge"]);
+        r.with_conn_mut(|c| {
+            for (sha, lang) in [("sha_m", "klf"), ("sha_kff", "kotlinforforge")] {
+                upsert::set_artifact_builds(
+                    c,
+                    sha,
+                    &[BuildFacts {
+                        loader: "neoforge".into(),
+                        language: Some(lang.into()),
+                        ..BuildFacts::default()
+                    }],
+                    NOW,
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        relate(
+            &r,
+            m,
+            "modrinth:1vrSzlao",
+            None,
+            RelKind::OptionalDep,
+            None,
+            Source::Modrinth,
+        );
+        let mut cfg = config(vec![
+            declared("m.jar", true, cache("sha_m")),
+            declared("kff.jar", true, cache("sha_kff")),
+        ]);
+        cfg.loader.name = "neoforge".into();
+        let plan = r.with_conn(|c| dependency_fill_plan(c, &cfg)).unwrap();
+        assert!(
+            plan.missing
+                .iter()
+                .any(|t| t.selector == "modrinth:1vrSzlao"),
+            "{:?}",
+            plan.missing
+        );
+        assert!(
+            !plan.requires.iter().any(|(a, b)| a == b),
+            "{:?}",
+            plan.requires
+        );
+    }
+
+    // A KotlinLangForge the pack already ships, from any publisher, answers
+    // the language loader by its modid, and the build is told to lock it.
+    #[test]
+    fn a_present_language_provider_answers_the_build() {
+        let (r, mut cfg) = mei_pack(&["kotlin"], &["settingdust/preloading_tricks"]);
+        add_mod_for(&r, "klf", "sha_klf", &["neoforge"]);
+        cfg.mods.push(declared("klf.jar", true, cache("sha_klf")));
+        let plan = r.with_conn(|c| dependency_fill_plan(c, &cfg)).unwrap();
+        assert!(
+            plan.requires
+                .contains(&("mei.jar".to_string(), "klf.jar".to_string())),
+            "{:?}",
+            plan.requires
+        );
+    }
+
+    // One missing entry stands for every requirer. A requirer that pins the
+    // project, or declares it in its own metadata, keeps the entry pinned or
+    // declared whichever requirer the pack happens to list first, so the loader
+    // scoping pass cannot drop a dependency somebody holds firmly.
+    #[test]
+    fn a_firm_requirer_speaks_for_a_merged_missing_entry() {
+        use crate::registry::model::Source;
+        let r = Registry::open_in_memory().unwrap();
+        let loose = add_mod(&r, "loose", "1.0", "sha_loose");
+        let pinning = add_mod(&r, "pinning", "1.0", "sha_pin");
+        let declaring = add_mod(&r, "declaring", "1.0", "sha_decl");
+        for (from, range, src) in [
+            (loose, None, Source::Modrinth),
+            (pinning, Some("VERSIONID"), Source::Modrinth),
+        ] {
+            relate(
+                &r,
+                from,
+                "modrinth:LIB",
+                range,
+                RelKind::Requires,
+                None,
+                src,
+            );
+        }
+        relate(
+            &r,
+            declaring,
+            "modrinth:OTHER",
+            None,
+            RelKind::Requires,
+            None,
+            Source::JarMeta,
+        );
+        relate(
+            &r,
+            loose,
+            "modrinth:OTHER",
+            None,
+            RelKind::Requires,
+            None,
+            Source::Modrinth,
+        );
+        let cfg = config(vec![
+            declared("loose.jar", true, cache("sha_loose")),
+            declared("pinning.jar", true, cache("sha_pin")),
+            declared("declaring.jar", true, cache("sha_decl")),
+        ]);
+        let rep = r.with_conn(|c| resolve_pack(c, &cfg)).unwrap();
+        let entry = |t: &str| rep.missing.iter().find(|m| m.target == t).unwrap();
+        assert_eq!(
+            entry("modrinth:LIB").version_range.as_deref(),
+            Some("VERSIONID")
+        );
+        assert_eq!(entry("modrinth:LIB").needed_by.len(), 2);
+        assert_eq!(entry("modrinth:OTHER").source, "jar-meta");
+    }
+
+    // The per-edge escape hatch holds on the pull path too: an authored
+    // optional dependency outranks a Modrinth requires on the same target, so
+    // the fill plan does not pull what the report no longer calls missing.
+    #[test]
+    fn an_authored_optional_dep_keeps_the_fill_from_pulling() {
+        use crate::registry::model::Source;
+        let r = Registry::open_in_memory().unwrap();
+        let a = add_mod(&r, "moda", "1.0", "sha_a");
+        relate(
+            &r,
+            a,
+            "modrinth:LIB",
+            None,
+            RelKind::Requires,
+            None,
+            Source::Modrinth,
+        );
+        relate(
+            &r,
+            a,
+            "modrinth:LIB",
+            None,
+            RelKind::OptionalDep,
+            None,
+            Source::Authored,
+        );
+        let cfg = config(vec![declared("a.jar", true, cache("sha_a"))]);
+        let rep = r.with_conn(|c| resolve_pack(c, &cfg)).unwrap();
+        assert!(rep.missing.is_empty(), "{:?}", rep.missing);
+        let plan = r.with_conn(|c| dependency_fill_plan(c, &cfg)).unwrap();
+        assert!(plan.missing.is_empty(), "{:?}", plan.missing);
     }
 
     // A copy a present jar embeds is in the pack: the dependency is met, and

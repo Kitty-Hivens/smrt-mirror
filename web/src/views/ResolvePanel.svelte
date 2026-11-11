@@ -31,22 +31,9 @@
     {#if report.overlaps.length}<span class="pill warn">{t('resolve.overlaps', { n: report.overlaps.length })}</span>{/if}
     {#if report.loader_mismatch.length}<span class="pill danger">{t('resolve.loaderMismatch', { n: report.loader_mismatch.length })}</span>{/if}
     {#if report.loader_version_issues.length}<span class="pill danger">{t('resolve.loaderWindow', { n: report.loader_version_issues.length })}</span>{/if}
-    {#if report.mixin_gaps.length}
-    <div class="rlist">
-      <div class="rl-h danger">{t('resolve.mixinGapsH')}</div>
-      {#each report.mixin_gaps as g}
-        <div class="rl-row">
-          <span class="mono strong">{g.filename}</span>
-          <span class="faint">{t('resolve.patches')}</span>
-          <span class="mono">{g.needed}</span>
-          <span class="faint">{t('resolve.absentFrom', { owner: g.owner })}</span>
-          <span class="src mono">{g.config}</span>
-        </div>
-      {/each}
-    </div>
-  {/if}
-
-  {#if report.loader_bridged.length}<span class="pill faint">{t('resolve.loaderBridged', { n: report.loader_bridged.length })}</span>{/if}
+    {#if report.mixin_gaps.length}<span class="pill danger">{t('resolve.mixinGaps', { n: report.mixin_gaps.length })}</span>{/if}
+    {#if report.loader_bridged.length}<span class="pill faint">{t('resolve.loaderBridged', { n: report.loader_bridged.length })}</span>{/if}
+    {#if report.not_on_loader.length}<span class="pill faint">{t('resolve.notOnLoader', { n: report.not_on_loader.length })}</span>{/if}
     {#if report.unresolved.length}<span class="pill faint">{t('resolve.unresolved', { n: report.unresolved.length })}</span>{/if}
     {#if report.forced_client_attempts.length}<span class="pill danger">{t('resolve.forcedClient', { n: report.forced_client_attempts.length })}</span>{/if}
     {#if report.side_disagreements.length}<span class="pill warn">{t('resolve.sideDis', { n: report.side_disagreements.length })}</span>{/if}
@@ -67,6 +54,21 @@
           <span class="faint">{t('resolve.neededBy', { who: m.needed_by.join(', ') })}</span>
           {#if m.reason === 'external'}<span class="pill warn">{t('resolve.external')}</span>{/if}
           <span class="src mono">{m.source}</span>
+        </div>
+      {/each}
+    </div>
+  {/if}
+
+  {#if report.mixin_gaps.length}
+    <div class="rlist">
+      <div class="rl-h danger">{t('resolve.mixinGapsH')}</div>
+      {#each report.mixin_gaps as g}
+        <div class="rl-row">
+          <span class="mono strong">{g.filename}</span>
+          <span class="faint">{t('resolve.patches')}</span>
+          <span class="mono">{g.needed}</span>
+          <span class="faint">{t('resolve.absentFrom', { owner: g.owner })}</span>
+          <span class="src mono">{g.config}</span>
         </div>
       {/each}
     </div>
@@ -145,6 +147,19 @@
         <div class="rl-row">
           <span class="mono strong">{l.filename}</span>
           <span class="faint">{t('resolve.bridgedBy', { loaders: l.artifact_loaders.join(', '), by: l.bridged_by ?? '' })}</span>
+        </div>
+      {/each}
+    </div>
+  {/if}
+
+  {#if report.not_on_loader.length}
+    <div class="rlist">
+      <div class="rl-h faint">{t('resolve.notOnLoaderH')}</div>
+      {#each report.not_on_loader as m}
+        <div class="rl-row">
+          <span class="mono strong">{m.target}</span>
+          <span class="faint">{t('resolve.neededBy', { who: m.needed_by.join(', ') })}</span>
+          <span class="src mono">{m.source}</span>
         </div>
       {/each}
     </div>

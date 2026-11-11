@@ -202,6 +202,9 @@ async fn merge_wire_deps(
             .map(|m| m.filename.clone())
             .or_else(|| providers.get(&d.project_id).cloned());
         match present {
+            // the requirer carrying the copy itself is satisfied without an
+            // edge, which would otherwise lock it as its own dependency
+            Some(filename) if filename == d.requirer => {}
             Some(filename) => plan.requires.push((d.requirer.clone(), filename)),
             None => {
                 let selector = format!("modrinth:{}", d.project_id);
@@ -1823,6 +1826,72 @@ mod tests {
         assert_eq!(
             reqs.iter().map(|q| q.filename.as_str()).collect::<Vec<_>>(),
             vec!["ars.jar"]
+        );
+    }
+
+    // JEI 19.70 on NeoForge: Modrinth lists MezzConfig as required, and JEI
+    // carries it through jar-in-jar. The project knows its modid once the
+    // harvest has read MezzConfig's standalone wrapper, and then the copy inside
+    // JEI answers it: nothing is pulled, and JEI is not recorded as requiring
+    // itself, which would lock it as its own dependency.
+    #[tokio::test]
+    async fn a_dependency_the_requirer_carries_itself_pulls_nothing_and_adds_no_edge() {
+        let r = Arc::new(Registry::open_in_memory().unwrap());
+        let jei = add_artifact(&r, "jei", "19.70.0.469", &sha("sha_jei"), "jei.jar");
+        r.with_conn_mut(|c| {
+            upsert::upsert_mod_by_alias(
+                c,
+                &[("modid", "mezz_config"), ("modrinth", "PROJ_MEZZ")],
+                NOW,
+            )?;
+            upsert::upsert_relation(
+                c,
+                jei,
+                None,
+                "mezz_config",
+                Some("0.6.10"),
+                RelKind::Provides,
+                None,
+                Source::JarMeta,
+                NOW,
+            )?;
+            upsert::upsert_relation(
+                c,
+                jei,
+                None,
+                "modrinth:PROJ_MEZZ",
+                None,
+                RelKind::Requires,
+                None,
+                Source::Modrinth,
+                NOW,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let mut c = cfg(vec![cache_mod("jei.jar", &sha("sha_jei"))]);
+        // a regression would try to pull from here, and nothing listens
+        let modrinth = Modrinth::with_base("http://127.0.0.1:9").unwrap();
+        let (_tmp, store) = cache_holding(&["sha_jei"]).await;
+
+        let added = fill_dependencies(&mut c, &r, &modrinth, &store)
+            .await
+            .unwrap();
+        assert_eq!(added, 0, "JEI carries MezzConfig");
+        assert_eq!(c.mods.len(), 1);
+        assert!(
+            c.mods[0]
+                .display
+                .as_ref()
+                .is_none_or(|d| d.requires.is_empty()),
+            "no edge from JEI onto itself: {:?}",
+            c.mods[0].display
+        );
+        let report = r.with_conn(|conn| resolve::resolve_pack(conn, &c)).unwrap();
+        assert!(
+            report.missing.is_empty(),
+            "and the check does not call it missing: {:?}",
+            report.missing
         );
     }
 

@@ -1029,6 +1029,8 @@ async fn pack_resolve(
     crate::authoring::loader_windows(&cfg, state.storage.root(), &state.registry, &state.modrinth)
         .await
         .apply(&mut report);
+    crate::authoring::scope_modrinth_deps(&cfg, &mut report, &state.registry, &state.modrinth)
+        .await;
     Ok(Json(report))
 }
 

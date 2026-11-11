@@ -106,6 +106,13 @@ pub struct ModMeta {
     /// Anything but the default MATCH_VERSION means the mod tolerates a server
     /// that lacks it -- the modern spelling of `acceptableRemoteVersions="*"`.
     pub display_test: Option<String>,
+    /// The language loader a `mods.toml` names in `modLoader`, when a separate
+    /// mod has to provide it (`klf` for KotlinLangForge, `kotlinforforge` for
+    /// Kotlin for Forge). `None` for the two that ship with the loader,
+    /// `javafml` and `lowcodefml`, and for a jar that names none. The loader
+    /// refuses to load the mod without its provider, so this is a dependency
+    /// no metadata can understate.
+    pub language_loader: Option<String>,
 }
 
 impl ModMeta {
@@ -148,6 +155,8 @@ fn read_named(zip: &mut zip::ZipArchive<Cursor<&[u8]>>, name: &str) -> Option<Ve
 
 #[derive(Deserialize)]
 struct ModsToml {
+    #[serde(rename = "modLoader", default)]
+    mod_loader: Option<String>,
     #[serde(default)]
     mods: Vec<ModsTomlMod>,
     /// Top-level `logoFile` -- the standard spelling; NeoForge also allows a
@@ -196,6 +205,7 @@ pub fn parse_mods_toml(text: &str) -> ModMeta {
         return ModMeta::default();
     };
     let clean = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let language_loader = clean(parsed.mod_loader).filter(|l| !is_bundled_language(l));
     let mut modid = None;
     let mut display_name = None;
     let mut version = None;
@@ -273,8 +283,14 @@ pub fn parse_mods_toml(text: &str) -> ModMeta {
         deps,
         loader_reqs,
         display_test,
+        language_loader,
         ..ModMeta::default()
     }
+}
+
+/// The language loaders Forge and NeoForge ship themselves.
+fn is_bundled_language(name: &str) -> bool {
+    matches!(name.to_ascii_lowercase().as_str(), "javafml" | "lowcodefml")
 }
 
 /// Kind of a Forge/NeoForge dependency: `type` when present, else the legacy
@@ -431,6 +447,7 @@ pub fn parse_fabric_json(bytes: &[u8]) -> ModMeta {
         client_entrypoint: has_entry("client"),
         main_entrypoint: has_entry("main") || has_entry("server"),
         display_test: None,
+        language_loader: None,
     }
 }
 
@@ -602,6 +619,23 @@ mod tests {
         );
         // the Fabric API is a real mod and stays one
         assert!(m.deps.iter().any(|d| d.modid == "fabric-api"));
+    }
+
+    // More Enchantment Info's NeoForge build loads through KotlinLangForge, and
+    // says so only in `modLoader`. The two bundled language loaders name no
+    // dependency.
+    #[test]
+    fn a_language_loader_another_mod_provides_is_read() {
+        let klf = parse_mods_toml("modLoader = \"klf\"\n[[mods]]\nmodId=\"more_enchantment_info\"");
+        assert_eq!(klf.language_loader.as_deref(), Some("klf"));
+        for bundled in ["javafml", "lowcodefml"] {
+            let m = parse_mods_toml(&format!("modLoader=\"{bundled}\"\n[[mods]]\nmodId=\"m\""));
+            assert_eq!(m.language_loader, None, "{bundled}");
+        }
+        assert_eq!(
+            parse_mods_toml("[[mods]]\nmodId=\"m\"").language_loader,
+            None
+        );
     }
 
     #[test]

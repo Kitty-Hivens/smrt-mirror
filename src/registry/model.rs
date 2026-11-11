@@ -161,6 +161,55 @@ pub struct RelationRow {
     pub confidence: i64,
 }
 
+/// What one build of a jar says about its dependencies, for one loader. A jar
+/// with code of its own is its own build. A container with no code (More
+/// Enchantment Info, one nested build per loader) has the builds it nests.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, serde::Deserialize)]
+pub struct BuildFacts {
+    /// The loader this build is for, as the mirror spells it.
+    pub loader: String,
+    /// Modids the build's manifest declares required.
+    #[serde(default)]
+    pub requires: Vec<String>,
+    /// Modids the build's manifest declares optional.
+    #[serde(default)]
+    pub optional: Vec<String>,
+    /// The language loader its manifest names, when a separate mod provides
+    /// it (`klf`, `kotlinforforge`).
+    #[serde(default)]
+    pub language: Option<String>,
+    /// Package prefixes the build's classes own.
+    #[serde(default)]
+    pub owned: Vec<String>,
+    /// Package prefixes the build's code references unconditionally.
+    #[serde(default)]
+    pub refs: Vec<String>,
+}
+
+impl BuildFacts {
+    /// Fold another build for the same loader into this one: a jar may nest
+    /// one per game version (More Enchantment Info has three Fabric builds).
+    /// A modid either build requires stays required.
+    pub fn merge(&mut self, other: BuildFacts) {
+        let add = |into: &mut Vec<String>, from: Vec<String>| {
+            for x in from {
+                if !into.contains(&x) {
+                    into.push(x);
+                }
+            }
+        };
+        add(&mut self.requires, other.requires);
+        add(&mut self.optional, other.optional);
+        add(&mut self.owned, other.owned);
+        add(&mut self.refs, other.refs);
+        if self.language.is_none() {
+            self.language = other.language;
+        }
+        let requires = self.requires.clone();
+        self.optional.retain(|m| !requires.contains(m));
+    }
+}
+
 /// A mod one jar carries inside itself, read from the nested jar's own
 /// metadata: a Forge or NeoForge jar-in-jar, or a Fabric `jars` entry.
 #[derive(Debug, Clone, PartialEq, Eq)]

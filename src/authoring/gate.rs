@@ -138,6 +138,13 @@ pub fn check(report: &ResolveReport) -> BuildChecks {
             l.filename, l.loader, l.required_range, l.pack_version,
         ));
     }
+    for m in &report.not_on_loader {
+        advisory.push(format!(
+            "{} is listed as required by {} on Modrinth, but has no build for the loader it runs on at this game version, so it is not required here",
+            m.target,
+            m.needed_by.join(", "),
+        ));
+    }
     for f in &report.forced_client_attempts {
         advisory.push(format!(
             "{} is client-side, and {} declares a hard dependency on it ({}) -- a client mod is never force-installed, so that dependency is not enforced",
@@ -178,6 +185,7 @@ mod tests {
             overlaps: vec![],
             version_issues: vec![],
             loader_version_issues: vec![],
+            not_on_loader: vec![],
             loader_mismatch: vec![],
             loader_bridged: vec![],
             mixin_gaps: vec![],

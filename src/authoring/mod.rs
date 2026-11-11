@@ -17,6 +17,7 @@ pub mod configdiff;
 pub mod curator;
 pub mod curseforge;
 pub mod depfill;
+pub mod depscope;
 pub mod gate;
 pub mod github;
 pub mod harvest;
@@ -47,6 +48,7 @@ pub use configdiff::{
 pub use curator::{
     McModInfo, enrich_from_mcmod_info, infer_requires_from_mcmod_info, jar_icon, read_mcmod_info,
 };
+pub use depscope::scope_modrinth_deps;
 pub use harvest_sched::{HarvestScheduler, HarvestStatus};
 pub use jardiff::{JarDiff, diff_jars};
 pub use loaderreq::{LoaderWindowReport, loader_windows};
