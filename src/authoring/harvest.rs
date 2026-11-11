@@ -384,6 +384,9 @@ pub struct JarReadout {
     /// its code references. The jar itself when it has code, otherwise the
     /// builds it nests.
     pub builds: Vec<BuildFacts>,
+    /// Package prefixes of the classes the jar's mixins target. A mixin into
+    /// another mod is a reference the constant pool does not carry as a class.
+    pub mixin_refs: Vec<String>,
 }
 
 /// Open a jar's zip ONCE and derive every fact the harvest needs from it: the
@@ -409,6 +412,7 @@ fn read_jar_at(bytes: &[u8], nest: bool) -> JarReadout {
         embedded: Vec::new(),
         loaders: Vec::new(),
         builds: Vec::new(),
+        mixin_refs: Vec::new(),
     };
     let Ok(mut zip) = zip::ZipArchive::new(std::io::Cursor::new(bytes)) else {
         return empty();
@@ -531,6 +535,14 @@ fn read_jar_at(bytes: &[u8], nest: bool) -> JarReadout {
         None
     };
     let class_names: Vec<String> = classes.iter().map(|c| c.this_class.clone()).collect();
+    let mut mixin_refs: Vec<String> = Vec::new();
+    for target in classes.iter().flat_map(|c| c.mixin_targets.iter()) {
+        if let Some(p) = bytecode::package_prefix(target)
+            && !mixin_refs.contains(&p)
+        {
+            mixin_refs.push(p);
+        }
+    }
     let required_mixins = mixinscan::from_parts(
         mods_toml.as_deref(),
         fabric_json.as_deref(),
@@ -544,31 +556,37 @@ fn read_jar_at(bytes: &[u8], nest: bool) -> JarReadout {
     let mut jarjar_loaders: Vec<String> = Vec::new();
     // A jar with no code of its own is a container: the builds it nests are
     // its builds. A jar with code is its own build, and what it nests are
-    // libraries it carries.
+    // libraries it carries, with one exception: a Fabric root (or one with no
+    // marker) that lists jar-in-jar for Forge and NeoForge ships its builds for
+    // those loaders that way, as `served_loaders` reads it.
     let container = nest && class_names.is_empty();
+    let foreign_builds = nest && !matches!(loader.as_deref(), Some("forge" | "neoforge"));
     let mut nested_builds: Vec<BuildFacts> = Vec::new();
-    let mut nested = |path: &str, listed_version: Option<&str>| -> Option<EmbeddedMod> {
-        let mut entry = zip.by_name(path).ok()?;
-        let size = entry.size();
-        let raw = read_zip_entry(&mut entry, size, path).ok()?;
-        if container {
-            let inner = read_jar_at(&raw, false);
-            if let Some(b) = build_of(
-                inner.facts.loader.as_deref(),
-                &inner.modmeta,
-                &inner.bytecode,
-            ) {
-                nested_builds.push(b);
+    let mut nested =
+        |path: &str, listed_version: Option<&str>, jarjar: bool| -> Option<EmbeddedMod> {
+            let mut entry = zip.by_name(path).ok()?;
+            let size = entry.size();
+            let raw = read_zip_entry(&mut entry, size, path).ok()?;
+            if container || (jarjar && foreign_builds) {
+                let inner = read_jar_at(&raw, false);
+                if let Some(b) = build_of(
+                    inner.facts.loader.as_deref(),
+                    &inner.modmeta,
+                    &inner.bytecode,
+                    &inner.mixin_refs,
+                ) && (container || matches!(b.loader.as_str(), "forge" | "neoforge"))
+                {
+                    nested_builds.push(b);
+                }
             }
-        }
-        read_nested(&raw, listed_version)
-    };
+            read_nested(&raw, listed_version)
+        };
     for (path, listed_version) in jarjar_meta
         .as_deref()
         .map(jarjar_listing)
         .unwrap_or_default()
     {
-        if let Some(e) = nested(&path, listed_version.as_deref()) {
+        if let Some(e) = nested(&path, listed_version.as_deref(), true) {
             if let Some(l) = e.loader.as_deref()
                 && matches!(l, "forge" | "neoforge")
                 && !jarjar_loaders.iter().any(|x| x == l)
@@ -583,7 +601,7 @@ fn read_jar_at(bytes: &[u8], nest: bool) -> JarReadout {
         .map(fabric_jar_listing)
         .unwrap_or_default()
     {
-        if let Some(e) = nested(&path, None) {
+        if let Some(e) = nested(&path, None, false) {
             embedded.push(e);
         }
     }
@@ -592,7 +610,7 @@ fn read_jar_at(bytes: &[u8], nest: bool) -> JarReadout {
 
     let mut builds: Vec<BuildFacts> = Vec::new();
     if nest {
-        let own = build_of(loader.as_deref(), &modmeta, &bytecode).filter(|b| {
+        let own = build_of(loader.as_deref(), &modmeta, &bytecode, &mixin_refs).filter(|b| {
             !class_names.is_empty()
                 || !b.requires.is_empty()
                 || !b.optional.is_empty()
@@ -635,6 +653,7 @@ fn read_jar_at(bytes: &[u8], nest: bool) -> JarReadout {
         class_names,
         embedded,
         builds,
+        mixin_refs,
     }
 }
 
@@ -645,6 +664,7 @@ fn build_of(
     loader: Option<&str>,
     meta: &modmeta::ModMeta,
     bc: &bytecode::JarBytecode,
+    mixin_refs: &[String],
 ) -> Option<BuildFacts> {
     let pick = |kind: RelKind| -> Vec<String> {
         meta.deps
@@ -659,7 +679,14 @@ fn build_of(
         optional: pick(RelKind::OptionalDep),
         language: meta.language_loader.clone(),
         owned: bc.owned.iter().cloned().collect(),
-        refs: bc.hard_refs.iter().cloned().collect(),
+        refs: bc
+            .hard_refs
+            .iter()
+            .chain(mixin_refs.iter().filter(|p| !bc.owned.contains(*p)))
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect(),
     })
 }
 
@@ -2126,7 +2153,16 @@ pub async fn scan(
                 || !known_embedded.contains_key(sha.as_str())
                 || !known_builds.contains(sha.as_str())
         })
-        .filter_map(|(sha, v)| v.primary_file().map(|f| (sha.clone(), f.url.clone())))
+        .filter_map(|(sha, v)| {
+            // the file this sha names, which is the primary one for an ordinary
+            // pin and may be another for a jar Modrinth matched by hash
+            let file = v
+                .files
+                .iter()
+                .find(|f| f.hashes.sha1.eq_ignore_ascii_case(sha))
+                .or_else(|| v.primary_file())?;
+            Some((sha.clone(), file.url.clone()))
+        })
         .collect();
     let mut modrinth_modids_learned = 0usize;
     for (sha, url) in fetch_targets {
@@ -2137,6 +2173,13 @@ pub async fn scan(
                 continue;
             }
         };
+        // What is recorded below is recorded for good under this sha, so bytes
+        // that are not it (a truncated body, another file) are not read.
+        let got = sha1_of(&bytes);
+        if !got.eq_ignore_ascii_case(&sha) {
+            tracing::warn!(url = %url, expected = %sha, got = %got, "modrinth jar hash mismatch; not read");
+            continue;
+        }
         let (modid, embedded, builds) = tokio::task::spawn_blocking(move || {
             let r = read_jar(&bytes);
             let modid = r
@@ -3919,6 +3962,30 @@ mod tests {
         assert!(r.modmeta.modid.is_none(), "{:?}", r.modmeta.modid);
     }
 
+    // A mixin into another mod is a reference the constant pool does not carry
+    // as a class (`@Mixin(Target.class)` lives in an annotation), and a build
+    // that mixes into a mod does depend on it.
+    #[test]
+    fn read_jar_counts_a_mixin_target_as_a_reference() {
+        use super::super::classfile::fixtures::{ClassSpec, build_class_spec, jar};
+        let mixin = build_class_spec(&ClassSpec {
+            this: "dev/mine/mixin/HookMixin",
+            mixin_value: &["dev/other/core/Hook"],
+            ..ClassSpec::default()
+        });
+        let bytes = jar(&[
+            ("dev/mine/mixin/HookMixin.class", &mixin),
+            ("META-INF/neoforge.mods.toml", b"[[mods]]\nmodId=\"mine\""),
+        ]);
+        let r = read_jar(&bytes);
+        let build = r.builds.iter().find(|b| b.loader == "neoforge").unwrap();
+        assert!(
+            build.refs.iter().any(|p| p.starts_with("dev/other")),
+            "{:?}",
+            build.refs
+        );
+    }
+
     // More Enchantment Info 0.4.2: the container has no code, so its builds
     // are the ones it nests, one per loader. The NeoForge build loads through
     // `klf`, names Preloading Tricks optional and never references it.
@@ -3931,7 +3998,7 @@ mod tests {
             false,
             None,
         );
-        let neo = jar(&[
+        let neo_jar = jar(&[
             ("settingdust/mei/neoforge/Entry.class", &neo_class),
             (
                 "META-INF/neoforge.mods.toml",
@@ -3949,7 +4016,7 @@ mod tests {
             ("fabric.mod.json", root),
             ("META-INF/jarjar/metadata.json", listing),
             ("META-INF/jars/fabric.jar", &fabric),
-            ("META-INF/jars/neo.jar", &neo),
+            ("META-INF/jars/neo.jar", &neo_jar),
         ]);
         let r = read_jar(&bytes);
         let build = |l: &str| r.builds.iter().find(|b| b.loader == l).unwrap();
@@ -3969,6 +4036,24 @@ mod tests {
             2,
             "the code-less root is no build of its own"
         );
+
+        // the same NeoForge build under a Fabric root that has code: the root
+        // is the Fabric build, the jar-in-jar listing still carries NeoForge's
+        let fabric_class = build_class("settingdust/mei/fabric/Entry", &[], false, None);
+        let with_code = jar(&[
+            ("settingdust/mei/fabric/Entry.class", &fabric_class),
+            (
+                "fabric.mod.json",
+                br#"{"schemaVersion":1,"id":"more_enchantment_info","depends":{"fabric-api":"*"}}"#,
+            ),
+            ("META-INF/jarjar/metadata.json", listing),
+            ("META-INF/jars/neo.jar", &neo_jar),
+        ]);
+        let r = read_jar(&with_code);
+        let loaders: Vec<&str> = r.builds.iter().map(|b| b.loader.as_str()).collect();
+        assert_eq!(loaders, vec!["fabric", "neoforge"]);
+        let neo_build = r.builds.iter().find(|b| b.loader == "neoforge").unwrap();
+        assert_eq!(neo_build.language.as_deref(), Some("klf"));
     }
 
     // More Enchantment Info 0.4.2: the root is a Fabric container, and the
