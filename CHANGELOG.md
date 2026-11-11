@@ -8,6 +8,23 @@ version section when a release is tagged.
 
 ### Fixed
 
+- A multi-loader mod read its dependencies off Modrinth's list for the whole
+  version. More Enchantment Info 0.4.2 is one Modrinth version for Fabric, Forge
+  and NeoForge, so a NeoForge pack was told it lacked Fabric Language Kotlin and
+  Fabric API and the build refused to publish, while KotlinLangForge, which the
+  NeoForge build cannot load without, was named only in its `modLoader`. A mod
+  is now read through the build the pack runs: Modrinth's list stays the base, a
+  dependency the build declares optional and whose packages its code never
+  touches is optional, a language loader the build names is a hard dependency
+  on its provider, and an unmet dependency with builds only for other loaders is
+  listed apart rather than blocking. The harvest records each build's facts once
+  per artifact (migration 0028).
+- A library a declared jar already carries was pulled in beside it, and stayed.
+  MezzConfig's standalone build has no mod of its own, only the mod nested in it,
+  so the mirror never learned it was `mezz_config`, and JEI's own copy could not
+  answer JEI's dependency. The wrapper is now known as the mod it carries, and a
+  pulled jar whose dependency a declared jar answers as well is pruned.
+
 - A pack's discussion was invisible to the people it is for. The reads were
   public and nothing in the browser used them: the catalog showed a pack's
   description and its mods and said nothing about what was being asked of it,
@@ -209,6 +226,12 @@ version section when a release is tagged.
 
 ### Added
 
+- Dependencies can be recomputed without editing a pack. A save fills them only
+  when the declared mods change, so what the mirror learns afterwards, a library
+  a jar turns out to carry or a build that settles a dependency, never reached a
+  pack nobody touched. `POST /v1/authoring/packs/{id}/fill` runs the fill on the
+  stored config and saves it like an edit, with the same `If-Match`, and the
+  editor has a button for it beside the dependency check.
 - Notifications can be read outside the panel, without the mirror reaching
   anybody. `GET /v1/feed.atom?key=<key>` is the account's own list as Atom: one
   address per account, minted when it is first asked for and retired by rotating

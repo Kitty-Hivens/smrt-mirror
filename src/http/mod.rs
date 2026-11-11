@@ -312,6 +312,71 @@ mod tests {
         app.clone().oneshot(req).await.unwrap().status()
     }
 
+    // A save fills only when the declared mods change, so a pulled library the
+    // registry has since stopped needing stays until somebody asks. Asking is
+    // an edit: it needs the edit level, honours If-Match, and prunes what
+    // nothing reaches.
+    #[tokio::test]
+    async fn filling_a_pack_prunes_what_nothing_needs_and_is_an_edit() {
+        use axum::http::StatusCode;
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let mut cfg = sample_pack("Create", crate::domain::Visibility::Draft);
+        cfg.mods.push(crate::domain::DeclaredMod {
+            filename: "orphan-lib.jar".into(),
+            default_enabled: true,
+            source: crate::domain::SourceDecl::SmrtCache {
+                sha1: "0".repeat(40),
+            },
+            display: None,
+            slug: None,
+            pulled: true,
+        });
+        state
+            .storage
+            .save_pack_config("Create", &cfg)
+            .await
+            .unwrap();
+        let sid = state.accounts.sign_in_github(42, "helper", None).unwrap();
+        let app = router(state.clone());
+        let fill = "/v1/authoring/packs/Create/fill";
+
+        state
+            .accounts
+            .grant_pack_access("Create", 42, PackLevel::View, 1)
+            .unwrap();
+        assert_eq!(
+            call(&app, "POST", fill, Some(&sid), None).await,
+            StatusCode::FORBIDDEN
+        );
+
+        state
+            .accounts
+            .grant_pack_access("Create", 42, PackLevel::Edit, 1)
+            .unwrap();
+        let stale = {
+            use axum::body::Body;
+            use axum::http::Request;
+            use tower::ServiceExt;
+            let req = Request::builder()
+                .method("POST")
+                .uri(fill)
+                .header(axum::http::header::COOKIE, format!("smrt_session={sid}"))
+                .header(axum::http::header::IF_MATCH, "\"0000000000\"")
+                .body(Body::empty())
+                .unwrap();
+            app.clone().oneshot(req).await.unwrap().status()
+        };
+        assert_eq!(stale, StatusCode::CONFLICT);
+
+        let (status, body) = write(&app, "POST", fill, Some(&sid), None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let filled: crate::domain::PackConfig = serde_json::from_str(&body).unwrap();
+        assert!(filled.mods.is_empty(), "{:?}", filled.mods);
+        let stored = state.storage.load_pack_config("Create").await.unwrap();
+        assert!(stored.mods.is_empty(), "and it is what was stored");
+    }
+
     #[tokio::test]
     async fn a_level_admits_exactly_what_it_names() {
         use axum::http::StatusCode;

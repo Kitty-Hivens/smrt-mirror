@@ -330,6 +330,26 @@ export const api = {
       activity.end();
     }
   },
+  // Run the dependency fill over the stored config and save what it settles. A
+  // save fills only when the declared mods change, so this is how what the
+  // registry learned since reaches a pack nobody edited. Same precondition as a
+  // save; returns what the mirror stored.
+  async fillPackDependencies(id: string, baseRev: string | null): Promise<RevisionedConfig> {
+    const headers: Record<string, string> = {};
+    if (baseRev) headers['If-Match'] = `"${baseRev}"`;
+    activity.begin();
+    try {
+      const r = await fetch(`/v1/authoring/packs/${encodeURIComponent(id)}/fill`, {
+        method: 'POST',
+        credentials: 'include',
+        headers,
+      });
+      if (!r.ok) throw await toError(r);
+      return { config: (await r.json()) as PackConfig, rev: revisionOf(r) };
+    } finally {
+      activity.end();
+    }
+  },
   // overwrite the config with one reconstructed from a published build; returns it
   revertPackConfig: (id: string, version: string): Promise<RevisionedConfig> =>
     tracked(async () => {

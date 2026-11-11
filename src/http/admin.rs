@@ -79,6 +79,10 @@ fn authoring_router(state: AppState) -> Router {
             "/v1/authoring/packs/{pack_id}/config",
             get(get_pack_config).put(put_pack_config),
         )
+        .route(
+            "/v1/authoring/packs/{pack_id}/fill",
+            post(fill_pack_dependencies),
+        )
         .route("/v1/meta/minecraft", get(get_minecraft_versions))
         .route("/v1/meta/loaders/{loader}", get(get_loader_versions))
         .route(
@@ -1554,6 +1558,39 @@ async fn put_pack_config(
     )
     .await;
     Ok((StatusCode::CREATED, etag(&rev), Json(cfg)))
+}
+
+/// Run the dependency fill over the stored config and save what it settles.
+///
+/// A save runs the fill only when the declared mods changed, so what the
+/// registry learns afterwards never reaches a pack nobody edits: a harvest that
+/// finds a library already carried inside a declared jar, or a build's own
+/// facts settling a dependency, leaves the pulled copy and the requires graph
+/// where an earlier fill put them. This is the act that brings them up to date.
+/// It goes through the same store as an edit, takes the same `If-Match`, and
+/// changes nothing a curator declared.
+async fn fill_pack_dependencies(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Path(pack_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<([(HeaderName, String); 1], Json<PackConfig>), ApiError> {
+    super::auth::authorize(&state, &identity, &pack_id, PackLevel::Edit).await?;
+    let pre = precondition(&headers);
+    let _guard = state.storage.lock_pack_config(&pack_id).await;
+    let existing = state.storage.load_pack_config(&pack_id).await?;
+    check_precondition(pre.as_ref(), Some(&rev_of(&existing)?), &pack_id)?;
+    state.docs.forget(&pack_id);
+    let (cfg, rev) = store_edited_config(&state, &pack_id, existing, &identity.login, true).await?;
+    audit(
+        &state,
+        &identity,
+        "pack.fill",
+        Some(&pack_id),
+        Some(&format!("{} mods", cfg.mods.len())),
+    )
+    .await;
+    Ok((etag(&rev), Json(cfg)))
 }
 
 /// Whether the dependency fill has anything to do. It reaches Modrinth, so it
