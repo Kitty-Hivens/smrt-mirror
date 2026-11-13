@@ -14,7 +14,7 @@ use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -156,15 +156,20 @@ pub(crate) async fn get_mod_detail(
 
     // never surface a draft/unlisted/community pack name to a guest through the
     // "used by" list -- keep it to the same set the launcher's catalog exposes.
-    let public_packs: HashSet<String> = state
+    let public_packs: HashMap<String, String> = state
         .storage
         .list_pack_summaries()
         .await?
         .into_iter()
         .filter(|p| p.tier == PackTier::Official && p.visibility == Visibility::Published)
-        .map(|p| p.pack_id)
+        .map(|p| (p.pack_id, p.display_name))
         .collect();
-    detail.used_by.retain(|u| public_packs.contains(&u.pack_id));
+    detail
+        .used_by
+        .retain(|u| public_packs.contains_key(&u.pack_id));
+    for u in &mut detail.used_by {
+        u.display_name = public_packs.get(&u.pack_id).cloned();
+    }
 
     Ok(Json(detail))
 }
