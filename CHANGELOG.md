@@ -8,6 +8,14 @@ version section when a release is tagged.
 
 ### Fixed
 
+- The operator panel fell apart on a phone. The packs and servers tables
+  scrolled sideways and hid their actions, the users row pushed suspend off
+  the edge, a my packs row laid its visibility over the pack name, the pack
+  editor lost Preview and Close past the right edge, and at tablet width the
+  top strip showed one of twelve sections. Tables now fold into cards, rows
+  move their actions under the name, the editor header wraps, and a window
+  too narrow for a side rail gets the strip only when every section fits in
+  it, the drawer otherwise. The overview and my packs lists show pack banners.
 - The catalog never showed a pack's banner, though six official packs carry
   one. It was an accordion of rows: a hovered row's version pill vanished into
   the row's own background, the version column drifted with the width of the
