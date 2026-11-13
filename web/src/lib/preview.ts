@@ -40,6 +40,21 @@ export function letterAvatar(name: string): Avatar {
   return { initials, color };
 }
 
+/// Initials for the panel's monochrome tile, read off words rather than off
+/// whatever the name starts with. A filename stands in for a name often enough
+/// that "+Fugue-0.23.7" came out as "+0" and "FontFix-1.12.2" as "F1": a word
+/// counts only when it starts with a letter, so prefixes and version numbers
+/// drop out, and the second one only when it is letters throughout, so "v3"
+/// and "mc1" do not pass for words. The coloured tile keeps the launcher's
+/// rule, because the preview is there to show what the launcher draws.
+export function readableInitials(name: string): string {
+  const words = name.replace(/\.jar$/i, '').split(/[^\p{L}\p{N}]+/u);
+  const first = words.findIndex((w) => /^\p{L}/u.test(w));
+  if (first < 0) return '?';
+  const second = words.slice(first + 1).find((w) => /^\p{L}+$/u.test(w));
+  return (words[first].charAt(0) + (second?.charAt(0) ?? '')).toUpperCase();
+}
+
 // ── DepGraphResolver ─────────────────────────────────────────────────────────
 
 export interface DepEdge {
