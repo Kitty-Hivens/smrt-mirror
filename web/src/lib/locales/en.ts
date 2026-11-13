@@ -848,6 +848,10 @@ export const en = {
   'mod.noUsedBy': 'Not shipped by any published pack yet.',
   'mod.notFound': 'Mod not found.',
   'mod.external': 'External / uncatalogued target',
+  'mod.srcMirror': 'mirror',
+  'mod.unindexedTitle': 'File not in the registry',
+  'mod.unindexed': 'The mirror serves this jar as part of a pack but has not indexed it, so it has no releases, relations or list of packs here yet.',
+  'mod.shippedIn': 'Shipped in',
 } as const;
 
 /// A key is still required in both dictionaries, but each language counts where
