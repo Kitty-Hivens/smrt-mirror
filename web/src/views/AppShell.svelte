@@ -39,6 +39,27 @@
     if (drawerOpen && e.key === 'Escape') drawerOpen = false;
   }
 
+  // Which shape the navigation takes. A rail down the side on a wide window, a
+  // drawer behind the burger on a phone, and between the two a strip across the
+  // top, but only while the strip can hold every section: an operator's dozen
+  // in a strip at tablet width showed the first one and hid the rest in a
+  // sideways scroll nothing pointed to. Decided here rather than in media
+  // queries alone, because how many sections there are is not a fact CSS has.
+  let vw = $state(typeof window !== 'undefined' ? window.innerWidth : 1280);
+  const STRIP_MAX = 4;
+  const layout = $derived<'rail' | 'strip' | 'drawer'>(
+    vw > 768
+      ? 'rail'
+      : vw > 560 && visibleSections(me).length <= STRIP_MAX
+        ? 'strip'
+        : 'drawer',
+  );
+  // a drawer left open while the window widens into a rail would reappear
+  // open the next time it narrows
+  $effect(() => {
+    if (layout !== 'drawer') drawerOpen = false;
+  });
+
   // What is waiting to be read, beside the place it is read. Refreshed on the
   // same event a discussion moving already sends, so nothing here polls; a guest
   // has no inbox and asks for none.
@@ -81,9 +102,9 @@
   };
 </script>
 
-<svelte:window onkeydown={onWindowKeydown} />
+<svelte:window onkeydown={onWindowKeydown} bind:innerWidth={vw} />
 
-<div class="shell">
+<div class="shell {layout}">
   <nav class="rail" class:open={drawerOpen} id="rail-nav">
     <div class="brand"><img class="mk" src="/favicon.svg" alt="" />smrt<span class="faint">/control</span></div>
 
@@ -169,12 +190,17 @@
       <div class="crumb">
         <span class="faint">smrt</span>
         <span class="faint">/</span>
-        {#if route.mod || route.catalog != null}
+        {#if route.mod || route.catalog != null || route.pack != null}
           <!-- the page's own name once it has loaded one, the kind of place
                until then -->
           <button
             class="crumblink"
-            onclick={() => (route.mod ? route.closeMod() : route.closeCatalog())}
+            onclick={() =>
+              route.mod
+                ? route.closeMod()
+                : route.pack != null
+                  ? route.closePack()
+                  : route.closeCatalog()}
             >{t(navKey[route.section])}</button
           >
           {@const here = route.crumb ?? (route.mod ? t('shell.modPage') : null)}
@@ -399,7 +425,7 @@
     padding: var(--space-3) var(--space-5);
     border-bottom: 1px solid var(--seam);
   }
-  /* hamburger: hidden until the drawer breakpoint (see @media below) */
+  /* hamburger: hidden until the shell is in drawer layout (see .drawer below) */
   .burger {
     display: none;
     flex: none;
@@ -491,112 +517,112 @@
     display: none;
   }
 
-  /* strip mode -- tablet / narrow laptop (561-768px): the rail becomes a
-     horizontal top bar. Brand pinned left, foot pinned right, nav scrolls
-     between them. Nothing is dropped. */
-  @media (min-width: 561px) and (max-width: 768px) {
-    .shell {
-      /* minmax(0,...) not 1fr: 1fr's auto minimum lets the horizontal rail's
-         min-content (the full nav) blow the single column past the viewport */
-      grid-template-columns: minmax(0, 1fr);
-      grid-template-rows: auto minmax(0, 1fr);
-    }
-    .rail {
-      flex-direction: row;
-      align-items: center;
-      gap: var(--space-3);
-      padding: var(--space-2) var(--space-3);
-      border-right: none;
-      border-bottom: 1px solid var(--seam);
-    }
-    .brand {
-      flex: none;
-      padding: 0 var(--space-2);
-    }
-    .nav {
-      flex-direction: row;
-      flex: 1;
-      min-width: 0;
-      overflow-x: auto;
-      gap: var(--space-1);
-    }
-    .nav li {
-      flex: none;
-    }
-    .item {
-      width: auto;
-      white-space: nowrap;
-    }
-    .item.active::before {
-      top: auto;
-      bottom: 2px;
-      left: 8px;
-      right: 8px;
-      width: auto;
-      height: 3px;
-    }
-    .spacer {
-      display: none;
-    }
-    .foot {
-      flex-direction: row;
-      align-items: center;
-      flex: none;
-      padding: 0;
-      gap: var(--space-2);
-    }
-    .who,
-    .signout,
-    .signin {
-      width: auto;
-    }
-    .whotext {
-      max-width: 140px;
-    }
+  /* strip: the rail as a bar across the top, for a tablet-width window with
+     few enough sections to show them all. Brand pinned left, foot pinned
+     right, the sections between them. */
+  .shell.strip {
+    /* minmax(0,...) not 1fr: 1fr's auto minimum lets the horizontal rail's
+       min-content (the full nav) blow the single column past the viewport */
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .strip .rail {
+    flex-direction: row;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    border-right: none;
+    border-bottom: 1px solid var(--seam);
+  }
+  .strip .brand {
+    flex: none;
+    padding: 0 var(--space-2);
+  }
+  .strip .nav {
+    flex-direction: row;
+    flex: 1;
+    min-width: 0;
+    overflow-x: auto;
+    gap: var(--space-1);
+  }
+  .strip .nav li {
+    flex: none;
+  }
+  .strip .item {
+    width: auto;
+    white-space: nowrap;
+  }
+  .strip .item.active::before {
+    top: auto;
+    bottom: 2px;
+    left: 8px;
+    right: 8px;
+    width: auto;
+    height: 3px;
+  }
+  .strip .spacer {
+    display: none;
+  }
+  .strip .foot {
+    flex-direction: row;
+    align-items: center;
+    flex: none;
+    padding: 0;
+    gap: var(--space-2);
+  }
+  .strip .who,
+  .strip .signout,
+  .strip .signin {
+    width: auto;
+  }
+  .strip .whotext {
+    max-width: 140px;
   }
 
-  /* drawer mode -- phone (<=560px): the rail slides in from the left over a
-     scrim, toggled by the topbar burger. The full vertical rail is preserved. */
+  /* drawer: the rail slides in from the left over a scrim, toggled by the
+     topbar burger. A phone always gets it, and so does a tablet-width window
+     whose sections would not fit a strip. The full vertical rail is kept. */
+  .shell.drawer {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+  .drawer .rail {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 50;
+    width: min(280px, 82vw);
+    background: var(--panel);
+    overflow-y: auto;
+    transform: translateX(-100%);
+    transition: transform var(--dur-state) var(--ease-out);
+  }
+  .drawer .rail.open {
+    transform: translateX(0);
+    box-shadow: var(--shadow-pop);
+  }
+  .drawer .burger {
+    display: inline-flex;
+  }
+  .drawer .scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    background: var(--scrim);
+    opacity: 0;
+    visibility: hidden;
+    transition:
+      opacity var(--dur-state) var(--ease-out),
+      visibility 0.2s ease;
+  }
+  .drawer .scrim.show {
+    opacity: 1;
+    visibility: visible;
+  }
+  /* a phone's spacing is about the screen, not about the navigation */
   @media (max-width: 560px) {
-    .shell {
-      grid-template-columns: minmax(0, 1fr);
-      grid-template-rows: minmax(0, 1fr);
-    }
-    .rail {
-      position: fixed;
-      top: 0;
-      left: 0;
-      bottom: 0;
-      z-index: 50;
-      width: min(280px, 82vw);
-      background: var(--panel);
-      overflow-y: auto;
-      transform: translateX(-100%);
-      transition: transform var(--dur-state) var(--ease-out);
-    }
-    .rail.open {
-      transform: translateX(0);
-      box-shadow: var(--shadow-pop);
-    }
-    .burger {
-      display: inline-flex;
-    }
-    .scrim {
-      display: block;
-      position: fixed;
-      inset: 0;
-      z-index: 40;
-      background: var(--scrim);
-      opacity: 0;
-      visibility: hidden;
-      transition:
-        opacity var(--dur-state) var(--ease-out),
-        visibility 0.2s ease;
-    }
-    .scrim.show {
-      opacity: 1;
-      visibility: visible;
-    }
     .topbar {
       padding: var(--space-3) var(--space-4);
     }
