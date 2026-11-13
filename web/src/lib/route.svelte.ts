@@ -127,6 +127,34 @@ function threadFromPath(path: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
+/// The catalog pack being read, out of `/browse/<id>`. The catalog is the
+/// showcase, and a pack in it is a place somebody links to, so it has an
+/// address the way a mod does. A community id rides percent-encoded in the one
+/// segment, like the editor's.
+function catalogFromPath(path: string): string | null {
+  const m = path.match(/^\/browse\/(.+)$/);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+/// What the page that linked to a mod already knew about it, carried in the
+/// history entry. A jar the registry has not indexed has no page of its own to
+/// load, yet the manifest that listed it knows its name, source and size. The
+/// entry keeps it across a reload. A shared link carries none, and the page
+/// says only what the address does.
+export type ModHint = {
+  name: string;
+  filename: string;
+  size_bytes: number;
+  source: string;
+  pack_id?: string;
+  pack_name?: string;
+};
+
+function hintFromHistory(): ModHint | null {
+  const h = (history.state as { modHint?: ModHint } | null)?.modHint;
+  return h && typeof h.filename === 'string' ? h : null;
+}
+
 function initial(): Section {
   return sectionFromPath(location.pathname) ?? storedSection();
 }
@@ -149,6 +177,11 @@ let editPack = $state<string | null>(packFromPath(location.pathname));
 // location, so it survives a reload and can be linked to.
 let focusCommit = $state<string | null>(commitFromPath(location.pathname));
 let focusThread = $state<number | null>(threadFromPath(location.pathname));
+let focusCatalog = $state<string | null>(catalogFromPath(location.pathname));
+let modHint = $state<ModHint | null>(typeof history !== 'undefined' ? hintFromHistory() : null);
+// The name of the place on screen, for the crumb. The route knows a mod or a
+// pack by its ref; only the page that loaded it knows what it is called.
+let crumbLabel = $state<string | null>(null);
 
 // What the editor wants asked before it is left with edits the server has not
 // accepted. It lives on the route rather than on the Close button, because
@@ -174,9 +207,9 @@ async function mayLeaveEditor(): Promise<boolean> {
 /// commit has the previous site there, and `history.back()` would leave.
 let pushed = 0;
 
-function pushPath(path: string, replace = false) {
+function pushPath(path: string, replace = false, state: object = {}) {
   if (location.pathname === path) return;
-  history[replace ? 'replaceState' : 'pushState']({}, '', path);
+  history[replace ? 'replaceState' : 'pushState'](state, '', path);
   if (!replace) pushed += 1;
 }
 
@@ -204,8 +237,10 @@ if (typeof window !== 'undefined') {
     editPack = pack;
     focusCommit = commitFromPath(location.pathname);
     focusThread = threadFromPath(location.pathname);
+    focusCatalog = catalogFromPath(location.pathname);
     const mod = modFromPath(location.pathname);
     focusMod = mod;
+    modHint = mod ? hintFromHistory() : null;
     if (!mod) {
       const s = sectionFromPath(location.pathname);
       if (s) {
@@ -242,6 +277,8 @@ export const href = {
   /// A discussion with no editor under it -- what the catalog links to, and
   /// what a guest can be handed.
   discussion: (threadId: number) => `/thread/${threadId}`,
+  /// A pack's page in the catalog.
+  catalog: (id: string) => `/browse/${encodeURIComponent(id)}`,
 };
 
 /// True for a click the app should handle itself. A modified or middle click is
@@ -270,11 +307,50 @@ export const route = {
   get thread(): number | null {
     return focusThread;
   },
+  /// The catalog pack whose page is open, or null.
+  get catalog(): string | null {
+    return focusCatalog;
+  },
+  /// What the linking page knew about the open mod, or null.
+  get modHint(): ModHint | null {
+    return modHint;
+  },
+  get crumb(): string | null {
+    return crumbLabel;
+  },
+  /// Name the place on screen; `null` when the page leaves.
+  setCrumb(label: string | null) {
+    crumbLabel = label;
+  },
+  /// Open a pack's page in the catalog. Always under `browse`, whichever
+  /// section the link was on: the page belongs to the catalog.
+  openCatalog(id: string) {
+    focusMod = null;
+    editPack = null;
+    focusCommit = null;
+    focusThread = null;
+    section = 'browse';
+    remember('browse');
+    focusCatalog = id;
+    pushPath(href.catalog(id));
+  },
+  /// Back to the catalog the way back does, or onto it when this session put
+  /// nothing behind the page (a shared link, a reload).
+  closeCatalog() {
+    if (catalogFromPath(location.pathname) && pushed > 0) {
+      history.back();
+      return;
+    }
+    focusCatalog = null;
+    pushPath('/browse', true);
+  },
   /// `replace` is for a correction rather than a navigation -- landing on a
   /// section your role cannot see should not leave a step to go back to.
   async go(s: Section, replace = false) {
     if (!(await mayLeaveEditor())) return;
     focusMod = null; // picking a section leaves any open mod page
+    modHint = null;
+    focusCatalog = null;
     editPack = null;
     focusCommit = null;
     focusThread = null;
@@ -365,9 +441,10 @@ export const route = {
   },
   // Open a mod's page over the current section; `closeMod` returns to it. `ref`
   // is a numeric mod id or a `sha1:<hash>` artifact reference.
-  openMod(ref: number | string) {
+  openMod(ref: number | string, hint: ModHint | null = null) {
     focusMod = String(ref);
-    pushPath(`/mod/${encodeURIComponent(String(ref))}`);
+    modHint = hint;
+    pushPath(`/mod/${encodeURIComponent(String(ref))}`, false, hint ? { modHint: hint } : {});
   },
   closeMod() {
     // back rather than a fresh entry: the mod page was opened from the section
@@ -379,6 +456,7 @@ export const route = {
       return;
     }
     focusMod = null;
-    pushPath(`/${section}`, true);
+    modHint = null;
+    pushPath(focusCatalog !== null ? href.catalog(focusCatalog) : `/${section}`, true);
   },
 };

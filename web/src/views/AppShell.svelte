@@ -167,11 +167,21 @@
         <span class="bl" aria-hidden="true"></span>
       </button>
       <div class="crumb">
-        <span class="faint">smrt /</span>
-        {#if route.mod}
-          <button class="crumblink" onclick={() => route.closeMod()}>{t(navKey[route.section])}</button>
-          <span class="faint">/</span>
-          {t('shell.modPage')}
+        <span class="faint">smrt</span>
+        <span class="faint">/</span>
+        {#if route.mod || route.catalog != null}
+          <!-- the page's own name once it has loaded one, the kind of place
+               until then -->
+          <button
+            class="crumblink"
+            onclick={() => (route.mod ? route.closeMod() : route.closeCatalog())}
+            >{t(navKey[route.section])}</button
+          >
+          {@const here = route.crumb ?? (route.mod ? t('shell.modPage') : null)}
+          {#if here}
+            <span class="faint">/</span>
+            <span class="here">{here}</span>
+          {/if}
         {:else}
           {t(navKey[route.section])}
         {/if}
@@ -431,6 +441,11 @@
     padding: 0;
     min-height: 0;
     font: inherit;
+    /* a button does not inherit these from the line it sits in, and without
+       them the crumb read "SMRT / Каталог / МОД" */
+    text-transform: inherit;
+    letter-spacing: inherit;
+    box-shadow: none;
     color: var(--fg-dim);
     cursor: pointer;
   }
@@ -439,6 +454,11 @@
     background: transparent;
   }
   .crumb {
+    min-width: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 1ch;
+    white-space: nowrap;
     font-family: var(--mono);
     font-size: var(--fs-sm);
     letter-spacing: 0.06em;
@@ -447,6 +467,11 @@
   }
   .crumb .faint {
     color: var(--fg-faint);
+  }
+  .crumb .here {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .content {
     flex: 1;

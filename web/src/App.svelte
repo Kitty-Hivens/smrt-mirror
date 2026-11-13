@@ -10,6 +10,7 @@
   import AppShell from './views/AppShell.svelte';
   import Browse from './views/Browse.svelte';
   import PublicBrowse from './views/PublicBrowse.svelte';
+  import CatalogPack from './views/CatalogPack.svelte';
   import ModPage from './views/ModPage.svelte';
   import ThreadPage from './views/ThreadPage.svelte';
   import Profile from './views/Profile.svelte';
@@ -70,6 +71,10 @@
       <ThreadPage threadId={route.thread} />
     {:else if route.mod != null}
       <ModPage modRef={route.mod} me={me ?? null} onBack={() => route.closeMod()} />
+    {:else if route.catalog != null}
+      <!-- a pack's page in the catalog: as public as the catalog, so it sits
+           above every role check -->
+      <CatalogPack packId={route.catalog} me={me ?? null} />
     {:else if route.section === 'mods' && me}
       <!-- read-only for a member, full authoring for an operator; the view gates
            its own write surface, so one component serves both -->
