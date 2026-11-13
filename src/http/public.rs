@@ -1165,10 +1165,9 @@ async fn serve_file(
         .body(Body::empty())
         .map_err(|e| ApiError::Internal(e.into()))?;
 
-    let served = ServeFile::new(path)
-        .oneshot(probe)
-        .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+    // The file service reports a missing or unreadable file in the response,
+    // not as an error: its error type is uninhabited.
+    let Ok(served) = ServeFile::new(path).oneshot(probe).await;
     if served.status() == StatusCode::NOT_FOUND {
         return Err(ApiError::NotFound);
     }
