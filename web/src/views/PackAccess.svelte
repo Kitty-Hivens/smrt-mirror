@@ -9,6 +9,7 @@
   import { notifyFail, toasts } from '../lib/toasts.svelte';
   import { t } from '../lib/i18n.svelte';
   import Skeleton from './ui/Skeleton.svelte';
+  import Select from './ui/Select.svelte';
   import { dialogs } from '../lib/dialogs.svelte';
   import { nameOf as decidedBy } from '../lib/people';
   import type { PackBlock, PackGrant, PackLevel } from '../lib/types';
@@ -37,6 +38,7 @@
   let level = $state<PackLevel>('edit');
 
   const LEVELS: PackLevel[] = ['view', 'edit', 'own'];
+  const levelOptions = $derived(LEVELS.map((l) => ({ value: l, label: t(`acc.level.${l}`) })));
 
   $effect(() => {
     void load(packId);
@@ -167,11 +169,16 @@
         disabled={working}
         onkeydown={(e) => e.key === 'Enter' && grant()}
       />
-      <select bind:value={level} disabled={working}>
-        {#each LEVELS as l (l)}
-          <option value={l}>{t(`acc.level.${l}`)}</option>
-        {/each}
-      </select>
+      <span class="lvlsel">
+        <Select
+          full
+          value={level}
+          options={levelOptions}
+          disabled={working}
+          ariaLabel={t('acc.grant')}
+          onChange={(v) => (level = v as PackLevel)}
+        />
+      </span>
       <button onclick={grant} disabled={working || !uid.trim()}>{t('acc.grant')}</button>
     </div>
     <p class="muted hint">{t('acc.hint')}</p>
@@ -226,8 +233,16 @@
     align-items: center;
   }
   .add input {
-    font: inherit;
-    width: 200px;
+    flex: 0 1 220px;
+    min-width: 0;
+  }
+  .lvlsel {
+    display: flex;
+    flex: none;
+    width: 140px;
+  }
+  .add button {
+    flex: none;
   }
   .hint {
     font-size: var(--fs-sm);
@@ -240,6 +255,9 @@
     .meta {
       margin-left: 0;
       flex: 1 1 100%;
+    }
+    .add input {
+      flex: 1 1 auto;
     }
   }
 </style>

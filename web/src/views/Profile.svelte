@@ -147,7 +147,7 @@
           </button>
         </div>
       {:else}
-        <button class="link" onclick={showFeed} disabled={working}>{t('inbox.feedShow')}</button>
+        <button class="feedbtn" onclick={showFeed} disabled={working}>{t('inbox.feedShow')}</button>
       {/if}
     </div>
   </section>
@@ -252,6 +252,12 @@
     margin-top: var(--space-3);
     padding-top: var(--space-3);
     border-top: 1px solid var(--seam);
+  }
+  /* an action, so it looks like one: as a text link it inherited the page's
+     body size and read as a stray line under the list */
+  .feedbtn {
+    padding: 5px 12px;
+    font-size: var(--fs-sm);
   }
   .feed .small {
     margin: 0 0 6px;

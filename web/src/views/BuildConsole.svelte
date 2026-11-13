@@ -6,6 +6,7 @@
   import type { CommitStatus, JobStatus } from '../lib/types';
   import JobLog from './JobLog.svelte';
   import PackHistory from './PackHistory.svelte';
+  import Select from './ui/Select.svelte';
 
   let {
     packId,
@@ -67,6 +68,11 @@
   let packVersion = $state('');
   // publishing a release is an explicit act; the everyday build is a beta
   let channel = $state<'release' | 'beta' | 'alpha'>('beta');
+  const CHANNELS = [
+    { value: 'beta', label: 'beta' },
+    { value: 'release', label: 'release' },
+    { value: 'alpha', label: 'alpha' },
+  ];
   // Release notes per language rather than one box. The launcher renders them
   // to the player, and a mirror serving one community in its own language is
   // the ordinary case. The languages offered are the ones a client can render
@@ -180,14 +186,18 @@
       {t('bld.version')}
       <input class="mono" bind:value={packVersion} placeholder={t('bld.versionPlaceholder')} />
     </label>
-    <label class="ver">
-      {t('bld.channel')}
-      <select bind:value={channel}>
-        <option value="beta">beta</option>
-        <option value="release">release</option>
-        <option value="alpha">alpha</option>
-      </select>
-    </label>
+    <div class="ver">
+      <span>{t('bld.channel')}</span>
+      <span class="chan">
+        <Select
+          full
+          value={channel}
+          options={CHANNELS}
+          ariaLabel={t('bld.channel')}
+          onChange={(v) => (channel = v as typeof channel)}
+        />
+      </span>
+    </div>
   </div>
   <div class="notes">
     <div class="notes-h">
@@ -250,6 +260,10 @@
   }
   .ver input {
     width: 180px;
+  }
+  .chan {
+    display: flex;
+    width: 140px;
   }
   .notes {
     display: flex;
@@ -320,7 +334,8 @@
     .ver {
       flex: 1 1 100%;
     }
-    .ver input {
+    .ver input,
+    .chan {
       width: 100%;
     }
   }

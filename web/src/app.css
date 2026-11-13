@@ -491,6 +491,13 @@ select {
   padding: 9px 12px;
   width: 100%;
 }
+/* Machine values are typed in mono, which is why it is the default. A field
+   that holds words a reader will see (a name, a tagline) opts back into the
+   text face, so it reads the way it will be read. */
+input.prose,
+textarea.prose {
+  font-family: var(--sans);
+}
 input::placeholder,
 textarea::placeholder {
   color: var(--fg-faint);

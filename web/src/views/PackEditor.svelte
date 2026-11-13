@@ -701,6 +701,12 @@
   // whoever is still in the pack, and this copy stops sending into it.
   $effect(() => () => session?.close());
 
+  // the shell's crumb names the pack open here, by its card name once loaded
+  $effect(() => {
+    route.setCrumb(cfg?.display_name?.trim() || packId);
+    return () => route.setCrumb(null);
+  });
+
   // Every change goes to the writer. With a document open that is a merge, sent
   // as it is typed -- the delay that used to be here was there so a sentence was
   // one save rather than forty, and the mirror now does that waiting itself,
@@ -1455,7 +1461,7 @@
         <Section title={t('pe.basics')}>
           <div class="meta">
             <Field label={t('pe.displayName')} error={say(requiredError(cfg.display_name))}>
-              <input bind:value={cfg.display_name} />
+              <input class="prose" bind:value={cfg.display_name} />
             </Field>
             <!-- A list that is not a cage: the datalist offers the releases a
                  pack is normally built against, and the field still takes
@@ -1507,7 +1513,7 @@
               <p class="javahint muted">{javaHint}</p>
             {/if}
             <label class="chk"><input type="checkbox" bind:checked={cfg.featured} /> {t('pe.featured')}</label>
-            <Field label={t('pe.tagline')} wide><input bind:value={cfg.tagline} /></Field>
+            <Field label={t('pe.tagline')} wide><input class="prose" bind:value={cfg.tagline} /></Field>
             <Field label={t('pe.tags')} hint={t('pe.tagsHint')} wide><input bind:value={tagsStr} /></Field>
           </div>
         </Section>
@@ -1759,6 +1765,7 @@
               </div>
               <Field label={t('pe.card.taglineIn', { lang: cardLang })} wide>
                 <input
+                  class="prose"
                   value={cardText('tagline_i18n', cardLang)}
                   oninput={(e) => setCardText('tagline_i18n', cardLang, e.currentTarget.value)}
                 />
@@ -1974,12 +1981,17 @@
     overflow-x: auto;
     scrollbar-width: thin;
   }
+  /* Wraps as a group rather than running past the edge: with the revert
+     picker up, a phone had Preview and Close off screen. */
   .actions {
     display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
     align-items: center;
-    gap: var(--space-3);
+    gap: var(--space-2) var(--space-3);
     margin-left: auto;
-    flex: 0 0 auto;
+    flex: 0 1 auto;
+    min-width: 0;
   }
   .alsohere {
     font-size: var(--fs-xs);
@@ -2355,6 +2367,15 @@
     .meta,
     .brow {
       grid-template-columns: 1fr;
+    }
+    /* six tabs do not fit a phone, and a strip that scrolls sideways hides
+       the last two with nothing to say they are there: they wrap instead */
+    .tabs {
+      flex-basis: 100%;
+      overflow-x: visible;
+    }
+    .tabs :global(.tabstrip) {
+      flex-wrap: wrap;
     }
   }
 
