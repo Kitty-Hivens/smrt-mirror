@@ -1182,6 +1182,7 @@ pub fn packs_using_mod(
                 pack_version: r.get(1)?,
                 version: r.get(2)?,
                 filename: r.get(3)?,
+                display_name: None,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1217,6 +1218,7 @@ pub fn packs_using_mod_by_id(conn: &Connection, mod_id: i64) -> Result<Vec<ModUs
                 pack_version: r.get(1)?,
                 version: r.get(2)?,
                 filename: r.get(3)?,
+                display_name: None,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

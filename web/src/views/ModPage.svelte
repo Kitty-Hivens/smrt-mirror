@@ -1,7 +1,7 @@
 <script lang="ts">
   import { api, ApiError } from '../lib/api';
   import { detailOf, notifyFail, toasts } from '../lib/toasts.svelte';
-  import { route } from '../lib/route.svelte';
+  import { href, plainClick, route } from '../lib/route.svelte';
   import { t } from '../lib/i18n.svelte';
   import { isDebug } from '../lib/roles';
   import { fileProvenance } from '../lib/provenance';
@@ -28,12 +28,20 @@
 
   let detail = $state<ModDetail | null>(null);
   let loading = $state(true);
+  // The registry has no page for this ref. An expected answer, not a failed
+  // request: a pack can ship a jar the mirror has not indexed yet.
+  let missing = $state(false);
 
+  // What the page that linked here knew about the jar. Only a `sha1:` ref has
+  // one, and only when it was reached from a pack's list.
+  const hint = $derived(route.modHint);
+  const refSha1 = $derived(modRef.startsWith('sha1:') ? modRef.slice(5) : null);
 
   // reload whenever the focused mod ref changes (deps navigate between mods)
   $effect(() => {
     const ref = modRef;
     loading = true;
+    missing = false;
     detail = null;
     api
       .modDetail(ref)
@@ -41,12 +49,27 @@
         if (modRef === ref) detail = d;
       })
       .catch((e) => {
-        if (modRef === ref) notifyFail(e);
+        if (modRef !== ref) return;
+        if (e instanceof ApiError && e.status === 404) missing = true;
+        else notifyFail(e);
       })
       .finally(() => {
         if (modRef === ref) loading = false;
       });
   });
+
+  $effect(() => {
+    const name = detail?.name ?? (missing ? hint?.name : null) ?? null;
+    route.setCrumb(name);
+    return () => route.setCrumb(null);
+  });
+
+  const SOURCE_NAME: Record<string, string> = {
+    modrinth: 'Modrinth',
+    curseforge: 'CurseForge',
+    github: 'GitHub',
+  };
+  const sourceName = (s: string) => SOURCE_NAME[s] ?? t('mod.srcMirror');
 
   // The diff compares against the genuine Modrinth build, so it needs one of
   // those; the chip asks the wider question of whether the publisher carries
@@ -263,20 +286,69 @@
     <Section title={t('mod.usedBy')} count={detail.used_by.length} flush>
       <div class="uses">
         {#each detail.used_by as u (u.pack_id + u.pack_version)}
-          <div class="use">
-            <span class="upack">{u.pack_id}</span>
+          <a
+            class="use"
+            href={href.catalog(u.pack_id)}
+            onclick={(e) => {
+              if (!plainClick(e)) return;
+              e.preventDefault();
+              route.openCatalog(u.pack_id);
+            }}
+          >
+            <span class="upack">{u.display_name ?? u.pack_id}</span>
             <span class="uver mono faint">{u.pack_version}</span>
-            <span class="grow"></span>
             <span class="ufile mono muted">{u.filename}</span>
-          </div>
+          </a>
         {/each}
         {#if detail.used_by.length === 0}
           <div class="muted s pad">{t('mod.noUsedBy')}</div>
         {/if}
       </div>
     </Section>
-  {:else if !loading}
-    <div class="muted s">{t('mod.notFound')}</div>
+  {:else if missing && refSha1}
+    <!-- A jar a pack ships and the registry has not indexed: no releases, no
+         relations, no list of packs to give. What the linking page knew is
+         still true, so it is shown rather than thrown away. -->
+    <header class="head">
+      <ModIcon
+        name={hint?.name ?? refSha1}
+        source={{ type: 'smrt_cache', sha1: refSha1 }}
+        size={52}
+        mono
+      />
+      <div class="hinfo">
+        <h1 class="hname">{hint?.name ?? t('mod.unindexedTitle')}</h1>
+        <div class="hmeta">
+          {#if hint}
+            <span class="chip">{sourceName(hint.source)}</span>
+            <span class="tag">{fmtBytes(hint.size_bytes)}</span>
+            <span class="mono modid">{hint.filename}</span>
+          {/if}
+        </div>
+      </div>
+    </header>
+    <div class="panel gone">
+      <p>{t('mod.unindexed')}</p>
+      <dl>
+        <dt class="faint">sha1</dt>
+        <dd class="mono">{refSha1}</dd>
+        {#if hint?.pack_id}
+          <dt class="faint">{t('mod.shippedIn')}</dt>
+          <dd>
+            <a
+              href={href.catalog(hint.pack_id)}
+              onclick={(e) => {
+                if (!plainClick(e) || !hint?.pack_id) return;
+                e.preventDefault();
+                route.openCatalog(hint.pack_id);
+              }}>{hint.pack_name ?? hint.pack_id}</a
+            >
+          </dd>
+        {/if}
+      </dl>
+    </div>
+  {:else if missing}
+    <div class="panel gone"><p>{t('mod.notFound')}</p></div>
   {/if}
 </div>
 
@@ -292,12 +364,16 @@
     background: transparent;
     border: none;
     border-radius: 0;
+    box-shadow: none;
     color: var(--fg-faint);
     font-size: var(--fs-sm);
     padding: 2px 4px;
   }
   .back:hover {
     color: var(--fg-dim);
+  }
+  .head .modid {
+    overflow-wrap: anywhere;
   }
   .err {
     color: var(--danger);
@@ -506,27 +582,60 @@
   }
   .use {
     display: flex;
-    align-items: center;
-    gap: var(--space-2);
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 2px var(--space-2);
     padding: 9px var(--space-4);
     border-bottom: 1px solid var(--seam);
     font-size: var(--fs-md);
+    color: inherit;
+    text-decoration: none;
+  }
+  .use:hover {
+    background: var(--panel-2);
+  }
+  .use:hover .upack {
+    text-decoration: underline;
+    text-decoration-color: var(--seam-bright);
+    text-underline-offset: 2px;
   }
   .use:last-child {
     border-bottom: none;
   }
-  .grow {
-    flex: 1;
-  }
   .uver {
     font-size: var(--fs-xs);
   }
+  /* the file sits at the end of the line while there is room, and drops under
+     the pack's name when there is not, rather than squeezing the name */
   .ufile {
+    margin-left: auto;
+    min-width: 0;
+    max-width: 100%;
     font-size: var(--fs-xs);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    max-width: 45%;
+  }
+  .gone {
+    padding: var(--space-4);
+    font-size: var(--fs-md);
+  }
+  .gone p {
+    margin: 0;
+    max-width: 70ch;
+    color: var(--fg-dim);
+    line-height: 1.55;
+  }
+  .gone dl {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 6px var(--space-4);
+    margin: var(--space-3) 0 0;
+    font-size: var(--fs-sm);
+  }
+  .gone dd {
+    margin: 0;
+    overflow-wrap: anywhere;
   }
   .s {
     font-size: var(--fs-sm);

@@ -88,7 +88,8 @@
             {u.login}{#if u.github_uid === meUid}<span class="me mono">{t('users.you')}</span>{/if}
           </div>
           <div class="umeta muted mono">
-            uid {u.github_uid} &middot; {t('users.lastLogin')} {seen(u.last_login_at)}
+            <span>uid {u.github_uid}</span>
+            <span>{t('users.lastLogin')} {seen(u.last_login_at)}</span>
           </div>
           {#if u.suspension}
             <div class="stopped">
@@ -144,9 +145,10 @@
     overflow: hidden;
   }
   .urow {
-    display: flex;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
     align-items: center;
-    gap: var(--space-3);
+    gap: var(--space-2) var(--space-3);
     padding: var(--space-3);
     border-bottom: 1px solid var(--seam);
   }
@@ -154,7 +156,6 @@
     border-bottom: none;
   }
   .uinfo {
-    flex: 1;
     min-width: 0;
   }
   .uname {
@@ -180,6 +181,15 @@
     font-size: var(--fs-xs);
     margin-top: 2px;
   }
+  /* each fact wraps as a whole, so a date never breaks across lines */
+  .umeta span {
+    white-space: nowrap;
+  }
+  /* the separator opens the second fact, so a wrap carries it to the new line
+     instead of leaving it hanging at the end of the first */
+  .umeta span + span::before {
+    content: '\00B7\00A0';
+  }
   .chip {
     font-size: var(--fs-xs);
     padding: 1px 8px;
@@ -203,7 +213,20 @@
   }
   .roleset {
     display: flex;
-    flex-shrink: 0;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  /* A narrow column moves the actions onto a line of their own under the
+     name, rather than pushing the last of them off the edge. */
+  @container view (max-width: 600px) {
+    .urow {
+      grid-template-columns: auto minmax(0, 1fr) auto;
+    }
+    .roleset {
+      grid-column: 2 / -1;
+      justify-content: flex-start;
+      margin-left: -8px;
+    }
   }
   .link {
     background: transparent;

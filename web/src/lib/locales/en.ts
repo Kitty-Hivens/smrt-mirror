@@ -44,6 +44,10 @@ export const en = {
   'browse.optional': 'optional',
   'browse.discussion': 'Discussion',
   'browse.signInToReport': 'Sign in to report something or to join in.',
+  'catalog.mods': 'Mods',
+  'catalog.noBuild': 'This pack has no build yet, so there is nothing in it to list.',
+  'catalog.notFound': 'Pack not found.',
+  'catalog.notFoundSub': 'It may have been unpublished, or the link is mistyped.',
   'login.github': 'Continue with GitHub',
   'login.or': 'or',
   'login.useToken': 'Use admin token',
@@ -844,6 +848,10 @@ export const en = {
   'mod.noUsedBy': 'Not shipped by any published pack yet.',
   'mod.notFound': 'Mod not found.',
   'mod.external': 'External / uncatalogued target',
+  'mod.srcMirror': 'mirror',
+  'mod.unindexedTitle': 'File not in the registry',
+  'mod.unindexed': 'The mirror serves this jar as part of a pack but has not indexed it, so it has no releases, relations or list of packs here yet.',
+  'mod.shippedIn': 'Shipped in',
 } as const;
 
 /// A key is still required in both dictionaries, but each language counts where

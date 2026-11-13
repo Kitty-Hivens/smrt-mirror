@@ -9,6 +9,7 @@
   import { href, plainClick, route } from '../lib/route.svelte';
   import type { PackSummary, UploadRow } from '../lib/types';
   import PackEditor from './PackEditor.svelte';
+  import PackThumb from './ui/PackThumb.svelte';
 
   // A member's own packs: create a community pack and author it. The pack id is
   // u/<uid>/<name> -- the owner is encoded in the id, so the backend gates edits
@@ -117,25 +118,29 @@
             route.openPack(id);
           }}
         >
-          <span class="av mono">{nameOf(id).slice(0, 2).toUpperCase()}</span>
+          <PackThumb name={p?.display_name ?? nameOf(id)} banner={p?.banner_url} icon={p?.icon_url} />
           <div class="col">
             <div class="nm">{p?.display_name ?? nameOf(id)}</div>
             <div class="mm faint mono">
-              {p?.minecraft_version ?? '-'} &middot; {p?.latest_pack_version ?? t('packs.unbuilt')}
+              <span>{p?.minecraft_version ?? '-'}</span> &middot;
+              <span>{p?.latest_pack_version ?? t('packs.unbuilt')}</span>
             </div>
           </div>
-          <div class="grow"></div>
-          {#if p}
-            <span class="tag vis-{p.visibility}">{t(visKey[p.visibility])}</span>
-            <button
-              class="pub"
-              onclick={(e) => {
-                e.stopPropagation();
-                togglePublish(p);
-              }}>{p.visibility === 'published' ? t('packs.unpublish') : t('packs.publish')}</button>
-          {:else}
-            <span class="tag">{t('packs.unbuilt')}</span>
-          {/if}
+          <div class="side">
+            {#if p}
+              <span class="tag vis-{p.visibility}">{t(visKey[p.visibility])}</span>
+              <button
+                class="pub"
+                onclick={(e) => {
+                  // inside the row's link: without this the click also follows it
+                  e.preventDefault();
+                  e.stopPropagation();
+                  togglePublish(p);
+                }}>{p.visibility === 'published' ? t('packs.unpublish') : t('packs.publish')}</button>
+            {:else}
+              <span class="tag">{t('packs.unbuilt')}</span>
+            {/if}
+          </div>
         </a>
       {/each}
       {#if allIds.length === 0 && !loading}
@@ -176,11 +181,12 @@
     overflow: hidden;
   }
   .row {
-    display: flex;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
     color: inherit;
     text-decoration: none;
     align-items: center;
-    gap: var(--space-3);
+    gap: var(--space-2) var(--space-3);
     padding: var(--space-3);
     border-bottom: 1px solid var(--seam);
     cursor: pointer;
@@ -195,28 +201,32 @@
     outline: 2px solid var(--fg);
     outline-offset: -2px;
   }
-  .av {
-    width: 32px;
-    height: 32px;
-    flex: none;
-    display: grid;
-    place-items: center;
-    border-radius: var(--radius-sm);
-    background: var(--panel-3);
-    color: var(--fg-dim);
-    font-size: var(--fs-sm);
-    font-weight: 700;
-  }
   .col {
     min-width: 0;
   }
   .nm {
     font-size: var(--fs-lg);
     font-weight: 600;
+    overflow-wrap: anywhere;
   }
   .mm {
     font-size: var(--fs-xs);
     margin-top: 2px;
+  }
+  .mm span {
+    white-space: nowrap;
+  }
+  .side {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+  }
+  /* A narrow column puts the state and its action under the name, so the
+     name keeps the width and nothing lands on top of it. */
+  @container view (max-width: 600px) {
+    .side {
+      grid-column: 2 / -1;
+    }
   }
   .grow {
     flex: 1;

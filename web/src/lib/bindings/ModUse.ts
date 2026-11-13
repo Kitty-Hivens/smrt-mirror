@@ -3,4 +3,9 @@
 /**
  * Q1: a (pack build, version, filename) that ships a given mod.
  */
-export type ModUse = { pack_id: string, pack_version: string, version: string, filename: string, };
+export type ModUse = { pack_id: string, pack_version: string, version: string, filename: string, 
+/**
+ * The pack's card name. The registry knows builds by id only, so the
+ * public endpoint fills this from the pack summary it already reads.
+ */
+display_name?: string, };

@@ -231,6 +231,11 @@ pub struct ModUse {
     pub pack_version: String,
     pub version: String,
     pub filename: String,
+    /// The pack's card name. The registry knows builds by id only, so the
+    /// public endpoint fills this from the pack summary it already reads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub display_name: Option<String>,
 }
 
 /// Q2: a cached artifact no build references.

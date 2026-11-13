@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { letterAvatar } from '../lib/preview';
+  import { letterAvatar, readableInitials } from '../lib/preview';
   import type { Source, SourceDecl } from '../lib/types';
 
   // accepts the wire Source (preview) or the authoring SourceDecl (editor) -- both
@@ -27,6 +27,7 @@
   } = $props();
 
   const avatar = $derived(letterAvatar(name));
+  const initials = $derived(mono ? readableInitials(name) : avatar.initials);
   const explicit = $derived(iconUrl?.trim() || null);
   // index into the candidate chain; a load error advances to the next candidate
   // instead of giving up, so a project the mirror has no icon for degrades to
@@ -76,7 +77,7 @@
     style="width:{size}px;height:{size}px;font-size:{Math.round(size * 0.4)}px{mono
       ? ''
       : `;background:${avatar.color}`}"
-    aria-label={name}>{avatar.initials}</span
+    aria-label={name}>{initials}</span
   >
 {/if}
 
