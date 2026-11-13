@@ -8,6 +8,19 @@ version section when a release is tagged.
 
 ### Fixed
 
+- The catalog never showed a pack's banner, though six official packs carry
+  one. It was an accordion of rows: a hovered row's version pill vanished into
+  the row's own background, the version column drifted with the width of the
+  strings in it, and on a phone the tagline came down to a word beside two
+  fixed tags. The catalog is now a showcase of cards led by each pack's banner,
+  and a card opens the pack's own page at `/browse/<id>`, with the banner shown
+  whole, the loader, Java and mod count, the description, the gallery, the
+  discussion and the mods. A pack can be linked to the way a mod can.
+- A jar a pack ships and the registry has not indexed opened a mod page that
+  said only "Mod not found", with an error notice on top for an expected
+  answer. The page now shows the name, source, size, file, hash and pack the
+  link came from, and keeps them across a reload. The packs a mod page lists
+  are links to their catalog pages and go by their card names.
 - A multi-loader mod read its dependencies off Modrinth's list for the whole
   version. More Enchantment Info 0.4.2 is one Modrinth version for Fabric, Forge
   and NeoForge, so a NeoForge pack was told it lacked Fabric Language Kotlin and
