@@ -14,6 +14,7 @@
   import Moderation from './Moderation.svelte';
   import Audit from './Audit.svelte';
   import DataTable, { type Column } from './ui/DataTable.svelte';
+  import PackThumb from './ui/PackThumb.svelte';
 
   let { me }: { me: { login: string } } = $props();
 
@@ -273,7 +274,7 @@
                   route.openPackIn('packs', id);
                 }}
               >
-                <span class="av">{(p?.display_name ?? id).slice(0, 2).toUpperCase()}</span>
+                <PackThumb name={p?.display_name ?? id} banner={p?.banner_url} icon={p?.icon_url} />
                 <div class="lcol">
                   <div class="nm">{p?.display_name ?? id}</div>
                   <div class="mm">
@@ -351,8 +352,8 @@
                 {#if r.summary.tier === 'community'}<span class="tag">{t('packs.tier.community')}</span>{/if}
               {/if}
             </td>
-            <td>{#each r.summary?.tags ?? [] as tg}<span class="tag">{tg}</span> {/each}</td>
-            <td>
+            <td class="narrow-hide">{#each r.summary?.tags ?? [] as tg}<span class="tag">{tg}</span> {/each}</td>
+            <td class="narrow-hide">
               {#if r.summary?.featured}<span class="tag" style="color:var(--accent)">{t('packs.flag.featured')}</span>{/if}
               {#if r.authoring}<span class="tag" style="color:var(--ok)">{t('packs.flag.authoring')}</span>{/if}
             </td>
@@ -398,7 +399,7 @@
             </td>
             <td class="mono">{s.pack_id}</td>
             <td>{s.owner_display}</td>
-            <td>
+            <td class="narrow-hide">
               {#if s.featured}<span class="tag" style="color:var(--accent)">{t('packs.flag.featured')}</span>{/if}
             </td>
             <td class="actions">
@@ -552,19 +553,6 @@
     outline: 2px solid var(--fg);
     outline-offset: -2px;
   }
-  .lrow .av {
-    width: 30px;
-    height: 30px;
-    border-radius: 8px;
-    background: var(--panel-3);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: var(--fs-xs);
-    font-weight: 700;
-    color: var(--fg-dim);
-    flex: none;
-  }
   .lcol {
     min-width: 0;
   }
@@ -650,9 +638,15 @@
     gap: var(--space-3);
     margin-bottom: 14px;
   }
+  .bar .primary {
+    flex: none;
+    white-space: nowrap;
+  }
+  /* takes what the button leaves, up to its own width, rather than a fixed
+     width that squeezed the button onto two lines on a phone */
   .tfilter {
-    width: 240px;
-    max-width: 100%;
+    flex: 0 1 240px;
+    min-width: 0;
     padding: 7px 11px;
     font-size: var(--fs-sm);
   }

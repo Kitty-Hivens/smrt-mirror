@@ -63,7 +63,7 @@
             {r.actor_login} <span class="muted mono">uid {r.actor_uid}</span>
           </div>
           {#if r.target}
-            <div class="tgt muted mono">
+            <div class="tgt muted mono" title={r.detail ? `${r.target} · ${r.detail}` : r.target}>
               {r.target}{#if r.detail}&nbsp;&middot; {r.detail}{/if}
             </div>
           {/if}
@@ -92,10 +92,13 @@
   .more {
     align-self: center;
   }
+  /* One column width for the action, whatever its length, so every row's
+     text starts at the same place. */
   .arow {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
+    display: grid;
+    grid-template-columns: 15ch minmax(0, 1fr) auto;
+    align-items: start;
+    gap: var(--space-1) var(--space-3);
     padding: var(--space-3);
     border-bottom: 1px solid var(--seam);
   }
@@ -108,29 +111,45 @@
     border: 1px solid var(--seam);
     border-radius: 999px;
     color: var(--fg-dim);
-    flex-shrink: 0;
     letter-spacing: 0.04em;
-    align-self: flex-start;
+    justify-self: start;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     margin-top: 2px;
   }
   .ainfo {
-    flex: 1;
     min-width: 0;
   }
   .who {
     font-size: var(--fs-md);
     font-weight: 600;
   }
+  /* one line: a commit hash broken over five lines says less than its
+     first twelve characters, and the whole of it is in the tooltip */
   .tgt {
     font-size: var(--fs-xs);
     margin-top: 2px;
-    overflow-wrap: anywhere;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .when {
     font-size: var(--fs-xs);
-    flex-shrink: 0;
-    align-self: flex-start;
+    white-space: nowrap;
     margin-top: 3px;
+  }
+  /* A narrow column puts the action and the time on the first line and gives
+     who did what the whole width under them. */
+  @container view (max-width: 600px) {
+    .arow {
+      grid-template-columns: minmax(0, 1fr) auto;
+    }
+    .ainfo {
+      grid-column: 1 / -1;
+      grid-row: 2;
+    }
   }
   .empty {
     padding: var(--space-4);

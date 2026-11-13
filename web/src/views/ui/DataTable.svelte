@@ -100,7 +100,7 @@
 </script>
 
 <div class="tablewrap">
-  <table>
+  <table class="dt">
     <thead>
       {#each table.getHeaderGroups() as hg (hg.id)}
         <tr>
@@ -224,5 +224,60 @@
   }
   .dt-th.sorted {
     color: var(--fg);
+  }
+
+  /* A narrow column folds each row into a card instead of scrolling a wide
+     table sideways under a thumb. The first cell (what the row is) takes the
+     whole line, the rest flow under it, and the actions cell sits at the end
+     of the last line. A cell that only adds noise at this width is marked
+     `narrow-hide` by the caller, which knows what its columns mean. */
+  @container view (max-width: 600px) {
+    .dt,
+    .dt tbody {
+      display: block;
+    }
+    .dt thead {
+      display: none;
+    }
+    .dt tbody tr {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: var(--space-1) var(--space-3);
+      padding: var(--space-3);
+      border-bottom: 1px solid var(--seam);
+    }
+    .dt tbody tr:last-child {
+      border-bottom: none;
+    }
+    .dt tbody tr:nth-child(even) {
+      background: var(--zebra);
+    }
+    .dt tbody tr:hover {
+      background: var(--panel-2);
+    }
+    .dt :global(tbody td) {
+      display: block;
+      padding: 0;
+      border: none;
+      background: none;
+    }
+    .dt tbody tr:nth-child(even) :global(td),
+    .dt tbody tr:hover :global(td) {
+      background: none;
+    }
+    .dt :global(tbody td:first-child) {
+      flex-basis: 100%;
+      min-width: 0;
+    }
+    .dt :global(tbody td.actions) {
+      margin-left: auto;
+    }
+    .dt :global(tbody td.narrow-hide) {
+      display: none;
+    }
+    .dt :global(tbody td[colspan]) {
+      flex-basis: 100%;
+    }
   }
 </style>
