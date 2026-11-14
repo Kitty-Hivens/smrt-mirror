@@ -45,6 +45,8 @@
   // in a strip at tablet width showed the first one and hid the rest in a
   // sideways scroll nothing pointed to. Decided here rather than in media
   // queries alone, because how many sections there are is not a fact CSS has.
+  // The shell wears it as `lay-<shape>`: a bare `rail` is the nav's own class,
+  // and the shell wearing it took the nav's column layout.
   let vw = $state(typeof window !== 'undefined' ? window.innerWidth : 1280);
   const STRIP_MAX = 4;
   const layout = $derived<'rail' | 'strip' | 'drawer'>(
@@ -104,7 +106,7 @@
 
 <svelte:window onkeydown={onWindowKeydown} bind:innerWidth={vw} />
 
-<div class="shell {layout}">
+<div class="shell lay-{layout}">
   <nav class="rail" class:open={drawerOpen} id="rail-nav">
     <div class="brand"><img class="mk" src="/favicon.svg" alt="" />smrt<span class="faint">/control</span></div>
 
@@ -425,7 +427,7 @@
     padding: var(--space-3) var(--space-5);
     border-bottom: 1px solid var(--seam);
   }
-  /* hamburger: hidden until the shell is in drawer layout (see .drawer below) */
+  /* hamburger: hidden until the shell is in drawer layout (see .lay-drawer below) */
   .burger {
     display: none;
     flex: none;
@@ -520,13 +522,13 @@
   /* strip: the rail as a bar across the top, for a tablet-width window with
      few enough sections to show them all. Brand pinned left, foot pinned
      right, the sections between them. */
-  .shell.strip {
+  .shell.lay-strip {
     /* minmax(0,...) not 1fr: 1fr's auto minimum lets the horizontal rail's
        min-content (the full nav) blow the single column past the viewport */
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr);
   }
-  .strip .rail {
+  .lay-strip .rail {
     flex-direction: row;
     align-items: center;
     gap: var(--space-3);
@@ -534,25 +536,25 @@
     border-right: none;
     border-bottom: 1px solid var(--seam);
   }
-  .strip .brand {
+  .lay-strip .brand {
     flex: none;
     padding: 0 var(--space-2);
   }
-  .strip .nav {
+  .lay-strip .nav {
     flex-direction: row;
     flex: 1;
     min-width: 0;
     overflow-x: auto;
     gap: var(--space-1);
   }
-  .strip .nav li {
+  .lay-strip .nav li {
     flex: none;
   }
-  .strip .item {
+  .lay-strip .item {
     width: auto;
     white-space: nowrap;
   }
-  .strip .item.active::before {
+  .lay-strip .item.active::before {
     top: auto;
     bottom: 2px;
     left: 8px;
@@ -560,33 +562,33 @@
     width: auto;
     height: 3px;
   }
-  .strip .spacer {
+  .lay-strip .spacer {
     display: none;
   }
-  .strip .foot {
+  .lay-strip .foot {
     flex-direction: row;
     align-items: center;
     flex: none;
     padding: 0;
     gap: var(--space-2);
   }
-  .strip .who,
-  .strip .signout,
-  .strip .signin {
+  .lay-strip .who,
+  .lay-strip .signout,
+  .lay-strip .signin {
     width: auto;
   }
-  .strip .whotext {
+  .lay-strip .whotext {
     max-width: 140px;
   }
 
   /* drawer: the rail slides in from the left over a scrim, toggled by the
      topbar burger. A phone always gets it, and so does a tablet-width window
      whose sections would not fit a strip. The full vertical rail is kept. */
-  .shell.drawer {
+  .shell.lay-drawer {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);
   }
-  .drawer .rail {
+  .lay-drawer .rail {
     position: fixed;
     top: 0;
     left: 0;
@@ -598,14 +600,14 @@
     transform: translateX(-100%);
     transition: transform var(--dur-state) var(--ease-out);
   }
-  .drawer .rail.open {
+  .lay-drawer .rail.open {
     transform: translateX(0);
     box-shadow: var(--shadow-pop);
   }
-  .drawer .burger {
+  .lay-drawer .burger {
     display: inline-flex;
   }
-  .drawer .scrim {
+  .lay-drawer .scrim {
     display: block;
     position: fixed;
     inset: 0;
@@ -617,7 +619,7 @@
       opacity var(--dur-state) var(--ease-out),
       visibility 0.2s ease;
   }
-  .drawer .scrim.show {
+  .lay-drawer .scrim.show {
     opacity: 1;
     visibility: visible;
   }
