@@ -12,6 +12,7 @@
   import Glyph from './ui/Glyph.svelte';
   import Avatar from './Avatar.svelte';
   import { route, href, plainClick } from '../lib/route.svelte';
+  import { stagger } from '../lib/motion.svelte';
   import type { Thread } from '../lib/types';
 
   let {
@@ -45,6 +46,11 @@
   // list opens, so the report button is absent rather than refused.
   let suspended = $state<{ reason?: string; at: number; everywhere: boolean } | null>(null);
   let loading = $state(true);
+  // Whether anything has been shown yet. Only the first read waits behind a
+  // placeholder: after that a new read dims what is on screen until the answer
+  // replaces it, so switching the filter never empties the section and moves
+  // the page under the reader.
+  let shown = $state(false);
   let failed = $state(false);
   let showAll = $state(false);
   let working = $state(false);
@@ -76,18 +82,27 @@
     })();
   });
 
+  // Each read is numbered and only the newest may write: a slow answer for the
+  // filter the reader has already left must not land over the one they chose.
+  let seq = 0;
   async function load() {
+    const mine = ++seq;
     loading = true;
     try {
       const page = await api.threads(packId, undefined, showAll, PAGE);
+      if (mine !== seq) return;
       rows = page.rows;
       next = page.next;
       failed = false;
     } catch (e) {
+      if (mine !== seq) return;
       failed = true;
       notifyFail(e);
     } finally {
-      loading = false;
+      if (mine === seq) {
+        loading = false;
+        shown = true;
+      }
     }
   }
 
@@ -227,23 +242,25 @@
     </div>
   {/if}
 
-  {#if loading && !rows.length}
+  {#if loading && !shown}
     <Skeleton rows={3} height={64} gap={0} shape="row" lead={28} />
   {:else if failed}
     <p class="lead">{t('thr.unreadable')}</p>
   {:else if !rows.length}
     <!-- an empty discussion is still the place to start one, so it says how -->
-    <div class="empty">
+    <div class="empty" class:stale={loading}>
       <span class="emark"><Glyph name="chat" size={18} /></span>
       <div>
-        <div class="etitle">{showAll ? t('thr.noneAtAll') : t('thr.noneOpen')}</div>
+        {#key showAll}
+          <div class="etitle">{showAll ? t('thr.noneAtAll') : t('thr.noneOpen')}</div>
+        {/key}
         <p class="esub">{canWrite ? t('thr.emptySub') : t('browse.signInToReport')}</p>
       </div>
     </div>
   {:else}
-    <ol class="list">
-      {#each rows as r (r.id)}
-        <li>
+    <ol class="list" class:stale={loading}>
+      {#each rows as r, i (r.id)}
+        <li class="row-in" use:stagger={i}>
           <a class="row" href={address(r)} onclick={(e) => open(e, r)}>
             <Avatar uid={r.by_uid} login={r.by_login ?? '?'} size={28} />
             <span class="main">
@@ -326,13 +343,13 @@
     padding-left: 10px;
   }
 
+  /* the section is already the frame: the empty state is a line in it, not a
+     second box drawn inside the first */
   .empty {
     display: flex;
     align-items: center;
     gap: var(--space-4);
-    padding: var(--space-5);
-    border: 1px dashed var(--seam-bright);
-    border-radius: var(--radius-md);
+    padding: var(--space-2) 0;
   }
   .emark {
     width: 40px;
@@ -347,6 +364,7 @@
   .etitle {
     font-size: var(--fs-lg);
     font-weight: 600;
+    animation: row-in var(--dur-enter) var(--ease-out) backwards;
   }
   .esub {
     margin: 2px 0 0;
@@ -374,8 +392,15 @@
     color: inherit;
     text-decoration: none;
   }
+  .row {
+    transition: background var(--dur-state) var(--ease-out);
+  }
   .row:hover {
     background: var(--panel-2);
+  }
+  .row:focus-visible {
+    outline: none;
+    box-shadow: inset 0 0 0 2px var(--seam-bright);
   }
   .row:hover .ttl {
     text-decoration: underline;
@@ -445,9 +470,6 @@
   @container view (max-width: 560px) {
     .count {
       display: none;
-    }
-    .empty {
-      padding: var(--space-4);
     }
   }
 </style>
