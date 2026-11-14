@@ -169,10 +169,8 @@
         // the list itself reports its own failure; the card says nothing
       });
   });
-  let talkOpen = $state(false);
-  let talkEl = $state<HTMLDetailsElement | null>(null);
+  let talkEl = $state<HTMLElement | null>(null);
   function showTalk() {
-    talkOpen = true;
     talkEl?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
@@ -316,39 +314,41 @@
     <div class="sk hero-sk" aria-hidden="true"></div>
     <Skeleton rows={4} height={22} />
   {:else if summary}
-    <header class="panel hero">
-      {#if banner}
-        <img
-          class="cover"
-          src={banner}
-          alt=""
-          onload={(e) => sampleHue(e.currentTarget as HTMLImageElement)}
-          onerror={() => (bannerBroken = true)}
-        />
-      {/if}
-      <div class="heroin">
-        <!-- the letter stands in for a missing icon only where there is no
-             picture at all: under a banner it is one more square saying nothing -->
-        {#if summary.icon_url && !iconBroken}
-          <img class="picon" src={summary.icon_url} alt="" onerror={() => (iconBroken = true)} />
-        {:else if !banner}
-          <span class="picon letter mono" aria-hidden="true">
-            {summary.display_name.slice(0, 1).toUpperCase()}
-          </span>
-        {/if}
-        <div class="htext">
-          <h1 class="hname">
-            {summary.display_name}{#if summary.featured}<span class="feat mono">{t('packs.flag.featured')}</span>{/if}
-          </h1>
-          {#if owner}<div class="hby">{t('browse.by', { user: owner })}</div>{/if}
-          {#if tagline}<p class="htag">{tagline}</p>{/if}
-        </div>
-      </div>
-    </header>
 
-    <!-- What the pack is built on and what can be done with it, beside what it
-         says about itself rather than under it, with the mods under that. -->
+    <!-- The card runs down the right edge from the top, level with the
+         banner; the pack's own picture, words and mods fill the rest, and the
+         discussion closes the page under them. -->
     <div class="layout">
+      <header class="panel hero">
+        {#if banner}
+          <img
+            class="cover"
+            src={banner}
+            alt=""
+            onload={(e) => sampleHue(e.currentTarget as HTMLImageElement)}
+            onerror={() => (bannerBroken = true)}
+          />
+        {/if}
+        <div class="heroin">
+          <!-- the letter stands in for a missing icon only where there is no
+               picture at all: under a banner it is one more square saying nothing -->
+          {#if summary.icon_url && !iconBroken}
+            <img class="picon" src={summary.icon_url} alt="" onerror={() => (iconBroken = true)} />
+          {:else if !banner}
+            <span class="picon letter mono" aria-hidden="true">
+              {summary.display_name.slice(0, 1).toUpperCase()}
+            </span>
+          {/if}
+          <div class="htext">
+            <h1 class="hname">
+              {summary.display_name}{#if summary.featured}<span class="feat mono">{t('packs.flag.featured')}</span>{/if}
+            </h1>
+            {#if owner}<div class="hby">{t('browse.by', { user: owner })}</div>{/if}
+            {#if tagline}<p class="htag">{tagline}</p>{/if}
+          </div>
+        </div>
+      </header>
+
       <div class="lcol">
         {#if about}
           <!-- renderMarkdown sanitizes: the author's own markup is escaped, never passed through -->
@@ -362,17 +362,6 @@
             {/each}
           </div>
         {/if}
-
-        <!-- What is being asked of this pack, where the pack is. A decision
-             nobody can find is indistinguishable from one nobody made. Folded,
-             so an empty discussion takes one line. -->
-        <details class="panel talk" bind:this={talkEl} bind:open={talkOpen}>
-          <summary>{t('browse.discussion')}</summary>
-          <PackThreads packId={summary.pack_id} standalone canWrite={me != null} />
-          {#if !me}
-            <p class="muted signin">{t('browse.signInToReport')}</p>
-          {/if}
-        </details>
 
         {#if !manifest && !loading}
           <p class="muted">{t('catalog.noBuild')}</p>
@@ -391,33 +380,39 @@
               <div class="when"><Glyph name="clock" size={14} />{t('catalog.builtOn', { date: builtOn })}</div>
             {/if}
             <div class="actions">
-              {#if me}
-                <button class="primary act wide" onclick={fork}><Glyph name="fork" />{t('browse.fork')}</button>
-              {/if}
               <div class="actrow">
-                {#if canEdit}
-                  <a
-                    class="btnlike act"
-                    href={href.pack(packId, editSection)}
-                    onclick={(e) => {
-                      if (!plainClick(e)) return;
-                      e.preventDefault();
-                      route.openPackIn(editSection, packId);
-                    }}><Glyph name="edit" />{t('catalog.openEditor')}</a
-                  >
+                {#if me}
+                  <button class="primary act grow" onclick={fork}><Glyph name="fork" />{t('browse.fork')}</button>
                 {/if}
+                <!-- alone on the line it says what it does; beside the fork
+                     the glyph is enough -->
                 <button
-                  class="act iconbtn"
+                  class="act linkbtn"
+                  class:grow={!me}
                   class:done={copied}
                   onclick={copyLink}
                   title={copied ? t('catalog.linkCopied') : t('catalog.copyLink')}
                   aria-label={t('catalog.copyLink')}
                 >
-                  <span class="swap" class:on={!copied}><Glyph name="link" /></span>
-                  <span class="swap" class:on={copied}><Glyph name="check" /></span>
+                  <span class="swapbox">
+                    <span class="swap" class:on={!copied}><Glyph name="link" /></span>
+                    <span class="swap" class:on={copied}><Glyph name="check" /></span>
+                  </span>
+                  {#if !me}{copied ? t('catalog.linkCopied') : t('catalog.copyLink')}{/if}
                 </button>
                 <span class="vh" aria-live="polite">{copied ? t('catalog.linkCopied') : ''}</span>
               </div>
+              {#if canEdit}
+                <a
+                  class="btnlike act"
+                  href={href.pack(packId, editSection)}
+                  onclick={(e) => {
+                    if (!plainClick(e)) return;
+                    e.preventDefault();
+                    route.openPackIn(editSection, packId);
+                  }}><Glyph name="edit" />{t('catalog.openEditor')}</a
+                >
+              {/if}
             </div>
           </div>
 
@@ -546,6 +541,16 @@
           </section>
         {/if}
       </aside>
+
+      <!-- What is being asked of this pack, where the pack is. A decision
+           nobody can find is indistinguishable from one nobody made, so it is
+           a section of the page, not a fold at the bottom of one. -->
+      <section class="panel talk" bind:this={talkEl}>
+        <h2 class="talkhead">
+          {t('browse.discussion')}{#if openThreads.length}<span class="count mono">{openThreads.length}</span>{/if}
+        </h2>
+        <PackThreads packId={summary.pack_id} standalone canWrite={me != null} />
+      </section>
     </div>
   {:else if missing}
     <div class="gone">
@@ -634,48 +639,63 @@
     color: var(--fg-dim);
     max-width: 70ch;
   }
-  /* One column on a narrow window, in reading order: what the pack runs on,
-     what it says, what is in it. The side column dissolves into that order
-     rather than landing all of its hundred mods before the description. */
+  /* One column on a narrow window, in reading order: the pack, what it runs
+     on and what can be done with it, what it says, what is in it, what is
+     being said about it. */
   .layout {
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
+  }
+  .hero {
+    order: 0;
+  }
+  .ctl {
+    order: 1;
   }
   .lcol {
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
     min-width: 0;
-    order: 1;
+    order: 2;
   }
   .side {
     display: contents;
   }
-  .ctl {
-    order: 0;
-  }
   .modsec {
-    order: 2;
+    order: 3;
+  }
+  .talk {
+    order: 4;
   }
 
-  /* Wide enough for the control card to stand beside the text: the card is
-     a narrow column at the right edge, pinned while the page scrolls, and
-     the mods follow the text on the left. */
+  /* Wide enough for the card to have the right edge to itself: it runs from
+     the top, level with the banner, and stays in view while the page scrolls
+     past it. Everything else is the column to its left, in reading order. */
   @container view (min-width: 1000px) {
     .layout {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) 340px;
+      grid-template-columns: minmax(0, 1fr) 320px;
       grid-template-areas:
+        'hero card'
         'text card'
-        'mods card';
+        'mods card'
+        'talk card';
+      grid-template-rows: auto auto auto 1fr;
       align-items: start;
+    }
+    .hero {
+      grid-area: hero;
     }
     .lcol {
       grid-area: text;
     }
     .modsec {
       grid-area: mods;
+    }
+    .talk {
+      grid-area: talk;
     }
     .ctl {
       grid-area: card;
@@ -685,12 +705,37 @@
       overflow-y: auto;
     }
   }
-  /* A large screen, which is most of them: three columns, the text at its
-     reading measure, the mods beside it, the card at the right edge. */
+  /* A large screen, which is most of them: the description and the mods
+     side by side under the banner, the card down the right edge. */
   @container view (min-width: 1370px) {
     .layout {
-      grid-template-columns: minmax(0, 46rem) minmax(260px, 1fr) 340px;
-      grid-template-areas: 'text mods card';
+      grid-template-columns: minmax(0, 46rem) minmax(260px, 1fr) 320px;
+      grid-template-areas:
+        'hero hero card'
+        'text mods card'
+        'talk talk card';
+      grid-template-rows: auto auto 1fr;
+    }
+    /* The description sets the height of the row and the mods fill it,
+       scrolling inside: a hundred mods in a column beside a short text would
+       otherwise stretch the row and leave a hole under the text as tall as
+       the list. contain:size keeps the list out of the row's measurement, and
+       the floor keeps a short description from squeezing it shut. */
+    .modsec {
+      contain: size;
+      align-self: stretch;
+      min-height: 480px;
+      display: flex;
+      flex-direction: column;
+    }
+    .mods {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      /* the last rows fade, so a list cut by its own height says there is
+         more under it */
+      mask-image: linear-gradient(to bottom, black calc(100% - 28px), transparent);
+      padding-bottom: 20px;
     }
   }
   /* ── the control card ──
@@ -723,11 +768,11 @@
   }
   .cb {
     background: var(--panel);
-    padding: var(--space-4) var(--space-5);
+    padding: var(--space-3) var(--space-4);
     min-width: 0;
   }
   .head {
-    padding-top: var(--space-5);
+    padding-top: var(--space-4);
   }
   /* given room, the same blocks sit two abreast: what it is and what to do
      beside what it runs on, what is in it beside what changed */
@@ -750,7 +795,7 @@
   }
   .vnum {
     font-family: var(--mono);
-    font-size: 32px;
+    font-size: 26px;
     font-weight: 650;
     letter-spacing: -0.03em;
     line-height: 1;
@@ -781,7 +826,7 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
-    margin-top: var(--space-4);
+    margin-top: var(--space-3);
   }
   .actrow {
     display: flex;
@@ -792,15 +837,13 @@
     align-items: center;
     justify-content: center;
     gap: var(--space-2);
-    min-height: 38px;
-    padding: 0 16px;
+    min-height: 36px;
+    padding: 0 14px;
     font-size: var(--fs-md);
     text-decoration: none;
   }
-  .act.wide {
-    width: 100%;
-    min-height: 42px;
-    font-size: var(--fs-lg);
+  .act.grow {
+    flex: 1;
   }
   /* the primary action wears the pack's colour */
   .act.primary {
@@ -810,17 +853,20 @@
   :global(:root[data-theme='light']) .act.primary {
     color: #fff;
   }
-  .actrow .act:not(.iconbtn) {
-    flex: 1;
-  }
-  .iconbtn {
-    position: relative;
-    width: 38px;
+  /* beside the fork it is a square glyph; alone it takes the line and says
+     what it does */
+  .linkbtn:not(.grow) {
+    width: 36px;
     padding: 0;
     flex: none;
-    margin-left: auto;
   }
-  .iconbtn.done {
+  .swapbox {
+    position: relative;
+    width: 16px;
+    height: 16px;
+    flex: none;
+  }
+  .linkbtn.done {
     color: var(--ok);
     border-color: color-mix(in srgb, var(--ok) 45%, var(--seam-bright));
   }
@@ -933,8 +979,8 @@
   /* a small square holding a block's glyph, so the card's sections read
      down its left edge */
   .badge {
-    width: 28px;
-    height: 28px;
+    width: 26px;
+    height: 26px;
     flex: none;
     display: grid;
     place-items: center;
@@ -946,9 +992,9 @@
     display: flex;
     align-items: center;
     gap: var(--space-3);
-    font-size: var(--fs-lg);
+    font-size: var(--fs-md);
     font-weight: 650;
-    margin-bottom: var(--space-3);
+    margin-bottom: var(--space-2);
   }
   .notes {
     font-size: var(--fs-md);
@@ -1163,19 +1209,19 @@
   }
 
   .talk {
-    padding: var(--space-3) var(--space-4);
+    padding: var(--space-4) var(--space-5) var(--space-5);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    min-width: 0;
   }
-  .talk summary {
-    cursor: pointer;
-    font-size: var(--fs-md);
-    color: var(--fg-dim);
-  }
-  .talk[open] summary {
-    margin-bottom: var(--space-3);
-  }
-  .signin {
-    font-size: var(--fs-sm);
-    margin: var(--space-2) 0 0;
+  .talkhead {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    font-size: var(--fs-xl);
+    font-weight: 650;
+    letter-spacing: -0.01em;
   }
 
   .modsec {
