@@ -160,13 +160,14 @@ of deriving the answer from the pack id and the caller's role -- a derivation
 that is right for the owner and the admin and wrong for exactly the person a
 grant was written for.
 
-### Discussions: reports and proposals
+### Discussions: reports, topics and proposals
 
 Everything said about a pack that is not the pack itself is a thread on it: an
-`issue` (a report -- "mod X crashes on entry") or a `proposal` (a fork offered
-back, naming the commit it offers). One shape for both, because they differ in
+`issue` (a report -- "mod X crashes on entry"), a `topic` (anything else worth
+talking about -- "will it run on 4 GB?") or a `proposal` (a fork offered back,
+naming the commit it offers). One shape for all three, because they differ in
 what opens them and how they settle and in nothing else, and because a
-discussion belongs to both.
+discussion belongs to each.
 
 Reading is as public as the pack, and it is the only read on the public router
 that is not about pack content: `GET /v1/packs/{id}/threads`,
@@ -176,12 +177,13 @@ indistinguishable from one nobody made, which is the whole reason the read is
 public. There is no second, authenticated copy of these reads: one home, so the
 panel and a stranger with a link are looking at the same answer.
 
-Writing needs a session. Anyone signed in may open an issue on a published pack
-and join any discussion they can read; `edit` on the pack closes, declines,
+Writing needs a session. Anyone signed in may open an issue
+(`POST /v1/authoring/packs/{id}/issues`) or a topic (`.../topics`, the same
+`{title, body?}`) on a published pack and join any discussion they can read; `edit` on the pack closes, declines,
 merges and moderates; the person who opened a thread may withdraw or close it
 themselves. Comments are hidden rather than deleted -- that something was said
 and taken down is part of the record, and the mirror stops serving the body
-while keeping the gap visible with who took it down. Closed issues reopen;
+while keeping the gap visible with who took it down. Closed issues and topics reopen;
 proposals do not, because their offer was a commit and offering again is a new
 proposal.
 

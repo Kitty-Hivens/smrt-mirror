@@ -363,12 +363,12 @@ export const api = {
       if (!r.ok) throw await toError(r);
       return { config: (await r.json()) as PackConfig, rev: revisionOf(r) };
     }),
-  // ── discussions on a pack: reports and proposals ──
+  // ── discussions on a pack: reports, topics and proposals ──
   //
   // Reading is as public as the pack, so a signed-out reader uses the same
   // shapes through the public routes; the authoring ones are what a member
   // needs to write.
-  threads: (id: string, kind?: 'issue' | 'proposal', all = false, limit?: number) =>
+  threads: (id: string, kind?: 'issue' | 'topic' | 'proposal', all = false, limit?: number) =>
     getPage<Thread>(
       `/v1/packs/${encodeURIComponent(id)}/threads?${new URLSearchParams({
         ...(kind ? { kind } : {}),
@@ -383,6 +383,8 @@ export const api = {
   threadDiff: (threadId: number) => getJson<CommitDiff>(`/v1/threads/${threadId}/diff`),
   openIssue: (id: string, title: string, body: string) =>
     postJson<Thread>(`/v1/authoring/packs/${encodeURIComponent(id)}/issues`, { title, body }),
+  openTopic: (id: string, title: string, body: string) =>
+    postJson<Thread>(`/v1/authoring/packs/${encodeURIComponent(id)}/topics`, { title, body }),
   openProposal: (id: string, sourcePack: string, title: string, body: string) =>
     postJson<Thread>(`/v1/authoring/packs/${encodeURIComponent(id)}/proposals`, {
       source_pack: sourcePack,

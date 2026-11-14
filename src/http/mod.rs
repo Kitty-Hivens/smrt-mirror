@@ -647,6 +647,82 @@ mod tests {
         );
     }
 
+    // A topic is the conversation that is not a bug: a player asking how a pack
+    // plays. It goes through the same door as a report, lists beside it, and
+    // settles and reopens the way a report does.
+    #[tokio::test]
+    async fn a_player_starts_a_topic_on_a_published_pack() {
+        use axum::http::StatusCode;
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let cfg = sample_pack("Create", crate::domain::Visibility::Published);
+        state
+            .storage
+            .save_pack_config("Create", &cfg)
+            .await
+            .unwrap();
+        state
+            .storage
+            .save_pack_summary(&crate::authoring::make_pack_summary(
+                &cfg,
+                "0.1.0",
+                "http://localhost",
+                "en",
+            ))
+            .await
+            .unwrap();
+        let player = state.accounts.sign_in_github(42, "player", None).unwrap();
+        let app = router(state.clone());
+
+        let (status, body) = write(
+            &app,
+            "POST",
+            "/v1/authoring/packs/Create/topics",
+            Some(&player),
+            Some(r#"{"title":"will it run on 4 GB?"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert!(body.contains(r#""kind":"topic""#), "{body}");
+
+        let (_, listed) = read(&app, "/v1/packs/Create/threads?kind=topic", None).await;
+        assert!(listed.contains("will it run on 4 GB?"), "{listed}");
+        let (_, issues) = read(&app, "/v1/packs/Create/threads?kind=issue", None).await;
+        assert!(
+            !issues.contains("4 GB"),
+            "a topic is not a report: {issues}"
+        );
+
+        // an untitled topic says nothing to anybody
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                "/v1/authoring/packs/Create/topics",
+                Some(&player),
+                Some(r#"{"title":"  "}"#)
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+
+        // its author closes it, and can open it again
+        for step in ["close", "reopen"] {
+            assert_eq!(
+                call(
+                    &app,
+                    "POST",
+                    &format!("/v1/authoring/threads/1/{step}"),
+                    Some(&player),
+                    None
+                )
+                .await,
+                StatusCode::OK,
+                "{step}"
+            );
+        }
+    }
+
     // Two stops that answer different questions: a pack's keepers decide who
     // writes in their discussion, the mirror's operators decide who puts
     // anything on it at all. Neither touches reading.

@@ -247,6 +247,13 @@ version section when a release is tagged.
 
 ### Added
 
+- A pack's discussion takes topics as well as reports: a question, an idea, how
+  a pack plays. Anyone signed in starts one on a published pack with
+  `POST /v1/authoring/packs/{id}/topics` (`{title, body?}`), it lists beside
+  reports and proposals with `?kind=topic`, and it closes and reopens the way a
+  report does. The pack page offers "Start a topic" next to "Report something".
+  An accounts database made before topics has its threads table rebuilt on
+  start, keeping every thread's id, comments and notifications.
 - The panel's dev server can take its data from production without a mirror
   of its own: `pnpm dev:live` reads production read only, refusing every
   write before it leaves and never forwarding the browser's cookies, and

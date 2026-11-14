@@ -333,7 +333,7 @@
         <button onclick={() => act(() => api.closeThread(threadId))} disabled={working}>
           {isProposal ? (mine && !canEdit ? t('thr.withdraw') : t('thr.decline')) : t('thr.close')}
         </button>
-      {:else if !isOpen && thread.kind === 'issue' && (canEdit || mine)}
+      {:else if !isOpen && !isProposal && (canEdit || mine)}
         <button onclick={() => act(() => api.reopenThread(threadId))} disabled={working}>
           {t('thr.reopen')}
         </button>
