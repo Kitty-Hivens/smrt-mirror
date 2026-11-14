@@ -1,19 +1,22 @@
 import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
+import { fileURLToPath } from 'node:url';
+import { devData, devOptions, devProxy } from './dev/devdata';
 
 // The mirror serves the built panel at the root, so asset URLs resolve there.
-// `vite dev` proxies the API + auth routes (all under /v1) to a locally running
-// mirror so the panel can be developed against live data without embedding.
+// `vite dev` takes its data from a local mirror, from production read only, or
+// from a snapshot of production's public data: see dev/devdata.ts and
+// docs/development.md.
+const dev = devOptions(process.env, fileURLToPath(new URL('.', import.meta.url)));
+
 export default defineConfig({
   base: '/',
-  plugins: [svelte()],
+  plugins: [svelte(), devData(dev)],
   build: {
     outDir: 'dist',
     emptyOutDir: true,
   },
   server: {
-    proxy: {
-      '/v1': 'http://127.0.0.1:9000',
-    },
+    proxy: devProxy(dev),
   },
 });

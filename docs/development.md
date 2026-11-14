@@ -153,6 +153,48 @@ on the login page and in Settings; there is none in the shell, which is what a
 script clicking for one used to miss silently -- and then navigate a Russian
 rail by English labels, screenshotting whatever happened to be on screen.
 
+## The panel against production data
+
+Working on the panel's looks does not need a mirror of your own. The dev
+server can take its data from three places:
+
+| Command             | Data                                                                   |
+|---------------------|------------------------------------------------------------------------|
+| `pnpm dev`          | a local mirror at `SMRT_LOCAL` (default `http://127.0.0.1:9000`)       |
+| `pnpm dev:live`     | production, read only                                                  |
+| `pnpm devdata:pull` | copies production's public data into `web/.devdata` (not committed)    |
+| `pnpm dev:snapshot` | serves that copy, with no network                                      |
+
+In the two production modes nothing is ever written: the dev server refuses
+every request that is not a read before it leaves the machine, and it never
+passes the browser's cookies on.
+
+Signing in is skipped with `DEV_AS`:
+
+```
+cd web
+DEV_AS=admin pnpm dev:live
+```
+
+`DEV_AS` is `guest`, `member`, `admin` or `debug`. The dev server answers
+"who am I" with that role itself, and what an account would read that the
+public data does not hold (the editor, the access lists, the overview's
+counts) comes back as a 404 that says so, rather than as a 401 the panel
+would take for an expired session. To read those as well, give it a real
+session instead: `DEV_SESSION=<smrt_session> pnpm dev:live` reads production
+as that account, still read only.
+
+`pnpm devdata:pull` takes about twenty seconds and some ten megabytes: the
+catalog, every listed pack's card, build, history and discussions, the
+pictures they name, every mod page a pack links to and the pages one step
+from those, and the mod icons. `NO_ICONS=1` skips the icons. `SMRT_PROD`
+points both modes at another mirror.
+
+None of it is in the built panel or in the mirror: it lives in
+`web/dev/devdata.ts` and only runs while `vite` serves the source. A local
+mirror is signed into the usual way, or with a minted session as described
+above.
+
 ## Local run against real data
 
 ```
