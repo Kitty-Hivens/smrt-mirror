@@ -88,6 +88,12 @@
   );
   const banner = $derived(summary?.banner_url && !bannerBroken ? summary.banner_url : null);
   const mods = $derived(manifest?.mods ?? []);
+  const builtOn = $derived.by(() => {
+    const at = summary?.latest_built_at;
+    if (!at) return null;
+    const d = new Date(at);
+    return Number.isNaN(d.getTime()) ? null : d.toLocaleDateString(i18n.locale);
+  });
 
   type Mod = PackManifest['mods'][number];
   function modName(m: Mod): string {
@@ -160,79 +166,115 @@
           </h1>
           {#if owner}<div class="hby">{t('browse.by', { user: owner })}</div>{/if}
           {#if tagline}<p class="htag">{tagline}</p>{/if}
-          <div class="chips">
-            <span class="chip mono">{summary.minecraft_version}</span>
-            {#if manifest}
-              <span class="chip mono">{manifest.loader.name} {manifest.loader.version}</span>
-              <span class="chip mono">Java {manifest.java.major}</span>
-              <span class="chip">{t('prev.modsChip', { n: mods.length })}</span>
-            {/if}
-            <span class="chip mono">{summary.latest_pack_version}</span>
-          </div>
         </div>
-        {#if me}
-          <button class="forkbtn" onclick={fork}>{t('browse.fork')}</button>
-        {/if}
       </div>
     </header>
 
-    {#if about}
-      <!-- renderMarkdown sanitizes: the author's own markup is escaped, never passed through -->
-      <div class="panel desc">{@html renderMarkdown(about)}</div>
-    {/if}
+    <!-- What the pack is built on and what can be done with it, beside what it
+         says about itself rather than under it, with the mods under that. On a
+         wide window the column stays put while the text scrolls past, and the
+         mods scroll inside it. -->
+    <div class="layout">
+      <div class="lcol">
+        {#if about}
+          <!-- renderMarkdown sanitizes: the author's own markup is escaped, never passed through -->
+          <div class="panel desc">{@html renderMarkdown(about)}</div>
+        {/if}
 
-    {#if summary.gallery_urls.length}
-      <div class="gallery">
-        {#each summary.gallery_urls as g (g)}
-          <a class="shot" href={g} target="_blank" rel="noopener"><img src={g} alt="" loading="lazy" /></a>
-        {/each}
+        {#if summary.gallery_urls.length}
+          <div class="gallery">
+            {#each summary.gallery_urls as g (g)}
+              <a class="shot" href={g} target="_blank" rel="noopener"><img src={g} alt="" loading="lazy" /></a>
+            {/each}
+          </div>
+        {/if}
+
+        <!-- What is being asked of this pack, where the pack is. A decision
+             nobody can find is indistinguishable from one nobody made. Folded,
+             so an empty discussion takes one line. -->
+        <details class="panel talk">
+          <summary>{t('browse.discussion')}</summary>
+          <PackThreads packId={summary.pack_id} standalone canWrite={me != null} />
+          {#if !me}
+            <p class="muted signin">{t('browse.signInToReport')}</p>
+          {/if}
+        </details>
+
+        {#if !manifest && !loading}
+          <p class="muted">{t('catalog.noBuild')}</p>
+        {/if}
       </div>
-    {/if}
 
-    <!-- What is being asked of this pack, where the pack is. A decision nobody
-         can find is indistinguishable from one nobody made. Folded, so an empty
-         discussion does not push the mod list down. -->
-    <details class="panel talk">
-      <summary>{t('browse.discussion')}</summary>
-      <PackThreads packId={summary.pack_id} standalone canWrite={me != null} />
-      {#if !me}
-        <p class="muted signin">{t('browse.signInToReport')}</p>
-      {/if}
-    </details>
+      <aside class="side">
+        <section class="panel ctl">
+          <dl class="facts">
+            <div>
+              <dt>Minecraft</dt>
+              <dd class="mono">{summary.minecraft_version}</dd>
+            </div>
+            {#if manifest}
+              <div>
+                <dt>{t('catalog.loader')}</dt>
+                <dd class="mono">{manifest.loader.name} {manifest.loader.version}</dd>
+              </div>
+              <div>
+                <dt>Java</dt>
+                <dd class="mono">{manifest.java.major}</dd>
+              </div>
+              <div>
+                <dt>{t('catalog.mods')}</dt>
+                <dd class="mono">{mods.length}</dd>
+              </div>
+            {/if}
+            <div>
+              <dt>{t('catalog.version')}</dt>
+              <dd class="mono">{summary.latest_pack_version}</dd>
+            </div>
+            {#if builtOn}
+              <div>
+                <dt>{t('catalog.built')}</dt>
+                <dd class="mono">{builtOn}</dd>
+              </div>
+            {/if}
+          </dl>
+          {#if me}
+            <button class="forkbtn" onclick={fork}>{t('browse.fork')}</button>
+          {/if}
+        </section>
 
-    {#if manifest}
-      <section class="panel modsec">
-        <h2 class="modhead">
-          {t('catalog.mods')}<span class="count mono">{mods.length}</span>
-        </h2>
-        <div class="mods">
-          {#each mods as m (m.sha1)}
-            <a
-              class="mrow"
-              href={href.mod(`sha1:${m.sha1}`)}
-              onclick={(e) => {
-                if (!plainClick(e)) return;
-                e.preventDefault();
-                route.openMod(`sha1:${m.sha1}`, hint(m));
-              }}
-            >
-              <ModIcon
-                name={modName(m)}
-                source={m.source}
-                iconUrl={m.display?.icon_url ?? null}
-                sha1={m.sha1}
-                size={24}
-                mono
-              />
-              <span class="mn">{modName(m)}</span>
-              {#if !m.required}<span class="opt">{t('browse.optional')}</span>{/if}
-            </a>
-          {/each}
-        </div>
-      </section>
-    {:else if !loading}
-      <p class="muted">{t('catalog.noBuild')}</p>
-    {/if}
+        {#if manifest}
+          <section class="panel modsec">
+            <h2 class="modhead">
+              {t('catalog.mods')}<span class="count mono">{mods.length}</span>
+            </h2>
+            <div class="mods">
+              {#each mods as m (m.sha1)}
+                <a
+                  class="mrow"
+                  href={href.mod(`sha1:${m.sha1}`)}
+                  onclick={(e) => {
+                    if (!plainClick(e)) return;
+                    e.preventDefault();
+                    route.openMod(`sha1:${m.sha1}`, hint(m));
+                  }}
+                >
+                  <ModIcon
+                    name={modName(m)}
+                    source={m.source}
+                    iconUrl={m.display?.icon_url ?? null}
+                    sha1={m.sha1}
+                    size={24}
+                    mono
+                  />
+                  <span class="mn">{modName(m)}</span>
+                  {#if !m.required}<span class="opt">{t('browse.optional')}</span>{/if}
+                </a>
+              {/each}
+            </div>
+          </section>
+        {/if}
+      </aside>
+    </div>
   {:else if missing}
     <div class="gone">
       <div class="gtitle">{t('catalog.notFound')}</div>
@@ -246,7 +288,7 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
-    max-width: 1080px;
+    max-width: 1600px;
   }
   .back {
     align-self: flex-start;
@@ -320,22 +362,95 @@
     color: var(--fg-dim);
     max-width: 70ch;
   }
-  .chips {
+  /* One column on a narrow window, in reading order: what the pack runs on,
+     what it says, what is in it. The side column dissolves into that order
+     rather than landing all of its hundred mods before the description. */
+  .layout {
     display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-top: var(--space-3);
+    flex-direction: column;
+    gap: var(--space-4);
   }
-  .chip {
+  .lcol {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    min-width: 0;
+    order: 1;
+  }
+  .side {
+    display: contents;
+  }
+  .ctl {
+    order: 0;
+    padding: var(--space-4);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+  .modsec {
+    order: 2;
+  }
+  .facts {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: var(--space-3) var(--space-4);
+    margin: 0;
+  }
+  /* a label over its value, as a pair that wraps whole */
+  .facts dt {
     font-size: var(--fs-xs);
-    padding: 2px 9px;
-    border-radius: 999px;
-    border: 1px solid var(--seam-bright);
-    color: var(--fg-dim);
+    color: var(--fg-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .facts dd {
+    margin: 2px 0 0;
+    font-size: var(--fs-md);
+    color: var(--fg);
+    overflow-wrap: anywhere;
   }
   .forkbtn {
-    flex: none;
-    align-self: flex-end;
+    align-self: flex-start;
+  }
+
+  /* Wide enough for two columns: the text keeps a reading measure on the
+     left, and everything else takes the rest of the width on the right, so a
+     wide window is used rather than framed in empty space. */
+  @container view (min-width: 1000px) {
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 46rem) minmax(300px, 1fr);
+      align-items: start;
+    }
+    /* the reading order above is for one column; in two, the text is on the
+       left whatever the order says */
+    .lcol,
+    .ctl,
+    .modsec {
+      order: 0;
+    }
+    .side {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-4);
+      position: sticky;
+      top: var(--space-4);
+      /* the window under the top bar, less the room above and below */
+      max-height: calc(100dvh - 96px);
+      min-width: 0;
+    }
+    .facts {
+      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+    }
+    .modsec {
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
+    .mods {
+      min-height: 0;
+      overflow-y: auto;
+    }
   }
   .hero-sk {
     height: 220px;
@@ -460,7 +575,8 @@
   }
   .mods {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    align-content: start;
     gap: 2px var(--space-3);
   }
   .mrow {
@@ -509,17 +625,14 @@
     margin: var(--space-2) 0 0;
   }
 
-  /* A narrow column stacks the hero: the icon above the name, the fork button
-     under the text, so the name gets the whole width. */
+  /* A narrow column stacks the hero: the icon above the name, so the name gets
+     the whole width. */
   @container view (max-width: 520px) {
     .heroin {
       flex-direction: column;
       align-items: flex-start;
       padding: var(--space-4);
       gap: var(--space-3);
-    }
-    .forkbtn {
-      align-self: flex-start;
     }
     .hname {
       font-size: var(--fs-2xl);
