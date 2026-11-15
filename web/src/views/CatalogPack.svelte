@@ -849,12 +849,19 @@
   .ctl {
     order: 1;
   }
+  /* The description comes before the card in the markup and after it on a
+     narrow screen. The browser keeps the first element on screen in markup
+     order where it was when something above it grows, so with the description
+     as that element, unfolding the versions in the card scrolled the page and
+     threw the button off the top. Left out of that choice, the card's own
+     content is what holds still. */
   .lcol {
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
     min-width: 0;
     order: 2;
+    overflow-anchor: none;
   }
   .side {
     display: contents;
@@ -985,6 +992,15 @@
   @container view (max-width: 999.98px) {
     .mods:not(.all) > .mrow:nth-child(n + 13) {
       display: none;
+    }
+    /* In a single column the card is part of the page, and fifty builds
+       unfolded in it would push everything under it a screen and a half down.
+       The list keeps to about ten rows and scrolls inside. */
+    .versions {
+      max-height: 18rem;
+      overflow-y: auto;
+      scrollbar-width: thin;
+      overscroll-behavior: contain;
     }
   }
 
