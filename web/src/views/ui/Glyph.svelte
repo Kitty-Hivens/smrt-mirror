@@ -12,7 +12,8 @@
     | 'java'
     | 'download'
     | 'notes'
-    | 'search';
+    | 'search'
+    | 'alert';
 </script>
 
 <script lang="ts">
@@ -49,6 +50,10 @@
     <path d="M8.6 11.4l-1.2 1.2a2.6 2.6 0 0 1-3.7-3.7l1.2-1.2" />
   {:else if name === 'check'}
     <path d="M3.2 8.4l3 3 6.6-6.8" />
+  {:else if name === 'alert'}
+    <path d="M8 2.4l5.9 10.3a0.9 0.9 0 0 1-0.8 1.3H2.9a0.9 0.9 0 0 1-0.8-1.3z" />
+    <path d="M8 6.4v3.2" />
+    <path d="M8 11.8v0.1" />
   {:else if name === 'chat'}
     <path d="M2.6 4.2c0-0.9 0.7-1.6 1.6-1.6h7.6c0.9 0 1.6 0.7 1.6 1.6v5.2c0 0.9-0.7 1.6-1.6 1.6H7.2L4.4 13.2V11h-0.2c-0.9 0-1.6-0.7-1.6-1.6z" />
   {:else if name === 'chevron'}

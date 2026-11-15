@@ -192,20 +192,21 @@ pub struct Notification {
     pub read: bool,
 }
 
-/// Something said about a pack: a report, or a fork offered back.
+/// Something said about a pack: a report, a topic, or a fork offered back.
 ///
-/// One shape for both because they differ only in what opens them and how they
-/// settle. A proposal names the state it offers (`source_pack` /
+/// One shape for all three because they differ only in what opens them and how
+/// they settle. A proposal names the state it offers (`source_pack` /
 /// `source_commit`), which is a commit rather than "whatever that fork says
 /// today", so what a reviewer reads cannot move while they read it. An issue
-/// leaves those empty and is simply a thing somebody asked for.
+/// reports something wrong and a topic is anything else somebody wants to talk
+/// about (a question, an idea, how a pack plays); both leave those empty.
 #[derive(Debug, Clone, Serialize, TS, ToSchema)]
 #[ts(export, export_to = "bindings/")]
 pub struct Thread {
     #[ts(type = "number")]
     pub id: i64,
     pub pack_id: String,
-    /// `issue` | `proposal`.
+    /// `issue` | `topic` | `proposal`.
     pub kind: String,
     pub title: String,
     pub body: String,
@@ -214,8 +215,8 @@ pub struct Thread {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub by_login: Option<String>,
-    /// An issue is `open` or `closed`; a proposal is `open`, `merged`,
-    /// `declined` or `withdrawn`.
+    /// An issue or a topic is `open` or `closed`; a proposal is `open`,
+    /// `merged`, `declined` or `withdrawn`.
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -390,6 +391,7 @@ impl Accounts {
         conn.execute_batch(SCHEMA)
             .context("applying accounts schema")?;
         widen_role_check(&conn).context("widening users.role check")?;
+        widen_thread_kinds(&conn).context("widening pack_threads.kind check")?;
         // provenance columns on a DB that predates them (#44)
         ensure_column(&conn, "mod_uploads", "upstream_maintainer", "TEXT")?;
         ensure_column(&conn, "mod_uploads", "decided_by", "INTEGER")?;
@@ -990,8 +992,8 @@ impl Accounts {
     }
 
     /// Open a thread on a pack and return its id. `source` is `None` for an
-    /// issue and the offered `(pack, commit)` for a proposal. Blocking; wrap in
-    /// `spawn_blocking`.
+    /// issue or a topic and the offered `(pack, commit)` for a proposal.
+    /// Blocking; wrap in `spawn_blocking`.
     pub fn open_thread(
         &self,
         pack_id: &str,
@@ -1001,7 +1003,7 @@ impl Accounts {
         by_uid: i64,
         source: Option<(&str, &str)>,
     ) -> Result<i64> {
-        if !matches!(kind, "issue" | "proposal") {
+        if !matches!(kind, "issue" | "topic" | "proposal") {
             anyhow::bail!("unknown thread kind {kind:?}");
         }
         let (source_pack, source_commit) = match source {
@@ -1124,13 +1126,14 @@ impl Accounts {
         Ok(n > 0)
     }
 
-    /// Reopen a closed issue. Proposals do not reopen: their offer was a commit,
-    /// and offering again is a new proposal rather than a resurrected one.
-    pub fn reopen_issue(&self, id: i64) -> Result<bool> {
+    /// Reopen a closed issue or topic. Proposals do not reopen: their offer was
+    /// a commit, and offering again is a new proposal rather than a resurrected
+    /// one.
+    pub fn reopen_thread(&self, id: i64) -> Result<bool> {
         let guard = self.conn.lock().expect("accounts mutex poisoned");
         let n = guard.execute(
             "UPDATE pack_threads SET status = 'open', decided_at = NULL, decided_by = NULL
-             WHERE id = ?1 AND kind = 'issue' AND status = 'closed'",
+             WHERE id = ?1 AND kind IN ('issue', 'topic') AND status = 'closed'",
             params![id],
         )?;
         Ok(n > 0)
@@ -1589,6 +1592,73 @@ fn widen_role_check(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Admit the topic kind to `pack_threads.kind`. A DB made before topics keeps the
+/// two-kind CHECK, which `CREATE TABLE IF NOT EXISTS` cannot alter and which
+/// would refuse every topic opened. When the stored DDL lacks it, rebuild the
+/// table with ids preserved, so the comments and notifications that reference a
+/// thread by id still find it, and put its indexes back. Idempotent, and a no-op
+/// on a fresh DB, whose schema already admits topics.
+fn widen_thread_kinds(conn: &Connection) -> Result<()> {
+    let ddl: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'pack_threads'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if !ddl.is_some_and(|sql| !sql.contains("'topic'")) {
+        return Ok(());
+    }
+    // foreign_keys is toggled outside a transaction, and off so dropping the old
+    // table leaves the comments and notifications that point at it alone
+    conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
+    let rebuilt = conn.execute_batch(
+        "BEGIN;
+         CREATE TABLE pack_threads_new (
+             id            INTEGER PRIMARY KEY,
+             pack_id       TEXT NOT NULL,
+             kind          TEXT NOT NULL CHECK (kind IN ('issue', 'topic', 'proposal')),
+             title         TEXT NOT NULL,
+             body          TEXT NOT NULL DEFAULT '',
+             by_uid        INTEGER NOT NULL,
+             status        TEXT NOT NULL DEFAULT 'open'
+                           CHECK (status IN ('open', 'closed', 'merged', 'declined', 'withdrawn')),
+             source_pack   TEXT,
+             source_commit TEXT,
+             merged_commit TEXT,
+             created_at    INTEGER NOT NULL,
+             decided_at    INTEGER,
+             decided_by    INTEGER
+         );
+         INSERT INTO pack_threads_new
+             (id, pack_id, kind, title, body, by_uid, status, source_pack, source_commit,
+              merged_commit, created_at, decided_at, decided_by)
+           SELECT id, pack_id, kind, title, body, by_uid, status, source_pack, source_commit,
+                  merged_commit, created_at, decided_at, decided_by
+           FROM pack_threads;
+         DROP TABLE pack_threads;
+         ALTER TABLE pack_threads_new RENAME TO pack_threads;
+         CREATE INDEX IF NOT EXISTS idx_threads_pack ON pack_threads(pack_id, status);
+         CREATE INDEX IF NOT EXISTS idx_threads_by ON pack_threads(by_uid);
+         COMMIT;",
+    );
+    if let Err(e) = rebuilt {
+        let _ = conn.execute_batch("ROLLBACK;");
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        return Err(e.into());
+    }
+    // every comment and notification must still name a thread that exists
+    let dangling = conn
+        .prepare("PRAGMA foreign_key_check")?
+        .query_map([], |_| Ok(()))?
+        .count();
+    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+    if dangling > 0 {
+        anyhow::bail!("{dangling} rows lost their thread in the rebuild");
+    }
+    Ok(())
+}
+
 fn upload_from_row(r: &rusqlite::Row) -> rusqlite::Result<UploadRow> {
     Ok(UploadRow {
         id: r.get(0)?,
@@ -1653,7 +1723,7 @@ mod tests {
         assert!(a.settle_thread(id, "closed", 7, None).unwrap());
         assert!(!a.settle_thread(id, "closed", 9, None).unwrap());
         // and a closed issue reopens, where a proposal would not
-        assert!(a.reopen_issue(id).unwrap());
+        assert!(a.reopen_thread(id).unwrap());
         assert_eq!(a.thread(id).unwrap().unwrap().status, "open");
     }
 
@@ -1682,7 +1752,7 @@ mod tests {
             Some(&*"b".repeat(40))
         );
         // offering again is a new proposal, not a resurrected one
-        assert!(!a.reopen_issue(id).unwrap());
+        assert!(!a.reopen_thread(id).unwrap());
     }
 
     #[test]
@@ -1802,6 +1872,106 @@ mod tests {
                 .len(),
             4
         );
+    }
+
+    #[test]
+    fn a_topic_is_talked_about_closed_and_reopened_like_a_report() {
+        let a = Accounts::open_in_memory().unwrap();
+        a.sign_in_github(42, "player", None).unwrap();
+        let id = a
+            .open_thread("Create", "topic", "will it run on 4 GB?", "", 42, None)
+            .unwrap();
+        let t = a.thread(id).unwrap().unwrap();
+        assert_eq!(t.kind, "topic");
+        assert_eq!(t.source_pack, None);
+        a.comment(id, 42, "asking for a friend").unwrap();
+        assert!(a.settle_thread(id, "closed", 7, None).unwrap());
+        assert!(a.reopen_thread(id).unwrap());
+        assert_eq!(a.thread(id).unwrap().unwrap().status, "open");
+    }
+
+    #[test]
+    fn thread_kind_migration_admits_topics_and_keeps_what_was_said() {
+        // a DB made before topics: the two-kind CHECK refuses one
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE pack_threads (
+                 id INTEGER PRIMARY KEY, pack_id TEXT NOT NULL,
+                 kind TEXT NOT NULL CHECK (kind IN ('issue', 'proposal')),
+                 title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '', by_uid INTEGER NOT NULL,
+                 status TEXT NOT NULL DEFAULT 'open'
+                     CHECK (status IN ('open', 'closed', 'merged', 'declined', 'withdrawn')),
+                 source_pack TEXT, source_commit TEXT, merged_commit TEXT,
+                 created_at INTEGER NOT NULL, decided_at INTEGER, decided_by INTEGER);
+             CREATE INDEX idx_threads_pack ON pack_threads(pack_id, status);
+             CREATE INDEX idx_threads_by ON pack_threads(by_uid);
+             CREATE TABLE thread_comments (
+                 id INTEGER PRIMARY KEY,
+                 thread_id INTEGER NOT NULL REFERENCES pack_threads(id) ON DELETE CASCADE,
+                 by_uid INTEGER NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL,
+                 hidden_at INTEGER, hidden_by INTEGER);
+             CREATE TABLE notifications (
+                 id INTEGER PRIMARY KEY, uid INTEGER NOT NULL, kind TEXT NOT NULL,
+                 thread_id INTEGER NOT NULL REFERENCES pack_threads(id) ON DELETE CASCADE,
+                 actor_uid INTEGER NOT NULL, created_at INTEGER NOT NULL, read_at INTEGER);
+             INSERT INTO pack_threads (id, pack_id, kind, title, by_uid, created_at)
+               VALUES (7, 'Create', 'issue', 'it crashes', 42, 1);
+             INSERT INTO thread_comments (thread_id, by_uid, body, created_at)
+               VALUES (7, 43, 'same here', 2);
+             INSERT INTO notifications (uid, kind, thread_id, actor_uid, created_at)
+               VALUES (42, 'comment', 7, 43, 2);",
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO pack_threads (pack_id, kind, title, by_uid, created_at)
+                 VALUES ('Create', 'topic', 'x', 1, 3)",
+                []
+            )
+            .is_err(),
+            "the legacy CHECK refuses a topic"
+        );
+
+        widen_thread_kinds(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO pack_threads (pack_id, kind, title, by_uid, created_at)
+             VALUES ('Create', 'topic', 'x', 1, 3)",
+            [],
+        )
+        .unwrap();
+        // the old thread kept its id, and what pointed at it still does
+        let (title, said, told): (String, i64, i64) = conn
+            .query_row(
+                "SELECT t.title,
+                        (SELECT COUNT(*) FROM thread_comments WHERE thread_id = t.id),
+                        (SELECT COUNT(*) FROM notifications WHERE thread_id = t.id)
+                 FROM pack_threads t WHERE t.id = 7",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((title.as_str(), said, told), ("it crashes", 1, 1));
+        let indexes: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name IN ('idx_threads_pack', 'idx_threads_by')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexes, 2, "the indexes came back with the table");
+        // the foreign keys are enforced again: a cascade still reaches the rows
+        conn.execute("DELETE FROM pack_threads WHERE id = 7", [])
+            .unwrap();
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM thread_comments", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
+
+        // a second run is a no-op
+        widen_thread_kinds(&conn).unwrap();
     }
 
     #[test]

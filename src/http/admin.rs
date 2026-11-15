@@ -99,6 +99,7 @@ fn authoring_router(state: AppState) -> Router {
         // pack it is about, and lives on the public router. What is here is the
         // writing.
         .route("/v1/authoring/packs/{pack_id}/issues", post(open_issue))
+        .route("/v1/authoring/packs/{pack_id}/topics", post(open_topic))
         .route(
             "/v1/authoring/packs/{pack_id}/proposals",
             post(open_proposal),
@@ -2647,17 +2648,53 @@ async fn open_issue(
     Path(pack_id): Path<String>,
     Json(req): Json<OpenIssueReq>,
 ) -> Result<(StatusCode, Json<crate::accounts::Thread>), ApiError> {
-    if !is_published(&state, &pack_id).await {
-        super::auth::authorize(&state, &identity, &pack_id, PackLevel::View).await?;
-    }
-    not_silenced(&state, &identity, &pack_id).await?;
-    within_rate(&state, "threads", identity.uid).await?;
-    let title = trimmed(&req.title, "an issue needs a title")?;
-    let id = open_thread(
-        &state, &identity, &pack_id, "issue", &title, &req.body, None,
+    open_plain(
+        &state,
+        &identity,
+        &pack_id,
+        req,
+        "issue",
+        "an issue needs a title",
     )
-    .await?;
-    Ok((StatusCode::CREATED, Json(load_thread(&state, id).await?)))
+    .await
+}
+
+/// Start a topic on a pack: a question, an idea, how it plays. The same door as
+/// a report, because who may speak on a pack does not depend on what they say.
+async fn open_topic(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Path(pack_id): Path<String>,
+    Json(req): Json<OpenIssueReq>,
+) -> Result<(StatusCode, Json<crate::accounts::Thread>), ApiError> {
+    open_plain(
+        &state,
+        &identity,
+        &pack_id,
+        req,
+        "topic",
+        "a topic needs a title",
+    )
+    .await
+}
+
+/// A thread that offers nothing, only words: an issue or a topic.
+async fn open_plain(
+    state: &AppState,
+    identity: &Identity,
+    pack_id: &str,
+    req: OpenIssueReq,
+    kind: &str,
+    untitled: &str,
+) -> Result<(StatusCode, Json<crate::accounts::Thread>), ApiError> {
+    if !is_published(state, pack_id).await {
+        super::auth::authorize(state, identity, pack_id, PackLevel::View).await?;
+    }
+    not_silenced(state, identity, pack_id).await?;
+    within_rate(state, "threads", identity.uid).await?;
+    let title = trimmed(&req.title, untitled)?;
+    let id = open_thread(state, identity, pack_id, kind, &title, &req.body, None).await?;
+    Ok((StatusCode::CREATED, Json(load_thread(state, id).await?)))
 }
 
 /// Offer a fork's state back to the pack it came from.
@@ -2966,7 +3003,7 @@ async fn merge_proposal(
     Ok(Json(load_thread(&state, id).await?))
 }
 
-/// Close an issue, decline a proposal, or take back your own of either.
+/// Close an issue or a topic, decline a proposal, or take back your own of any.
 async fn close_thread(
     State(state): State<AppState>,
     Extension(identity): Extension<Identity>,
@@ -3010,8 +3047,8 @@ async fn close_thread(
     Ok(Json(load_thread(&state, id).await?))
 }
 
-/// Reopen a closed issue. A proposal does not reopen: its offer was a commit,
-/// and offering again is a new proposal rather than a resurrected one.
+/// Reopen a closed issue or topic. A proposal does not reopen: its offer was a
+/// commit, and offering again is a new proposal rather than a resurrected one.
 async fn reopen_thread(
     State(state): State<AppState>,
     Extension(identity): Extension<Identity>,
@@ -3022,12 +3059,12 @@ async fn reopen_thread(
         super::auth::authorize(&state, &identity, &t.pack_id, PackLevel::Edit).await?;
     }
     let acc = state.accounts.clone();
-    let reopened = tokio::task::spawn_blocking(move || acc.reopen_issue(id))
+    let reopened = tokio::task::spawn_blocking(move || acc.reopen_thread(id))
         .await
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("thread task: {e}")))??;
     if !reopened {
         return Err(ApiError::Conflict(
-            "only a closed issue reopens; a proposal is offered again as a new one".into(),
+            "only a closed issue or topic reopens; a proposal is offered again as a new one".into(),
         ));
     }
     tell(

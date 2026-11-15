@@ -103,21 +103,23 @@ CREATE TABLE IF NOT EXISTS pack_access (
 CREATE INDEX IF NOT EXISTS idx_pack_access_uid ON pack_access(github_uid);
 
 -- Threads: everything said about a pack that is not the pack itself -- a report
--- ("mod X crashes on entry"), or a fork offered back. One table because they
--- differ in what opens them and how they settle, and in nothing else: both are
--- somebody asking a pack's keepers for something, both carry a discussion, both
--- end in a decision that is worth reading afterwards. Two tables would mean two
--- of everything below, starting with comments.
+-- ("mod X crashes on entry"), a topic ("will it run on 4 GB?"), or a fork
+-- offered back. One table because they differ in what opens them and how they
+-- settle, and in nothing else: each is somebody talking to a pack's keepers and
+-- its players, each carries a discussion, each ends somewhere worth reading
+-- afterwards. Separate tables would mean several of everything below, starting
+-- with comments.
 --
 -- A proposal is a thread whose `source_pack`/`source_commit` name the state it
--- offers; an issue leaves them null. `status` is the thread's own vocabulary:
--- an issue is open or closed, a proposal is open, merged, declined or withdrawn.
+-- offers; an issue and a topic leave them null. `status` is the thread's own
+-- vocabulary: an issue or a topic is open or closed, a proposal is open,
+-- merged, declined or withdrawn.
 -- Settled threads keep their rows -- "we said no in March" is what somebody
 -- looks for in April.
 CREATE TABLE IF NOT EXISTS pack_threads (
     id            INTEGER PRIMARY KEY,
     pack_id       TEXT NOT NULL,
-    kind          TEXT NOT NULL CHECK (kind IN ('issue', 'proposal')),
+    kind          TEXT NOT NULL CHECK (kind IN ('issue', 'topic', 'proposal')),
     title         TEXT NOT NULL,
     body          TEXT NOT NULL DEFAULT '',
     by_uid        INTEGER NOT NULL,

@@ -537,8 +537,8 @@ async fn gate_pack_read(
 
 // ── discussions, in the open ────────────────────────────────────────────────
 
-/// What is being said about a published pack: reports and proposals, with their
-/// outcomes. Readable without a session, because a decision nobody can see is
+/// What is being said about a published pack: reports, topics and proposals,
+/// with their outcomes. Readable without a session, because a decision nobody can see is
 /// indistinguishable from one nobody made -- an unpublished pack's discussion
 /// stays with whoever can see the pack.
 #[utoipa::path(
@@ -547,13 +547,13 @@ async fn gate_pack_read(
     tag = "public",
     params(
         ("pack_id" = String, Path, description = "Pack id"),
-        ("kind" = Option<String>, Query, description = "`issue` | `proposal`; absent lists both"),
+        ("kind" = Option<String>, Query, description = "`issue` | `topic` | `proposal`; absent lists all three"),
         ("all" = Option<bool>, Query, description = "Include settled threads"),
         ("limit" = Option<usize>, Query, description = "Page size; absent answers the whole list"),
         ("after" = Option<String>, Query, description = "Cursor from the previous page's `Link`")
     ),
     responses(
-        (status = 200, description = "Reports and proposals on a published pack", body = [Thread]),
+        (status = 200, description = "Reports, topics and proposals on a published pack", body = [Thread]),
         (status = 404, description = "No such pack, or its draft is not yours to read")
     )
 )]

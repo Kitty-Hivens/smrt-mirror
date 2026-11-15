@@ -1,9 +1,10 @@
 <script lang="ts">
-  // What is being said about this pack: reports and proposals in one list.
+  // What is being said about this pack: topics, reports and proposals in one
+  // list.
   //
-  // They are one list because they are one thing to a reader -- somebody asking
-  // the pack's keepers for something -- and because a proposal that hid in its
-  // own tab would be a request nobody stumbles over.
+  // They are one list because they are one thing to a reader -- somebody talking
+  // to the pack's keepers and its players -- and because a proposal that hid in
+  // its own tab would be a request nobody stumbles over.
   import { api } from '../lib/api';
   import { notifyFail } from '../lib/toasts.svelte';
   import { t } from '../lib/i18n.svelte';
@@ -55,8 +56,9 @@
   let showAll = $state(false);
   let working = $state(false);
 
-  // The report form, folded away until wanted: the list is what people come for.
-  let opening = $state(false);
+  // The form, folded away until wanted: the list is what people come for. It
+  // opens as a topic or as a report, and the words it asks for follow.
+  let opening = $state<'topic' | 'issue' | null>(null);
   let proposing = $state(false);
   let title = $state('');
   let body = $state('');
@@ -123,15 +125,15 @@
     }
   }
 
-  async function report() {
+  async function start() {
     const heading = title.trim();
-    if (!heading) return;
+    if (!heading || !opening) return;
     working = true;
     try {
-      const opened = await api.openIssue(packId, heading, body.trim());
+      const opened = await (opening === 'topic' ? api.openTopic : api.openIssue)(packId, heading, body.trim());
       title = '';
       body = '';
-      opening = false;
+      opening = null;
       if (standalone) route.readThread(opened.id);
       else route.openThread(packId, opened.id);
     } catch (e) {
@@ -178,7 +180,7 @@
   ]);
 
   function cancel() {
-    opening = false;
+    opening = null;
     proposing = false;
   }
 
@@ -199,7 +201,8 @@
     />
     <div class="acts">
       {#if canWrite && !suspended && !opening}
-        <button class="act" onclick={() => (opening = true)}><Glyph name="chat" size={14} />{t('thr.report')}</button>
+        <button class="act" onclick={() => (opening = 'topic')}><Glyph name="chat" size={14} />{t('thr.startTopic')}</button>
+        <button class="act" onclick={() => (opening = 'issue')}><Glyph name="alert" size={14} />{t('thr.report')}</button>
       {/if}
       {#if forkOf && !proposing}
         <button class="act" onclick={() => (proposing = true)}><Glyph name="fork" size={14} />{t('thr.propose', { pack: forkOf })}</button>
@@ -219,11 +222,21 @@
 
   {#if opening && canWrite && !suspended}
     <div class="form">
-      <input class="prose" bind:value={title} placeholder={t('thr.titlePlaceholder')} disabled={working} />
-      <textarea class="prose" rows="4" bind:value={body} placeholder={t('thr.bodyPlaceholder')} disabled={working}
+      <input
+        class="prose"
+        bind:value={title}
+        placeholder={opening === 'topic' ? t('thr.topicTitle') : t('thr.titlePlaceholder')}
+        disabled={working}
+      />
+      <textarea
+        class="prose"
+        rows="4"
+        bind:value={body}
+        placeholder={opening === 'topic' ? t('thr.topicBody') : t('thr.bodyPlaceholder')}
+        disabled={working}
       ></textarea>
       <div class="formacts">
-        <button class="primary" onclick={report} disabled={working || !title.trim()}>{t('thr.send')}</button>
+        <button class="primary" onclick={start} disabled={working || !title.trim()}>{t('thr.send')}</button>
         <button onclick={cancel} disabled={working}>{t('thr.cancel')}</button>
       </div>
     </div>
