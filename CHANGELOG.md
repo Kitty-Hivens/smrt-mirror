@@ -8,6 +8,12 @@ version section when a release is tagged.
 
 ### Fixed
 
+- Unfolding a pack's versions on a phone scrolled the page about two screens
+  down and threw the button off the top: the browser held the description in
+  place, which comes before the card in the markup and after it on screen. The
+  card's own content now holds still, and in a single column the list keeps to
+  about ten rows and scrolls inside instead of pushing the page a screen and a
+  half down.
 - The operator panel fell apart on a phone. The packs and servers tables
   scrolled sideways and hid their actions, the users row pushed suspend off
   the edge, a my packs row laid its visibility over the pack name, the pack
