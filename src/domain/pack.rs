@@ -54,7 +54,7 @@ pub enum Visibility {
 /// fields reads as an owned, official, published pack (which is what every pack
 /// predating ownership is). `pub(crate)` so authoring code that mints a fresh
 /// operator pack reuses the same defaults instead of re-hardcoding them.
-pub(crate) fn default_owner() -> i64 {
+pub fn default_owner() -> i64 {
     operator_uid()
 }
 pub(crate) fn default_tier() -> PackTier {

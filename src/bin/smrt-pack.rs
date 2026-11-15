@@ -261,6 +261,9 @@ async fn main() -> Result<()> {
                     },
                     java_major,
                     storage,
+                    // the operator, as a config written by hand from the CLI
+                    // has always been
+                    owner: smrt::domain::pack::default_owner(),
                 },
                 archive,
             )
