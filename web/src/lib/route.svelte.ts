@@ -394,11 +394,15 @@ export const route = {
     focusThread = null;
     pushPath(`/${section}/${encodeURIComponent(id)}`);
   },
-  /// Open a pack's editor from another section (the overview's recent list), as
-  /// a single step: the section and the editor arrive in one history entry
-  /// rather than two, so back goes where it was clicked from.
+  /// Open a pack's editor from another section (the overview's list, a pack's
+  /// page in the catalog), as a single step: the section and the editor arrive
+  /// in one history entry rather than two, so back goes where it was clicked
+  /// from. Whatever page stood over the sections is left, or it would go on
+  /// standing over the editor it just opened.
   openPackIn(s: Section, id: string) {
     focusMod = null;
+    modHint = null;
+    focusCatalog = null;
     section = s;
     remember(s);
     editPack = id;
