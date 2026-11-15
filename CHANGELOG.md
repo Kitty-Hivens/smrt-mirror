@@ -515,6 +515,30 @@ version section when a release is tagged.
 
 ### Changed
 
+- Every new pack, an admin's included, is a personal draft of whoever made it,
+  and so is every fork or copy. An admin makes a pack official from the packs
+  section (`PUT /v1/authoring/packs/{id}/tier`), or gives it back to its owner,
+  and the pack keeps its id: links and installed instances are untouched, and
+  only the listing it appears in moves between `/v1/community` and `/v1/packs`.
+  An admin's own packs list now holds their personal packs rather than every
+  pack on the mirror.
+- The panel's rail is shorter. Users, moderation and the audit trail are tabs of
+  one administration section (the old addresses still lead to them), and the
+  account and the panel's preferences (theme, language, profile, sign out) are a
+  menu in the top right corner, with a gear in its place for a guest. The
+  servers section is gone.
+- The overview shows what waits on the operator: uploads to moderate, open
+  discussions across every pack, unidentified jars, the cache and the takedown
+  list, with the tiles leading to where each is dealt with. Below them are the
+  latest builds, each opening its pack's editor, and the latest actions from the
+  audit trail. The list of every pack it repeated from the packs section is
+  gone.
+- `/v1/servers` and `/v1/servers/{id}` are deprecated and will be removed:
+  nothing reads them, the launcher takes a pack's servers from the servers.dat
+  the pack ships. A pack's handshake claim is now checked against an address
+  given with the check (`?address=host:port` on its spoof report and write),
+  which the pack editor asks for; a server entry's address is used only when
+  none is given.
 - A pack's page has a control card down the right edge in the pack's own
   colour, taken from its banner: the version and channel, when it was built,
   fork and copy link (and the editor for whoever may edit), Minecraft, loader

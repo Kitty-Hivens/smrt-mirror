@@ -449,11 +449,16 @@
   const canSpoof = $derived(advertisesModList(cfg?.loader?.name ?? ''));
   let spoof = $state<SpoofReport | null>(null);
   let spoofBusy = $state(false);
+  // The server to ask, as host or host:port. Typed rather than looked up: the
+  // server entries that used to carry it are deprecated. Left empty, the mirror
+  // still reads an old entry's address, and the one it asked fills this in.
+  let spoofAddress = $state('');
 
   async function checkSpoof() {
     spoofBusy = true;
     try {
-      spoof = await api.packSpoof(packId);
+      spoof = await api.packSpoof(packId, spoofAddress);
+      if (!spoofAddress.trim() && spoof.asked) spoofAddress = spoof.asked;
     } catch (e) {
       fail(e);
     } finally {
@@ -469,7 +474,7 @@
     if (!ok) return;
     spoofBusy = true;
     try {
-      spoof = await api.generatePackSpoof(packId);
+      spoof = await api.generatePackSpoof(packId, spoofAddress);
       // the config gained (or re-pointed) an asset row, and the mirror settled
       // the document to do it -- so this editor rejoins rather than carrying on
       // against a session that is gone
@@ -1718,6 +1723,15 @@
             {/if}
           {/if}
           <div class="spoofbar">
+            <Field label={t('pe.spoof.address')}>
+              <input
+                class="mono"
+                bind:value={spoofAddress}
+                placeholder="host:25565"
+                disabled={spoofBusy || !canSpoof}
+                oninput={() => (spoof = spoof && { ...spoof, current: undefined })}
+              />
+            </Field>
             <button onclick={checkSpoof} disabled={spoofBusy || !canSpoof}>
               {t('pe.spoof.check')}
             </button>
@@ -2032,8 +2046,13 @@
   }
   .spoofbar {
     display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
     gap: var(--space-3);
     margin-top: var(--space-3);
+  }
+  .spoofbar :global(.field) {
+    flex: 0 1 280px;
   }
   .gate {
     border: 1px solid var(--danger);

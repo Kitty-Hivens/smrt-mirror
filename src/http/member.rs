@@ -6,7 +6,7 @@ use super::{ApiError, audit};
 use crate::accounts::{Identity, PackLevel, Role, UploadRow};
 use crate::authoring::curator::{clean_mc_version, jar_facts, read_mcmod_info};
 use crate::authoring::modmeta;
-use crate::domain::{PackConfig, PackSummary, Visibility};
+use crate::domain::{PackConfig, PackSummary, PackTier, Visibility};
 use crate::registry::queries;
 use crate::state::AppState;
 use axum::body::Bytes;
@@ -78,8 +78,17 @@ async fn mirror_events(
         .into_response()
 }
 
+/// Whether a pack the caller owns belongs in their own list. An admin curates
+/// the official packs in a section of their own, and the operator owns every one
+/// of those, so for an admin "mine" means the personal ones. A member has no
+/// such section: a pack of theirs made official stays in their list, or they
+/// would lose the way into a pack the gate still lets them edit.
+fn is_own_listing(identity: &Identity, owner: i64, tier: PackTier) -> bool {
+    owner == identity.uid && (tier == PackTier::Community || identity.role < Role::Admin)
+}
+
 /// The caller's own packs -- the "my packs" view. Draft and community packs the
-/// public `/v1/packs` listing hides show here for their owner; an admin sees all.
+/// public `/v1/packs` listing hides show here for their owner.
 async fn my_packs(
     State(state): State<AppState>,
     Extension(identity): Extension<Identity>,
@@ -89,7 +98,7 @@ async fn my_packs(
         .list_pack_summaries()
         .await?
         .into_iter()
-        .filter(|p| identity.owns_or_admin(p.owner))
+        .filter(|p| is_own_listing(&identity, p.owner, p.tier))
         .collect();
     Ok(Json(mine))
 }
@@ -101,13 +110,26 @@ async fn my_authoring(
     State(state): State<AppState>,
     Extension(identity): Extension<Identity>,
 ) -> Result<Json<Vec<String>>, ApiError> {
-    // A grant is a row, so "which packs can I reach" is no longer derivable from
-    // the id alone -- but it is still one question, asked once against the
-    // caller's whole access list rather than once per pack on the mirror.
     let all = state.storage.list_authoring_packs().await?;
-    Ok(Json(
-        super::auth::filter_may(&state, &identity, all, PackLevel::View).await,
-    ))
+    if identity.role < Role::Admin {
+        // A grant is a row, so "which packs can I reach" is not derivable from
+        // the id alone -- but it is still one question, asked once against the
+        // caller's whole access list rather than once per pack on the mirror.
+        return Ok(Json(
+            super::auth::filter_may(&state, &identity, all, PackLevel::View).await,
+        ));
+    }
+    // The admin rung reaches every pack, which is not the question asked here:
+    // the stored owner and tier say which are the admin's own.
+    let mut out = Vec::new();
+    for id in all {
+        if let Ok(cfg) = state.storage.load_pack_config(&id).await
+            && is_own_listing(&identity, cfg.owner, cfg.tier)
+        {
+            out.push(id);
+        }
+    }
+    Ok(Json(out))
 }
 
 // ── being told ──────────────────────────────────────────────────────────────

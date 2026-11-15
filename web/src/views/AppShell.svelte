@@ -2,12 +2,12 @@
   import type { Snippet } from 'svelte';
   import { api } from '../lib/api';
   import type { Health } from '../lib/types';
-  import { href, plainClick, route, visibleSections, type Section } from '../lib/route.svelte';
+  import { href, plainClick, reachableSections, route, visibleSections, type Section } from '../lib/route.svelte';
   import { activity } from '../lib/motion.svelte';
   import { inbox } from '../lib/inbox.svelte';
   import { mirror } from '../lib/mirror.svelte';
   import { t } from '../lib/i18n.svelte';
-  import Avatar from './Avatar.svelte';
+  import AccountMenu from './AccountMenu.svelte';
   import NavIcon from './ui/NavIcon.svelte';
 
   type Me = {
@@ -85,22 +85,18 @@
   // Keep the active section within what this role may see: a stored operator
   // section from a prior admin session shouldn't strand a guest on a blank tab.
   $effect(() => {
-    if (!visibleSections(me).includes(route.section)) route.go('browse', true);
+    if (!reachableSections(me).includes(route.section)) route.go('browse', true);
   });
 
   const navKey: Record<Section, Parameters<typeof t>[0]> = {
     browse: 'nav.browse',
     overview: 'nav.overview',
     packs: 'nav.packs',
-    servers: 'nav.servers',
     mods: 'nav.mods',
     graph: 'nav.graph',
-    users: 'nav.users',
-    moderation: 'nav.moderation',
-    audit: 'nav.audit',
-    profile: 'nav.profile',
-    settings: 'nav.settings',
+    admin: 'nav.admin',
     mypacks: 'nav.mypacks',
+    profile: 'nav.profile',
   };
 </script>
 
@@ -127,9 +123,6 @@
           >
             <NavIcon name={s} />
             <span class="label">{t(navKey[s])}</span>
-            {#if s === 'profile' && inbox.unread}
-              <span class="badge" title={t('inbox.title')}>{inbox.unread}</span>
-            {/if}
           </a>
         </li>
       {/each}
@@ -142,24 +135,6 @@
         <div class="health faint mono">
           {t('shell.health', { version: health.version, schema: health.schema_version })}
         </div>
-      {/if}
-      {#if me}
-        <a
-          class="who"
-          href={href.section('profile')}
-          title={t('nav.profile')}
-          onclick={(e) => {
-            if (!plainClick(e)) return;
-            e.preventDefault();
-            route.go('profile');
-          }}
-        >
-          <Avatar uid={me.uid} login={me.login} size={26} />
-          <span class="whotext faint mono">{me.login} &middot; {me.role}</span>
-        </a>
-        <button class="signout" onclick={onLogout}>{t('shell.signOut')}</button>
-      {:else}
-        <button class="signin primary" onclick={onSignIn}>{t('shell.signIn')}</button>
       {/if}
     </div>
   </nav>
@@ -215,6 +190,7 @@
         {/if}
       </div>
       <div class="spacer"></div>
+      <AccountMenu {me} {onSignIn} {onLogout} />
     </header>
 
     <main class="content scroll">
@@ -295,18 +271,7 @@
     border-bottom: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
     font-size: var(--fs-sm);
   }
-  /* how many are waiting, at the end of the row it is read on */
-  .badge {
-    margin-left: auto;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    letter-spacing: 0;
-    color: var(--on-solid);
-    background: var(--solid);
-    border-radius: 999px;
-    padding: 1px 7px;
-  }
-  /* the glyph is the anchor while scanning, so it stays at full strength while
+    /* the glyph is the anchor while scanning, so it stays at full strength while
      the label carries the dim/active contrast */
   .item :global(.ico) {
     opacity: 0.72;
@@ -351,37 +316,6 @@
   .health {
     font-size: var(--fs-xs);
     padding: 0 var(--space-2);
-  }
-  .signout {
-    width: 100%;
-    font-size: var(--fs-sm);
-  }
-  .signin {
-    width: 100%;
-    font-size: var(--fs-sm);
-  }
-  .who {
-    display: flex;
-    text-decoration: none;
-    cursor: pointer;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    min-width: 0;
-    padding: 4px var(--space-2);
-    background: transparent;
-    border: none;
-    border-radius: var(--radius-sm);
-    text-align: left;
-  }
-  .who:hover {
-    background: var(--panel-2);
-  }
-  .whotext {
-    font-size: var(--fs-xs);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .main {
@@ -571,14 +505,6 @@
     flex: none;
     padding: 0;
     gap: var(--space-2);
-  }
-  .lay-strip .who,
-  .lay-strip .signout,
-  .lay-strip .signin {
-    width: auto;
-  }
-  .lay-strip .whotext {
-    max-width: 140px;
   }
 
   /* drawer: the rail slides in from the left over a scrim, toggled by the

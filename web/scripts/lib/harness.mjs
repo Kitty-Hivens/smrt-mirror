@@ -118,8 +118,8 @@ export async function signedIn(browser) {
   }
   // English, so labels are deterministic to click by. Set in storage rather
   // than clicked: the switch that used to sit in the shell (`.loc`) now lives
-  // on the login page and in Settings, so a click on it after signing in
-  // matches nothing and fails silently -- which is how a script ends up
+  // on the login page and in the account menu, so a click on it after signing
+  // in matches nothing and fails silently -- which is how a script ends up
   // navigating by English labels through a Russian rail and screenshotting
   // whatever was already on screen.
   await page.evaluate(() => {

@@ -111,7 +111,7 @@ use crate::registry::model::{FileDetail, ModDetail, ModEdge, ModUse, ReleaseRow,
         ServerEntry,
         Featured,
     )),
-    tags((name = "public", description = "Unauthenticated reads: the launcher catalog, manifests, mods, cache, servers."))
+    tags((name = "public", description = "Unauthenticated reads: the launcher catalog, manifests, mods, cache."))
 )]
 struct ApiDoc;
 
@@ -172,4 +172,30 @@ async fn docs_page() -> impl IntoResponse {
         [(header::CONTENT_SECURITY_POLICY, DOCS_CSP)],
         Html(DOCS_HTML),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ApiDoc;
+    use utoipa::OpenApi;
+    use utoipa::openapi::Deprecated;
+
+    // A client author reads the spec, not the source: a route that is going away
+    // has to say so there.
+    #[test]
+    fn the_server_reads_are_marked_deprecated() {
+        let doc = ApiDoc::openapi();
+        for path in ["/v1/servers", "/v1/servers/{server_id}"] {
+            let op = doc.paths.paths[path]
+                .get
+                .as_ref()
+                .unwrap_or_else(|| panic!("{path} has a GET"));
+            assert!(
+                matches!(op.deprecated, Some(Deprecated::True)),
+                "{path} is deprecated in the spec"
+            );
+        }
+        let live = doc.paths.paths["/v1/packs"].get.as_ref().unwrap();
+        assert!(!matches!(live.deprecated, Some(Deprecated::True)));
+    }
 }

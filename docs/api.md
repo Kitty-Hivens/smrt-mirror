@@ -227,12 +227,20 @@ edges, and which public packs ship it. `/v1/files/{sha1}` is the Modrinth
   mirror's base. Most point back at this mirror; a curator may write a URL of
   their own, so treat them as arbitrary and do not assume the origin.
 
-## Servers, featured, community
+## Featured, community, servers
 
-`/v1/servers` and `/v1/featured` are curated editorial surfaces for the
-launcher's home screen. `/v1/community` lists published community packs (with
-an owner byline) -- browseable, but never part of the official catalog at
-`/v1/packs`.
+`/v1/featured` is a curated editorial surface for the launcher's home screen.
+`/v1/community` lists published community packs (with an owner byline) --
+browseable, but never part of the official catalog at `/v1/packs`.
+
+`/v1/servers` and `/v1/servers/{id}` are deprecated and will be removed. A
+curated server entry was meant to be a catalog of its own and never became one:
+the launcher reads a pack's servers from the `servers.dat` the pack ships, and
+nothing reads these. The panel no longer edits them. The one thing an entry
+still did, giving the address a pack's handshake claim is checked against, is
+now a parameter of that check (`?address=host:port` on
+`/v1/authoring/packs/{id}/spoof`); an entry's address is used only when none
+is given.
 
 ## What is being asked of a pack
 

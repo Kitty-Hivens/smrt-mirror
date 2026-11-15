@@ -14,8 +14,6 @@ export type { PackListing } from './bindings/PackListing';
 export type { CommunityPack } from './bindings/CommunityPack';
 export type { ManifestVersionsListing } from './bindings/ManifestVersionsListing';
 export type { AuthoringPacksListing } from './bindings/AuthoringPacksListing';
-export type { ServerEntry } from './bindings/ServerEntry';
-export type { ServerListing } from './bindings/ServerListing';
 export type { Featured } from './bindings/Featured';
 export type { CacheInventory } from './bindings/CacheInventory';
 export type { CacheInventoryEntry } from './bindings/CacheInventoryEntry';

@@ -8,56 +8,40 @@ export type Section =
   | 'browse'
   | 'overview'
   | 'packs'
-  | 'servers'
   | 'mods'
   | 'graph'
-  | 'users'
-  | 'moderation'
-  | 'audit'
-  | 'profile'
-  | 'settings'
-  | 'mypacks';
-// The operator's official tabs. `mypacks` is not among them because it is a
-// personal surface, not an operator one -- but every account has it, admins
-// included (their own community packs under `u/<uid>/`, distinct from the
-// official packs they author via `packs`), so `visibleSections` appends it for
-// operators too. KNOWN_SECTIONS is the superset used to validate a stored tab.
-export const SECTIONS: Section[] = [
-  'browse',
-  'overview',
-  'packs',
-  'servers',
-  'mods',
-  'graph',
-  'users',
-  'moderation',
-  'audit',
-  'profile',
-  'settings',
-];
-// Guest sees only the public catalog; a signed-in member also gets their own
-// packs and profile; everything else is operator-only.
-// Settings is everyone's: the theme is a preference of whoever is looking, not
-// a privilege. A guest gets the catalog and their own preferences, nothing else.
-export const GUEST_SECTIONS: Section[] = ['browse', 'settings'];
+  | 'admin'
+  | 'mypacks'
+  | 'profile';
+// The operator's rail. `mypacks` is every account's own surface, admins
+// included (packs they own, as distinct from the official ones they curate), so
+// it closes the operator's list as it closes a member's. The account's own page
+// and the panel's preferences are not here at all: they are the account menu in
+// the corner, where every service keeps them.
+export const SECTIONS: Section[] = ['browse', 'overview', 'packs', 'mods', 'graph', 'admin', 'mypacks'];
+// A guest sees the public catalog and nothing else.
+export const GUEST_SECTIONS: Section[] = ['browse'];
 // The registry browser (mods) and the graph are read-only for a member -- the
 // views gate their own authoring, and the data is already public per-mod on the
 // mod page -- so a member building a community pack gets the same read of what the
 // mirror indexes, and the same "does this hold together" view, an operator has.
-export const MEMBER_SECTIONS: Section[] = [
-  'browse',
-  'mods',
-  'graph',
-  'mypacks',
-  'profile',
-  'settings',
-];
-const KNOWN_SECTIONS: Section[] = [...SECTIONS, 'mypacks'];
+export const MEMBER_SECTIONS: Section[] = ['browse', 'mods', 'graph', 'mypacks'];
+const KNOWN_SECTIONS: Section[] = [...SECTIONS, 'profile'];
 export function visibleSections(me: { role: string } | null): Section[] {
   if (!me) return GUEST_SECTIONS;
-  if (isOperator(me.role)) return [...SECTIONS, 'mypacks'];
+  if (isOperator(me.role)) return SECTIONS;
   return MEMBER_SECTIONS;
 }
+/// Where this account may stand: the rail, and the account's own page, which
+/// the menu in the corner opens rather than the rail.
+export function reachableSections(me: { role: string } | null): Section[] {
+  return me ? [...visibleSections(me), 'profile'] : GUEST_SECTIONS;
+}
+
+/// The tabs of the administration section: who has an account, what is waiting
+/// to be decided, and what everybody did.
+export type AdminTab = 'users' | 'moderation' | 'audit';
+export const ADMIN_TABS: AdminTab[] = ['users', 'moderation', 'audit'];
 
 const STORAGE_KEY = 'smrt.section';
 
@@ -71,17 +55,33 @@ const STORAGE_KEY = 'smrt.section';
 // a mod over it. The server serves the app shell for any path it does not
 // claim, so these survive a reload.
 
+// Addresses that named a section of their own before it became something else:
+// a bookmark or a link pasted in an issue still lands where it meant to.
+const MOVED: Record<string, Section> = {
+  cache: 'mods',
+  users: 'admin',
+  moderation: 'admin',
+  audit: 'admin',
+};
+
 function sectionFromPath(path: string): Section | null {
   const seg = path.replace(/^\/+|\/+$/g, '').split('/')[0];
-  // the old sha1 'cache' tab was replaced by mod management
-  if (seg === 'cache') return 'mods';
+  if (seg in MOVED) return MOVED[seg];
   return KNOWN_SECTIONS.includes(seg as Section) ? (seg as Section) : null;
+}
+
+/// The administration tab out of `/admin/<tab>`, or out of the old address
+/// that named it as a section (`/users`, `/moderation`, `/audit`).
+function adminTabFromPath(path: string): AdminTab {
+  const segs = path.replace(/^\/+|\/+$/g, '').split('/');
+  const tab = segs[0] === 'admin' ? segs[1] : segs[0];
+  return ADMIN_TABS.includes(tab as AdminTab) ? (tab as AdminTab) : 'users';
 }
 
 function storedSection(): Section {
   try {
     const s = localStorage.getItem(STORAGE_KEY);
-    if (s === 'cache') return 'mods';
+    if (s && s in MOVED) return MOVED[s];
     if (s && KNOWN_SECTIONS.includes(s as Section)) return s as Section;
   } catch {
     // blocked storage -- default below
@@ -160,6 +160,7 @@ function initial(): Section {
 }
 
 let section = $state<Section>(initial());
+let adminTab = $state<AdminTab>(adminTabFromPath(location.pathname));
 // A focused mod page overlays whatever section is active: set, the content area
 // renders the mod page instead of the section; cleared, it returns to `section`.
 // Reachable from the registry, a pack's mod list, and the graph, so it lives here
@@ -213,6 +214,12 @@ function pushPath(path: string, replace = false, state: object = {}) {
   if (!replace) pushed += 1;
 }
 
+/// A section's own address. A function rather than a field of `href`, because
+/// the start-up code below needs it before `href` exists.
+function sectionPath(s: Section): string {
+  return s === 'admin' ? `/admin/${adminTab}` : `/${s}`;
+}
+
 function remember(s: Section) {
   try {
     localStorage.setItem(STORAGE_KEY, s);
@@ -246,6 +253,7 @@ if (typeof window !== 'undefined') {
       if (s) {
         section = s;
         remember(s);
+        if (s === 'admin') adminTab = adminTabFromPath(location.pathname);
       }
     }
   });
@@ -256,7 +264,10 @@ if (typeof window !== 'undefined') {
     !modFromPath(location.pathname) &&
     threadFromPath(location.pathname) === null
   ) {
-    pushPath(`/${section}`, true);
+    pushPath(sectionPath(section), true);
+  } else if (section === 'admin' && !location.pathname.startsWith('/admin/')) {
+    // an old address for a tab, or the bare section: the tab's own address
+    pushPath(sectionPath('admin'), true);
   }
   remember(section);
 }
@@ -267,7 +278,8 @@ if (typeof window !== 'undefined') {
 /// middle click, no ctrl-click, nothing to copy, and a screen reader announcing
 /// "button" for a place.
 export const href = {
-  section: (s: Section) => `/${s}`,
+  section: sectionPath,
+  admin: (tab: AdminTab) => `/admin/${tab}`,
   mod: (ref: number | string) => `/mod/${encodeURIComponent(String(ref))}`,
   pack: (id: string, from: Section = section) => `/${from}/${encodeURIComponent(id)}`,
   commit: (id: string, commitId: string, from: Section = section) =>
@@ -290,6 +302,22 @@ export function plainClick(e: MouseEvent): boolean {
 export const route = {
   get section(): Section {
     return section;
+  },
+  /// The administration tab, meaningful while the section is `admin`.
+  get adminTab(): AdminTab {
+    return adminTab;
+  },
+  /// Switch the administration tab, as a step back can undo.
+  openAdmin(tab: AdminTab) {
+    adminTab = tab;
+    pushPath(href.admin(tab));
+  },
+  /// Go to one tab of the administration from elsewhere, as one step.
+  async goAdmin(tab: AdminTab) {
+    const was = adminTab;
+    adminTab = tab;
+    await route.go('admin');
+    if (section !== 'admin') adminTab = was;
   },
   get mod(): string | null {
     return focusMod;
@@ -356,7 +384,7 @@ export const route = {
     focusThread = null;
     section = s;
     remember(s);
-    pushPath(`/${s}`, replace);
+    pushPath(href.section(s), replace);
   },
   /// Open a pack's editor as a location under the section it was opened from,
   /// so back closes it and the URL can be shared.
@@ -387,7 +415,7 @@ export const route = {
       return;
     }
     editPack = null;
-    pushPath(`/${section}`, true);
+    pushPath(sectionPath(section), true);
   },
   /// Open a commit over the pack that declared it. The editor stays where it is
   /// underneath, so closing the commit returns to it rather than to a section.
@@ -422,7 +450,7 @@ export const route = {
       return;
     }
     focusThread = null;
-    pushPath(editPack !== null ? href.pack(editPack) : `/${section}`, true);
+    pushPath(editPack !== null ? href.pack(editPack) : sectionPath(section), true);
   },
   closeCommit() {
     if (commitFromPath(location.pathname) && pushed > 0) {
@@ -457,6 +485,6 @@ export const route = {
     }
     focusMod = null;
     modHint = null;
-    pushPath(focusCatalog !== null ? href.catalog(focusCatalog) : `/${section}`, true);
+    pushPath(focusCatalog !== null ? href.catalog(focusCatalog) : sectionPath(section), true);
   },
 };

@@ -15,7 +15,6 @@
   import ThreadPage from './views/ThreadPage.svelte';
   import Profile from './views/Profile.svelte';
   import MyPacks from './views/MyPacks.svelte';
-  import Settings from './views/Settings.svelte';
   import Skeleton from './views/ui/Skeleton.svelte';
   import Toaster from './views/ui/Toaster.svelte';
   import DialogHost from './views/DialogHost.svelte';
@@ -98,9 +97,6 @@
       {:catch}
         <div class="muted mono">{t('app.partGone')}</div>
       {/await}
-    {:else if route.section === 'settings'}
-      <!-- before any role check: preferences belong to whoever is looking -->
-      <Settings />
     {:else if route.section === 'profile' && me}
       <Profile {me} />
     {:else if route.section === 'mypacks' && me}
