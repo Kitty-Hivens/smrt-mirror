@@ -8,3 +8,10 @@
 # package context, so they are written next to the real scripts and must not
 # be committed with them
 web/scripts/.*.tmp.mjs
+
+# a copy of production's public data for `pnpm dev:snapshot`, refetched with
+# `pnpm devdata:pull` and never committed
+web/.devdata/
+
+# what tsc -p writes beside a composite project's config
+*.tsbuildinfo

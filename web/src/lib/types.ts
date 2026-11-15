@@ -8,6 +8,7 @@ import type { DryRun } from './bindings/DryRun';
 
 export type { DryRun };
 export type { Health } from './bindings/Health';
+export type { ManifestBuildInfo } from './bindings/ManifestBuildInfo';
 export type { PackSummary } from './bindings/PackSummary';
 export type { PackListing } from './bindings/PackListing';
 export type { CommunityPack } from './bindings/CommunityPack';

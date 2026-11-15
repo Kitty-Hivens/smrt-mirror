@@ -247,6 +247,12 @@ version section when a release is tagged.
 
 ### Added
 
+- The panel's dev server can take its data from production without a mirror
+  of its own: `pnpm dev:live` reads production read only, refusing every
+  write before it leaves and never forwarding the browser's cookies, and
+  `pnpm devdata:pull` copies the public data into `web/.devdata` for
+  `pnpm dev:snapshot`, which needs no network. `DEV_AS` signs in as a role
+  without a login. See docs/development.md.
 - Dependencies can be recomputed without editing a pack. A save fills them only
   when the declared mods change, so what the mirror learns afterwards, a library
   a jar turns out to carry or a build that settles a dependency, never reached a
@@ -496,6 +502,17 @@ version section when a release is tagged.
 
 ### Changed
 
+- A pack's page has a control card down the right edge in the pack's own
+  colour, taken from its banner: the version and channel, when it was built,
+  fork and copy link (and the editor for whoever may edit), Minecraft, loader
+  and Java, the mods in proportion (required, optional, shipped switched off,
+  server only) with the download size, the latest notes with every version
+  under them, and a row to the discussion. On a large screen the description
+  and the mods sit side by side beside it. The card stays in view while the
+  page scrolls and scrolls inside itself when it is taller than the window.
+  The discussion is a section of the page with its own filter and report form,
+  and switching the filter keeps the list in place instead of collapsing it.
+  The mods are sorted by name and a phone folds the list after twelve rows.
 - The version the mirror reports means something now. `0.1.0` had not moved
   since the first commit and never would -- it recorded only that somebody had
   typed a number once -- so the panel footer, `/v1/health` and `smrt-pack

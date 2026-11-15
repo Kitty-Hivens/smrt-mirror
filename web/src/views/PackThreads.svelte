@@ -8,7 +8,11 @@
   import { notifyFail } from '../lib/toasts.svelte';
   import { t } from '../lib/i18n.svelte';
   import Skeleton from './ui/Skeleton.svelte';
+  import TabStrip from './ui/TabStrip.svelte';
+  import Glyph from './ui/Glyph.svelte';
+  import Avatar from './Avatar.svelte';
   import { route, href, plainClick } from '../lib/route.svelte';
+  import { stagger } from '../lib/motion.svelte';
   import type { Thread } from '../lib/types';
 
   let {
@@ -42,6 +46,11 @@
   // list opens, so the report button is absent rather than refused.
   let suspended = $state<{ reason?: string; at: number; everywhere: boolean } | null>(null);
   let loading = $state(true);
+  // Whether anything has been shown yet. Only the first read waits behind a
+  // placeholder: after that a new read dims what is on screen until the answer
+  // replaces it, so switching the filter never empties the section and moves
+  // the page under the reader.
+  let shown = $state(false);
   let failed = $state(false);
   let showAll = $state(false);
   let working = $state(false);
@@ -73,18 +82,27 @@
     })();
   });
 
+  // Each read is numbered and only the newest may write: a slow answer for the
+  // filter the reader has already left must not land over the one they chose.
+  let seq = 0;
   async function load() {
+    const mine = ++seq;
     loading = true;
     try {
       const page = await api.threads(packId, undefined, showAll, PAGE);
+      if (mine !== seq) return;
       rows = page.rows;
       next = page.next;
       failed = false;
     } catch (e) {
+      if (mine !== seq) return;
       failed = true;
       notifyFail(e);
     } finally {
-      loading = false;
+      if (mine === seq) {
+        loading = false;
+        shown = true;
+      }
     }
   }
 
@@ -154,6 +172,16 @@
     else route.openThread(packId, row.id);
   }
 
+  const filterTabs = $derived([
+    { value: 'open', label: t('thr.filterOpen') },
+    { value: 'all', label: t('thr.filterAll') },
+  ]);
+
+  function cancel() {
+    opening = false;
+    proposing = false;
+  }
+
   function when(at: number): string {
     const d = new Date(at * 1000);
     return Number.isNaN(d.getTime()) ? String(at) : d.toLocaleDateString();
@@ -162,21 +190,25 @@
 
 <div class="threads">
   <div class="bar">
-    <button class="link" onclick={() => (showAll = !showAll)}>
-      {showAll ? t('thr.showOpen') : t('thr.showAll')}
-    </button>
-    {#if canWrite && !suspended}
-      <button class="link" onclick={() => (opening = !opening)}>{t('thr.report')}</button>
-    {/if}
-    {#if forkOf}
-      <button class="link" onclick={() => (proposing = !proposing)}>
-        {t('thr.propose', { pack: forkOf })}
-      </button>
-    {/if}
+    <TabStrip
+      variant="pill"
+      value={showAll ? 'all' : 'open'}
+      tabs={filterTabs}
+      ariaLabel={t('browse.discussion')}
+      onChange={(v) => (showAll = v === 'all')}
+    />
+    <div class="acts">
+      {#if canWrite && !suspended && !opening}
+        <button class="act" onclick={() => (opening = true)}><Glyph name="chat" size={14} />{t('thr.report')}</button>
+      {/if}
+      {#if forkOf && !proposing}
+        <button class="act" onclick={() => (proposing = true)}><Glyph name="fork" size={14} />{t('thr.propose', { pack: forkOf })}</button>
+      {/if}
+    </div>
   </div>
 
   {#if suspended}
-    <p class="muted small suspended">
+    <p class="suspended">
       {#if suspended.everywhere}
         {suspended.reason ? t('thr.stopped', { reason: suspended.reason }) : t('thr.stoppedPlain')}
       {:else}
@@ -187,49 +219,70 @@
 
   {#if opening && canWrite && !suspended}
     <div class="form">
-      <input bind:value={title} placeholder={t('thr.titlePlaceholder')} disabled={working} />
-      <textarea rows="3" bind:value={body} placeholder={t('thr.bodyPlaceholder')} disabled={working}
+      <input class="prose" bind:value={title} placeholder={t('thr.titlePlaceholder')} disabled={working} />
+      <textarea class="prose" rows="4" bind:value={body} placeholder={t('thr.bodyPlaceholder')} disabled={working}
       ></textarea>
-      <button onclick={report} disabled={working || !title.trim()}>{t('thr.send')}</button>
+      <div class="formacts">
+        <button class="primary" onclick={report} disabled={working || !title.trim()}>{t('thr.send')}</button>
+        <button onclick={cancel} disabled={working}>{t('thr.cancel')}</button>
+      </div>
     </div>
   {/if}
 
   {#if proposing && forkOf}
     <div class="form">
-      <p class="muted small">{t('thr.proposeLead', { pack: forkOf })}</p>
-      <input bind:value={title} placeholder={t('thr.proposeTitle')} disabled={working} />
-      <textarea rows="3" bind:value={body} placeholder={t('thr.bodyPlaceholder')} disabled={working}
+      <p class="lead">{t('thr.proposeLead', { pack: forkOf })}</p>
+      <input class="prose" bind:value={title} placeholder={t('thr.proposeTitle')} disabled={working} />
+      <textarea class="prose" rows="4" bind:value={body} placeholder={t('thr.bodyPlaceholder')} disabled={working}
       ></textarea>
-      <button onclick={propose} disabled={working || !title.trim()}>{t('thr.send')}</button>
+      <div class="formacts">
+        <button class="primary" onclick={propose} disabled={working || !title.trim()}>{t('thr.send')}</button>
+        <button onclick={cancel} disabled={working}>{t('thr.cancel')}</button>
+      </div>
     </div>
   {/if}
 
-  {#if loading && !rows.length}
-    <Skeleton rows={3} height={44} gap={0} shape="row" lead={0} />
+  {#if loading && !shown}
+    <Skeleton rows={3} height={64} gap={0} shape="row" lead={28} />
   {:else if failed}
-    <p class="muted">{t('thr.unreadable')}</p>
+    <p class="lead">{t('thr.unreadable')}</p>
   {:else if !rows.length}
-    <p class="muted empty">{showAll ? t('thr.noneAtAll') : t('thr.noneOpen')}</p>
+    <!-- an empty discussion is still the place to start one, so it says how -->
+    <div class="empty" class:stale={loading}>
+      <span class="emark"><Glyph name="chat" size={18} /></span>
+      <div>
+        {#key showAll}
+          <div class="etitle">{showAll ? t('thr.noneAtAll') : t('thr.noneOpen')}</div>
+        {/key}
+        <p class="esub">{canWrite ? t('thr.emptySub') : t('browse.signInToReport')}</p>
+      </div>
+    </div>
   {:else}
-    <ol class="list">
-      {#each rows as r (r.id)}
-        <li>
-          <div class="line">
-            <span class="kind" data-kind={r.kind}>{t(`thr.kind.${r.kind}` as 'thr.kind.issue')}</span>
-            <a href={address(r)} onclick={(e) => open(e, r)}>{r.title}</a>
-            <span class="status" data-status={r.status}>{t(`thr.status.${r.status}` as 'thr.status.open')}</span>
-          </div>
-          <div class="meta muted">
-            <span>#{r.id}</span>
-            <span>{r.by_login ?? t('acc.unknownUser', { uid: r.by_uid })}</span>
-            <span>{when(r.created_at)}</span>
+    <ol class="list" class:stale={loading}>
+      {#each rows as r, i (r.id)}
+        <li class="row-in" use:stagger={i}>
+          <a class="row" href={address(r)} onclick={(e) => open(e, r)}>
+            <Avatar uid={r.by_uid} login={r.by_login ?? '?'} size={28} />
+            <span class="main">
+              <span class="ttl">{r.title}</span>
+              <span class="meta">
+                <span class="kind" data-kind={r.kind}>{t(`thr.kind.${r.kind}` as 'thr.kind.issue')}</span>
+                <span>#{r.id}</span>
+                <span>{r.by_login ?? t('acc.unknownUser', { uid: r.by_uid })}</span>
+                <span>{when(r.created_at)}</span>
+              </span>
+            </span>
             {#if r.comments}
-              <span>{t('thr.comments', { n: r.comments })}</span>
+              <span class="count" title={t('thr.comments', { n: r.comments })}><Glyph name="chat" size={13} />{r.comments}</span>
             {/if}
-          </div>
+            <span class="status" data-status={r.status}>{t(`thr.status.${r.status}` as 'thr.status.open')}</span>
+          </a>
         </li>
       {/each}
     </ol>
+    {#if !canWrite}
+      <p class="lead">{t('browse.signInToReport')}</p>
+    {/if}
     {#if next}
       <button class="link more" onclick={more} disabled={working}>{t('thr.more')}</button>
     {/if}
@@ -238,90 +291,185 @@
 
 <style>
   .threads {
-    max-width: 720px;
-    padding: 4px 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
   }
   .bar {
     display: flex;
-    gap: 14px;
-    margin-bottom: 10px;
-    font-size: var(--fs-sm);
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2) var(--space-3);
+  }
+  .acts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+  .act {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 6px 14px;
+    font-size: var(--fs-md);
   }
   .form {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    margin-bottom: 14px;
-    max-width: 640px;
+    gap: var(--space-2);
+    padding: var(--space-4);
+    background: var(--panel-2);
+    border: 1px solid var(--seam);
+    border-radius: var(--radius-md);
   }
-  .form input,
   .form textarea {
-    font: inherit;
     resize: vertical;
   }
-  .form button {
-    align-self: flex-start;
+  .formacts {
+    display: flex;
+    gap: var(--space-2);
   }
+  .lead {
+    margin: 0;
+    font-size: var(--fs-sm);
+    color: var(--fg-dim);
+  }
+  .suspended {
+    margin: 0;
+    font-size: var(--fs-sm);
+    color: var(--fg-dim);
+    border-left: 2px solid var(--danger);
+    padding-left: 10px;
+  }
+
+  /* the section is already the frame: the empty state is a line in it, not a
+     second box drawn inside the first */
+  .empty {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+    padding: var(--space-2) 0;
+  }
+  .emark {
+    width: 40px;
+    height: 40px;
+    flex: none;
+    display: grid;
+    place-items: center;
+    border-radius: var(--radius-md);
+    background: var(--panel-2);
+    color: var(--fg-dim);
+  }
+  .etitle {
+    font-size: var(--fs-lg);
+    font-weight: 600;
+    animation: row-in var(--dur-enter) var(--ease-out) backwards;
+  }
+  .esub {
+    margin: 2px 0 0;
+    font-size: var(--fs-md);
+    color: var(--fg-dim);
+  }
+
   .list {
     list-style: none;
     margin: 0;
     padding: 0;
+    border: 1px solid var(--seam);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+  }
+  .list li + li {
     border-top: 1px solid var(--seam);
   }
-  .list li {
-    padding: 8px 0;
-    border-bottom: 1px solid var(--seam);
-  }
-  .line {
+  /* a report is a place, so its whole row is the way there */
+  .row {
     display: flex;
-    align-items: baseline;
-    gap: 10px;
-  }
-  .line a {
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
     color: inherit;
     text-decoration: none;
-    overflow-wrap: anywhere;
   }
-  .line a:hover {
+  .row {
+    transition: background var(--dur-state) var(--ease-out);
+  }
+  .row:hover {
+    background: var(--panel-2);
+  }
+  .row:focus-visible {
+    outline: none;
+    box-shadow: inset 0 0 0 2px var(--seam-bright);
+  }
+  .row:hover .ttl {
     text-decoration: underline;
+    text-decoration-color: var(--seam-bright);
+    text-underline-offset: 2px;
   }
-  .kind {
-    font-size: var(--fs-sm);
-    font-variant: small-caps;
-    color: var(--fg-dim);
+  .main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
   }
-  .kind[data-kind='proposal'] {
-    color: var(--accent, var(--fg));
-  }
-  .status {
-    margin-left: auto;
-    font-size: var(--fs-sm);
-    color: var(--fg-dim);
-  }
-  .status[data-status='open'] {
-    color: var(--ok, var(--fg));
-  }
-  .status[data-status='merged'] {
-    color: var(--accent, var(--fg));
+  .ttl {
+    font-size: var(--fs-lg);
+    font-weight: 600;
+    overflow-wrap: anywhere;
   }
   .meta {
     display: flex;
     flex-wrap: wrap;
-    gap: 12px;
+    gap: 2px var(--space-3);
     font-size: var(--fs-sm);
-    margin-top: 3px;
+    color: var(--fg-faint);
   }
-  .empty,
-  .small {
+  .kind {
+    color: var(--fg-dim);
+  }
+  .kind[data-kind='proposal'] {
+    color: var(--accent-hue);
+  }
+  .count {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     font-size: var(--fs-sm);
+    color: var(--fg-dim);
+    font-variant-numeric: tabular-nums;
   }
-  .suspended {
-    border-left: 2px solid var(--danger);
-    padding-left: 10px;
-    margin: 0 0 10px;
+  .status {
+    flex: none;
+    font-size: var(--fs-xs);
+    padding: 2px 9px;
+    border-radius: 999px;
+    border: 1px solid var(--seam-bright);
+    color: var(--fg-dim);
+  }
+  .status[data-status='open'] {
+    color: var(--ok);
+    border-color: color-mix(in srgb, var(--ok) 45%, var(--seam));
+    background: var(--ok-soft);
+  }
+  .status[data-status='merged'] {
+    color: var(--accent-hue);
+    border-color: color-mix(in srgb, var(--accent-hue) 45%, var(--seam));
+    background: var(--accent-hue-soft);
+  }
+  .status[data-status='declined'] {
+    color: var(--danger);
+    border-color: color-mix(in srgb, var(--danger) 40%, var(--seam));
   }
   .more {
-    margin-top: 10px;
+    align-self: flex-start;
     font-size: var(--fs-sm);
+  }
+  @container view (max-width: 560px) {
+    .count {
+      display: none;
+    }
   }
 </style>
