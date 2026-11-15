@@ -930,12 +930,15 @@
     .talk {
       grid-area: talk;
     }
-    /* the shell pads the scrolling box by --space-5, so a card stuck at that
-       offset is exactly where it started and never jumps when it catches */
+    /* A sticky offset counts from inside the scrolling box's padding, which
+       the shell sets to --space-5, so the card sticks at 0: exactly where it
+       starts. An offset of its own would push it down from the start and let
+       it jump back up as soon as it grew to fill its area. It is held to the
+       height inside that padding. */
     .ctl {
       grid-area: card;
       position: sticky;
-      top: var(--space-5);
+      top: 0;
       max-height: calc(var(--view-h, 100dvh) - 2 * var(--space-5));
       overflow-y: auto;
       scrollbar-width: thin;
