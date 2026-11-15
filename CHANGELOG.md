@@ -8,6 +8,12 @@ version section when a release is tagged.
 
 ### Fixed
 
+- A guest's sign-in sat inside the settings gear, and a whole side rail held
+  the one section a guest has. A guest's shell now has no rail: the brand leads
+  the top bar, and sign in is a button beside the gear, which holds the theme
+  and the language. The top bar keeps to one line down to a phone. The theme
+  switch in the account menu lost its colour squares, which read as
+  checkboxes.
 - "Open in editor" on a pack's catalog page changed the address and the rail
   to the packs section and left the catalog page on screen, so the editor never
   appeared. Opening an editor from another section now leaves the page that

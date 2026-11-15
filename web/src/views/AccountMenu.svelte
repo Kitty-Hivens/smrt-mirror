@@ -13,11 +13,9 @@
   // has preferences, so the corner holds a gear for them instead of a face.
   let {
     me,
-    onSignIn,
     onLogout,
   }: {
     me: { uid: number; login: string; role: string } | null;
-    onSignIn: () => void;
     onLogout: () => void;
   } = $props();
 
@@ -65,7 +63,6 @@
           <div class="acct-seg">
             {#each THEMES as opt (opt.value)}
               <DropdownMenu.RadioItem class="acct-segitem" value={opt.value} closeOnSelect={false}>
-                <span class="acct-sw {opt.value}" aria-hidden="true"></span>
                 {t(opt.key)}
               </DropdownMenu.RadioItem>
             {/each}
@@ -86,16 +83,11 @@
         </DropdownMenu.RadioGroup>
       </DropdownMenu.Group>
 
-      <DropdownMenu.Separator class="acct-sep" />
       {#if me}
+        <DropdownMenu.Separator class="acct-sep" />
         <DropdownMenu.Item class="acct-item" onSelect={onLogout}>
           <Glyph name="exit" size={15} />
           <span class="acct-lbl">{t('shell.signOut')}</span>
-        </DropdownMenu.Item>
-      {:else}
-        <DropdownMenu.Item class="acct-item strong" onSelect={onSignIn}>
-          <Glyph name="enter" size={15} />
-          <span class="acct-lbl">{t('shell.signIn')}</span>
         </DropdownMenu.Item>
       {/if}
     </DropdownMenu.Content>
@@ -256,24 +248,5 @@
     background: var(--panel);
     color: var(--fg);
     box-shadow: var(--shadow-1);
-  }
-  :global(.acct-sw) {
-    width: 10px;
-    height: 10px;
-    flex: none;
-    border-radius: 3px;
-    border: 1px solid var(--seam-bright);
-  }
-  :global(.acct-sw.dark) {
-    background: #000;
-  }
-  :global(.acct-sw.light) {
-    background: #efeae1;
-  }
-  :global(.acct-sw.system) {
-    background: linear-gradient(105deg, #000 0 50%, #efeae1 50% 100%);
-  }
-  :global(.acct-item.strong) {
-    font-weight: 650;
   }
 </style>
