@@ -47,14 +47,21 @@
   // queries alone, because how many sections there are is not a fact CSS has.
   // The shell wears it as `lay-<shape>`: a bare `rail` is the nav's own class,
   // and the shell wearing it took the nav's column layout.
+  //
+  // With a single section there is nothing to navigate between, and a column,
+  // strip or drawer holding one item is chrome for its own sake: the shell goes
+  // `bare`, the brand moves into the top bar and the page has the width. That is
+  // a guest, whose one section is the catalog.
   let vw = $state(typeof window !== 'undefined' ? window.innerWidth : 1280);
   const STRIP_MAX = 4;
-  const layout = $derived<'rail' | 'strip' | 'drawer'>(
-    vw > 768
-      ? 'rail'
-      : vw > 560 && visibleSections(me).length <= STRIP_MAX
-        ? 'strip'
-        : 'drawer',
+  const layout = $derived<'bare' | 'rail' | 'strip' | 'drawer'>(
+    visibleSections(me).length <= 1
+      ? 'bare'
+      : vw > 768
+        ? 'rail'
+        : vw > 560 && visibleSections(me).length <= STRIP_MAX
+          ? 'strip'
+          : 'drawer',
   );
   // a drawer left open while the window widens into a rail would reappear
   // open the next time it narrows
@@ -164,8 +171,21 @@
       >
         <span class="bl" aria-hidden="true"></span>
       </button>
+      {#if layout === 'bare'}
+        <a
+          class="topbrand"
+          href={href.section('browse')}
+          onclick={(e) => {
+            if (!plainClick(e)) return;
+            e.preventDefault();
+            route.go('browse');
+          }}><img class="mk" src="/favicon.svg" alt="" />smrt<span class="faint">/control</span></a
+        >
+      {/if}
       <div class="crumb">
-        <span class="faint">smrt</span>
+        {#if layout !== 'bare'}
+          <span class="faint">smrt</span>
+        {/if}
         <span class="faint">/</span>
         {#if route.mod || route.catalog != null || route.pack != null}
           <!-- the page's own name once it has loaded one, the kind of place
@@ -190,7 +210,14 @@
         {/if}
       </div>
       <div class="spacer"></div>
-      <AccountMenu {me} {onSignIn} {onLogout} />
+      <div class="corner">
+        {#if !me}
+          <!-- the one thing a guest may want to do that is not reading, where
+               they will look for it rather than inside a settings menu -->
+          <button class="signin primary" onclick={onSignIn}>{t('shell.signIn')}</button>
+        {/if}
+        <AccountMenu {me} {onLogout} />
+      </div>
     </header>
 
     <main class="content scroll">
@@ -215,6 +242,58 @@
     padding: var(--space-4) var(--space-3);
     border-right: 1px solid var(--seam);
     background: color-mix(in srgb, var(--panel) 55%, transparent);
+  }
+  /* a guest's shell has no rail, so the brand leads the top bar instead */
+  .lay-bare {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .lay-bare .rail,
+  .lay-bare .scrim {
+    display: none;
+  }
+  .topbrand {
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    margin-right: 1ch;
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: var(--fs-lg);
+    color: var(--fg);
+    text-decoration: none;
+  }
+  .topbrand .mk {
+    width: 22px;
+    height: 22px;
+    border-radius: 7px;
+    box-shadow: var(--shadow-1);
+  }
+  .topbrand .faint {
+    font-weight: 500;
+    color: var(--fg-faint);
+  }
+  .corner {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex: none;
+    margin-left: var(--space-3);
+  }
+  /* One line, whatever the width: the crumb gives way (it ends in an ellipsis)
+     before the way in and the menu are pushed onto a second row. */
+  .lay-bare .topbar {
+    flex-wrap: nowrap;
+  }
+  .lay-bare .crumb {
+    flex: 0 1 auto;
+    overflow: hidden;
+  }
+  .lay-bare .topbrand {
+    flex: none;
+  }
+  .signin {
+    padding: 7px 16px;
+    font-size: var(--fs-sm);
   }
   .brand {
     display: flex;
@@ -553,6 +632,9 @@
   @media (max-width: 560px) {
     .topbar {
       padding: var(--space-3) var(--space-4);
+    }
+    .topbrand .faint {
+      display: none;
     }
     .content {
       padding: var(--space-3);
