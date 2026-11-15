@@ -8,6 +8,10 @@ version section when a release is tagged.
 
 ### Fixed
 
+- "Open in editor" on a pack's catalog page changed the address and the rail
+  to the packs section and left the catalog page on screen, so the editor never
+  appeared. Opening an editor from another section now leaves the page that
+  stood over the sections, and back returns to the pack's catalog page.
 - Unfolding a pack's versions on a phone scrolled the page about two screens
   down and threw the button off the top: the browser held the description in
   place, which comes before the card in the markup and after it on screen. The
