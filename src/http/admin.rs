@@ -24,8 +24,10 @@ pub fn router(state: AppState) -> Router {
     operator_router(state.clone()).merge(authoring_router(state))
 }
 
-/// Operator-only surface: the official catalog, servers, cache management, and
-/// user administration. Requires the admin role (and up).
+/// Operator-only surface: the official catalog, cache management, and user
+/// administration. Requires the admin role (and up). The server entries routed
+/// here are deprecated and stay only until they are removed.
+#[allow(deprecated)]
 fn operator_router(state: AppState) -> Router {
     Router::new()
         .route("/v1/servers", post(save_server))
@@ -130,6 +132,7 @@ fn authoring_router(state: AppState) -> Router {
             "/v1/authoring/packs/{pack_id}/visibility",
             put(set_pack_visibility),
         )
+        .route("/v1/authoring/packs/{pack_id}/tier", put(set_pack_tier))
         .route(
             "/v1/authoring/packs/{pack_id}/config/revert",
             post(revert_pack_config),
@@ -431,6 +434,7 @@ async fn reject_upload(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[deprecated = "server entries are read by nothing; a pack ships its servers in servers.dat"]
 async fn save_server(
     State(state): State<AppState>,
     Json(entry): Json<ServerEntry>,
@@ -451,6 +455,7 @@ async fn save_server(
 ///
 /// A server with no address recorded is a 400 rather than a silent empty list:
 /// "we never asked" and "it answered nothing" are different facts.
+#[deprecated = "ask through a pack's spoof report, which takes the address directly"]
 async fn advertised_mods(
     State(state): State<AppState>,
     Path(server_id): Path<String>,
@@ -485,6 +490,7 @@ async fn pack_spoof(
     State(state): State<AppState>,
     Extension(identity): Extension<Identity>,
     Path(pack_id): Path<String>,
+    Query(at): Query<SpoofAt>,
 ) -> Result<Json<SpoofReport>, ApiError> {
     use crate::authoring::spoof::{Spoof, drift};
     super::auth::authorize(&state, &identity, &pack_id, PackLevel::View).await?;
@@ -509,7 +515,7 @@ async fn pack_spoof(
     // Which server this pack joins. Without one there is nothing to compare
     // against, and the shipped claim is reported alone rather than judged.
     let server_id = cfg.auth.as_ref().and_then(|a| a.server_id.clone());
-    let (current, asked, unasked) = ask_packs_server(&state, &cfg).await;
+    let (current, asked, unasked) = ask_packs_server(&state, &cfg, at.address()).await;
 
     let moved = match (&shipped, &current) {
         (Some(a), Some(b)) => drift(a, b),
@@ -537,37 +543,67 @@ fn split_address(address: &str) -> Option<(String, u16)> {
     }
 }
 
+/// The server a spoof report or write asks, given by address: `host` or
+/// `host:port`. Absent falls back to the deprecated server entry the pack's
+/// `auth.server_id` names, for as long as those exist.
+#[derive(serde::Deserialize)]
+struct SpoofAt {
+    #[serde(default)]
+    address: Option<String>,
+}
+
+impl SpoofAt {
+    fn address(&self) -> Option<&str> {
+        self.address
+            .as_deref()
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+    }
+}
+
 /// Where the pack's claim has to come from, and what that server says now.
 /// Shared by the report and the write, so the two cannot disagree about which
 /// server a pack answers to.
+///
+/// The address the caller gives is the server asked. Without one, the address
+/// is read from the server entry the pack's `auth.server_id` names, which is
+/// deprecated and kept only until the entries are removed.
 async fn ask_packs_server(
     state: &AppState,
     cfg: &crate::domain::PackConfig,
+    address: Option<&str>,
 ) -> (
     Option<crate::authoring::spoof::Spoof>,
     Option<String>,
     Option<&'static str>,
 ) {
     use crate::authoring::spoof::spoof_from_status;
-    let Some(id) = cfg.auth.as_ref().and_then(|a| a.server_id.as_deref()) else {
-        return (
-            None,
-            None,
-            Some("this pack names no server, so there is nothing it has to match"),
-        );
+    let recorded;
+    let address = match address {
+        Some(a) => a,
+        None => {
+            let Some(id) = cfg.auth.as_ref().and_then(|a| a.server_id.as_deref()) else {
+                return (None, None, Some("give the address of the server to ask"));
+            };
+            recorded = state
+                .storage
+                .load_server(id)
+                .await
+                .ok()
+                .and_then(|entry| entry.address);
+            match recorded.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+                Some(a) => a,
+                None => {
+                    return (None, None, Some("give the address of the server to ask"));
+                }
+            }
+        }
     };
-    let Ok(entry) = state.storage.load_server(id).await else {
+    let Some((host, port)) = split_address(address) else {
         return (
             None,
             None,
-            Some("this pack names a server the mirror has no entry for"),
-        );
-    };
-    let Some((host, port)) = entry.address.as_deref().and_then(split_address) else {
-        return (
-            None,
-            None,
-            Some("that server has no address recorded, so there is nothing to ask"),
+            Some("that is not an address: host or host:port"),
         );
     };
     match crate::authoring::server_status(&host, port).await {
@@ -607,11 +643,12 @@ async fn generate_pack_spoof(
     State(state): State<AppState>,
     Extension(identity): Extension<Identity>,
     Path(pack_id): Path<String>,
+    Query(at): Query<SpoofAt>,
 ) -> Result<Json<SpoofReport>, ApiError> {
     super::auth::authorize(&state, &identity, &pack_id, PackLevel::Edit).await?;
     let _guard = state.storage.lock_pack_config(&pack_id).await;
     let mut cfg = state.storage.load_pack_config(&pack_id).await?;
-    let (current, asked, unasked) = ask_packs_server(&state, &cfg).await;
+    let (current, asked, unasked) = ask_packs_server(&state, &cfg, at.address()).await;
     let Some(spoof) = current else {
         return Err(ApiError::BadRequest(
             unasked
@@ -702,6 +739,7 @@ pub struct SpoofReport {
     pub drift: Vec<String>,
 }
 
+#[deprecated = "server entries are read by nothing; a pack ships its servers in servers.dat"]
 async fn delete_server(
     State(state): State<AppState>,
     Path(server_id): Path<String>,
@@ -1507,8 +1545,9 @@ async fn put_pack_config(
     // owner / tier / visibility / fork_of are server-controlled and never trusted
     // from the client. On an edit, carry them from the stored config so a member
     // can't reassign ownership, self-promote to official, or publish. On create,
-    // derive them from the id's namespace: a community id (u/<uid>/...) is a draft
-    // owned by that uid; a flat id is an official published operator pack.
+    // the pack is a personal draft: owned by the namespace's uid for a community
+    // id (u/<uid>/...), by whoever created it for a flat one. Making it official
+    // is an admin's separate decision (`set_pack_tier`).
     let fill = match state.storage.load_pack_config(&pack_id).await {
         Ok(existing) => {
             check_precondition(pre.as_ref(), Some(&rev_of(&existing)?), &pack_id)?;
@@ -1536,8 +1575,8 @@ async fn put_pack_config(
                 }
                 None => {
                     cfg.owner = identity.uid;
-                    cfg.tier = PackTier::Official;
-                    cfg.visibility = Visibility::Published;
+                    cfg.tier = PackTier::Community;
+                    cfg.visibility = Visibility::Draft;
                     cfg.fork_of = None;
                 }
             }
@@ -2193,6 +2232,40 @@ async fn set_pack_visibility(
         "pack.visibility",
         Some(&pack_id),
         Some(&format!("{:?}", req.visibility)),
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize)]
+struct TierReq {
+    tier: PackTier,
+}
+
+/// Make a pack official, or take it back to its owner's own. The mirror's
+/// decision, not the pack's: ownership of a pack is not a say in what the
+/// mirror vouches for, so this is the admin rung whoever owns it.
+async fn set_pack_tier(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Path(pack_id): Path<String>,
+    Json(req): Json<TierReq>,
+) -> Result<StatusCode, ApiError> {
+    if identity.role < Role::Admin {
+        return Err(ApiError::Forbidden);
+    }
+    state.storage.set_pack_tier(&pack_id, req.tier).await?;
+    state.events.pack(&pack_id, "tier");
+    state.events.catalog("packs");
+    audit(
+        &state,
+        &identity,
+        "pack.tier",
+        Some(&pack_id),
+        Some(match req.tier {
+            PackTier::Official => "official",
+            PackTier::Community => "community",
+        }),
     )
     .await;
     Ok(StatusCode::NO_CONTENT)

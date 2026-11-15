@@ -13,7 +13,11 @@
     | 'download'
     | 'notes'
     | 'search'
-    | 'alert';
+    | 'alert'
+    | 'gear'
+    | 'user'
+    | 'exit'
+    | 'enter';
 </script>
 
 <script lang="ts">
@@ -50,6 +54,20 @@
     <path d="M8.6 11.4l-1.2 1.2a2.6 2.6 0 0 1-3.7-3.7l1.2-1.2" />
   {:else if name === 'check'}
     <path d="M3.2 8.4l3 3 6.6-6.8" />
+  {:else if name === 'gear'}
+    <circle cx="8" cy="8" r="2.1" />
+    <path d="M8 1.9v1.6M8 12.5v1.6M1.9 8h1.6M12.5 8h1.6M3.7 3.7l1.1 1.1M11.2 11.2l1.1 1.1M3.7 12.3l1.1-1.1M11.2 4.8l1.1-1.1" />
+  {:else if name === 'user'}
+    <circle cx="8" cy="5.6" r="2.7" />
+    <path d="M2.9 13.6c0.7-2.4 2.7-3.8 5.1-3.8s4.4 1.4 5.1 3.8" />
+  {:else if name === 'exit'}
+    <path d="M6.4 2.6H3.6c-0.6 0-1 0.4-1 1v8.8c0 0.6 0.4 1 1 1h2.8" />
+    <path d="M10.4 5.2L13.2 8l-2.8 2.8" />
+    <path d="M13.2 8H6.2" />
+  {:else if name === 'enter'}
+    <path d="M9.6 2.6h2.8c0.6 0 1 0.4 1 1v8.8c0 0.6-0.4 1-1 1H9.6" />
+    <path d="M5.8 5.2L8.6 8l-2.8 2.8" />
+    <path d="M8.6 8H1.8" />
   {:else if name === 'alert'}
     <path d="M8 2.4l5.9 10.3a0.9 0.9 0 0 1-0.8 1.3H2.9a0.9 0.9 0 0 1-0.8-1.3z" />
     <path d="M8 6.4v3.2" />

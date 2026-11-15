@@ -39,11 +39,6 @@
     <path d="M3.4 5.3L8 7.8l4.6-2.5" />
     <path d="M8 7.8v4.8" />
     <circle cx="13.2" cy="3" r="1.6" fill="currentColor" stroke="none" />
-  {:else if name === 'servers'}
-    <rect x="2.4" y="3" width="11.2" height="4.2" rx="1.2" />
-    <rect x="2.4" y="8.8" width="11.2" height="4.2" rx="1.2" />
-    <circle cx="5" cy="5.1" r="0.8" fill="currentColor" stroke="none" />
-    <circle cx="5" cy="10.9" r="0.8" fill="currentColor" stroke="none" />
   {:else if name === 'mods'}
     <path d="M8 1.9l5.9 3.1L8 8.1 2.1 5z" />
     <path d="M2.1 8.4L8 11.5l5.9-3.1" />
@@ -55,28 +50,9 @@
     <circle cx="3.8" cy="4.6" r="1.7" />
     <circle cx="12.2" cy="4.6" r="1.7" />
     <circle cx="8.2" cy="12.4" r="1.7" />
-  {:else if name === 'users'}
-    <circle cx="6.4" cy="5.6" r="2.4" />
-    <path d="M1.9 13.6c0-2.6 2-3.9 4.5-3.9s4.5 1.3 4.5 3.9" />
-    <path d="M11.4 4.1a2.1 2.1 0 010 4" />
-    <path d="M12.4 10.1c1.2.5 1.9 1.6 1.9 3.5" />
-  {:else if name === 'moderation'}
+  {:else if name === 'admin'}
     <path d="M8 2l5.4 2.1v3.8c0 3.3-2.9 5.1-5.4 6.1-2.5-1-5.4-2.8-5.4-6.1V4.1z" />
     <path d="M5.9 8.1l1.5 1.5 2.9-3" />
-  {:else if name === 'audit'}
-    <path d="M6.2 4.4h7.4" />
-    <path d="M6.2 8h7.4" />
-    <path d="M6.2 11.6h7.4" />
-    <circle cx="3.2" cy="4.4" r="0.9" fill="currentColor" stroke="none" />
-    <circle cx="3.2" cy="8" r="0.9" fill="currentColor" stroke="none" />
-    <circle cx="3.2" cy="11.6" r="0.9" fill="currentColor" stroke="none" />
-  {:else if name === 'settings'}
-    <path d="M2.6 4.4h4" />
-    <path d="M9.4 4.4h4" />
-    <path d="M2.6 11.6h4.8" />
-    <path d="M10.2 11.6h3.2" />
-    <circle cx="7.8" cy="4.4" r="1.7" />
-    <circle cx="8.9" cy="11.6" r="1.7" />
   {:else if name === 'profile'}
     <circle cx="8" cy="5.4" r="2.6" />
     <path d="M2.9 13.8c0-2.9 2.3-4.3 5.1-4.3s5.1 1.4 5.1 4.3" />

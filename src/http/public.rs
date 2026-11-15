@@ -16,6 +16,8 @@ use axum::routing::get;
 use axum::{Json, Router};
 use std::collections::HashMap;
 
+// the deprecated server reads stay routed until they are removed
+#[allow(deprecated)]
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/health", get(health))
@@ -812,6 +814,11 @@ fn rfc3339(unix: i64) -> String {
 }
 
 // ── /v1/servers ────────────────────────────────────────────────────────────
+//
+// Deprecated. A curated server entry was meant to be a catalog of its own and
+// never became one: the launcher reads a pack's servers from the servers.dat
+// the pack ships, and nothing else reads these. They stay readable until they
+// are removed, and the panel no longer edits them.
 
 #[utoipa::path(
     get,
@@ -819,6 +826,7 @@ fn rfc3339(unix: i64) -> String {
     tag = "public",
     responses((status = 200, description = "Curated server listing", body = ServerListing))
 )]
+#[deprecated = "server entries are read by nothing; a pack ships its servers in servers.dat"]
 pub(crate) async fn list_servers(
     State(state): State<AppState>,
 ) -> Result<Json<ServerListing>, ApiError> {
@@ -840,6 +848,7 @@ pub(crate) async fn list_servers(
         (status = 404, description = "No such server")
     )
 )]
+#[deprecated = "server entries are read by nothing; a pack ships its servers in servers.dat"]
 pub(crate) async fn get_server(
     State(state): State<AppState>,
     Path(server_id): Path<String>,

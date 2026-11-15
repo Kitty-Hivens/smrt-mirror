@@ -49,7 +49,7 @@ Shared by all three:
   removed.txt                    # takedown list: sha1s that must never serve again
   jobs/<id>.json                 # job snapshots (status + log; newest 200 kept)
   featured.json                  # editorial: featured packs/servers
-  servers/<id>.json              # curated server metadata
+  servers/<id>.json              # curated server metadata (deprecated, read by nothing)
   meta/<name>.json               # cached upstream lists (Minecraft + loader versions)
   icons/<xx>/<sha1>.<ext>        # extracted mod icons, and the negative marker
   icons/modrinth/...             # proxied project icons, cached by project id
@@ -164,6 +164,13 @@ community packs), **Admin** (operator allowlist by GitHub uid, or the
 rung above admin gating compat-affecting registry writes, e.g. authored jar
 classification). Frontend role checks are rank-aware; the backend enforces
 regardless.
+
+A pack's tier is a stored fact, not its address. Every new pack, an admin's
+included, is a personal draft of whoever made it (`tier: community`), and so is
+every fork or copy. Making it official is an admin's decision
+(`PUT /v1/authoring/packs/{id}/tier`): the pack keeps its id, so links and
+installed instances are untouched, and moves from `/v1/community` to the
+official catalog at `/v1/packs`. Taking it back to its owner is the same call.
 
 ## Design invariants
 

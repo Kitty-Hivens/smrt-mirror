@@ -149,8 +149,8 @@ nobody signed in for.
 
 The scripts drive the panel in English (the harness sets `smrt.locale` before
 the app loads) so the labels they click are deterministic. The locale switch is
-on the login page and in Settings; there is none in the shell, which is what a
-script clicking for one used to miss silently -- and then navigate a Russian
+on the login page and in the account menu in the corner, not in the rail, which
+is what a script clicking for one used to miss silently -- and then navigate a Russian
 rail by English labels, screenshotting whatever happened to be on screen.
 
 ## The panel against production data

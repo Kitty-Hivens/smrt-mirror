@@ -44,8 +44,6 @@ import type {
   PulledPreview,
   ReleaseRow,
   ResolveReport,
-  ServerEntry,
-  ServerListing,
   SpoofReport,
   UnassignedJar,
   UploadRow,
@@ -243,6 +241,11 @@ async function sha1Hex(buf: ArrayBuffer): Promise<string> {
 // Per-project icon cache (incl. negative results), mirroring the launcher's
 // ModIconResolver. Shared across every ModIcon in the preview so a 56-mod pack
 // hits each Modrinth project at most once.
+function spoofAt(address?: string): string {
+  const a = address?.trim();
+  return a ? `?${new URLSearchParams({ address: a })}` : '';
+}
+
 export const api = {
   health: () => getJson<Health>('/v1/health'),
   packs: () => getJson<PackListing>('/v1/packs'),
@@ -252,7 +255,6 @@ export const api = {
   packSummary: (id: string) => getJson<PackSummary>(`/v1/packs/${encodeURIComponent(id)}`),
   // fork a pack into the caller's namespace (community draft with fork_of set)
   fork: (source: string, name: string) => send('POST', '/v1/me/forks', { source, name }),
-  servers: () => getJson<ServerListing>('/v1/servers'),
   cacheInventory: () => getJson<CacheInventory>('/v1/cache/inventory'),
   // admin-only: same jars, enriched with which pack/filename uses each sha1
   cacheUsage: () => getJson<CacheUsageListing>('/v1/cache/usage'),
@@ -264,8 +266,6 @@ export const api = {
   meAuthoring: () => getJson<string[]>('/v1/me/authoring'),
 
   // ── admin writes ──
-  saveServer: (e: ServerEntry) => send('POST', '/v1/servers', e),
-  deleteServer: (id: string) => send('DELETE', `/v1/servers/${encodeURIComponent(id)}`),
 
   // Content-addressed: hash client-side and PUT under the sha1 path. The
   // mirror re-verifies the body hashes to the claimed sha1.
@@ -563,13 +563,15 @@ export const api = {
 
   packEventsUrl: (id: string) => `/v1/authoring/packs/${encodeURIComponent(id)}/events`,
 
-  // The pack's handshake claim: what it ships, what its server wants now, and
-  // the difference (#110). The POST rewrites it from the server's answer.
-  packSpoof: (id: string) =>
-    getJson<SpoofReport>(`/v1/authoring/packs/${encodeURIComponent(id)}/spoof`),
-  generatePackSpoof: (id: string): Promise<SpoofReport> =>
+  // The pack's handshake claim: what it ships, what the server at `address`
+  // wants now, and the difference (#110). The POST rewrites it from the server's
+  // answer. Without an address the mirror falls back to a deprecated server
+  // entry, where one exists.
+  packSpoof: (id: string, address?: string) =>
+    getJson<SpoofReport>(`/v1/authoring/packs/${encodeURIComponent(id)}/spoof${spoofAt(address)}`),
+  generatePackSpoof: (id: string, address?: string): Promise<SpoofReport> =>
     tracked(async () => {
-      const r = await fetch(`/v1/authoring/packs/${encodeURIComponent(id)}/spoof`, {
+      const r = await fetch(`/v1/authoring/packs/${encodeURIComponent(id)}/spoof${spoofAt(address)}`, {
         method: 'POST',
         credentials: 'include',
       });
@@ -809,6 +811,10 @@ export const api = {
   liftSuspension: (uid: number) => send('DELETE', `/v1/users/${uid}/suspension`),
   setVisibility: (id: string, visibility: Visibility) =>
     send('PUT', `/v1/authoring/packs/${encodeURIComponent(id)}/visibility`, { visibility }),
+  /// Make a pack official, or give it back to its owner as a personal one. The
+  /// id stays; what changes is which listing it is in. Admin only.
+  setTier: (id: string, tier: 'official' | 'community') =>
+    send('PUT', `/v1/authoring/packs/${encodeURIComponent(id)}/tier`, { tier }),
   deletePack: (id: string) => send('DELETE', `/v1/authoring/packs/${encodeURIComponent(id)}`),
 
   // ── upload moderation ──

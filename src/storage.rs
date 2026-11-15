@@ -569,6 +569,32 @@ impl Storage {
         Ok(())
     }
 
+    /// Make a pack official or personal. The pack keeps its id, so a link to it,
+    /// a player's installed instance and its history all stay where they were;
+    /// what moves is which listing it appears in (`/v1/packs` or
+    /// `/v1/community`). Same two-file write as `set_pack_visibility`.
+    pub async fn set_pack_tier(&self, pack_id: &str, tier: PackTier) -> Result<(), ApiError> {
+        if !is_safe_id(pack_id) {
+            return Err(ApiError::BadRequest("invalid pack id".into()));
+        }
+        let mut found = false;
+        if let Ok(mut summary) = self.load_pack_summary(pack_id).await {
+            summary.tier = tier;
+            self.save_pack_summary(&summary).await?;
+            found = true;
+        }
+        let _guard = self.lock_pack_config(pack_id).await;
+        if let Ok(mut cfg) = self.load_pack_config(pack_id).await {
+            cfg.tier = tier;
+            self.save_pack_config(pack_id, &cfg).await?;
+            found = true;
+        }
+        if !found {
+            return Err(ApiError::NotFound);
+        }
+        Ok(())
+    }
+
     /// Delete a pack and everything under it -- config, summary, manifests, and
     /// static assets. `NotFound` if the pack does not exist. The shared mod cache
     /// is content-addressed and left untouched; other packs keep their jars.
@@ -623,14 +649,11 @@ impl Storage {
 
         let mut cfg = self.load_pack_config(from).await?;
         cfg.pack_id = to.to_string();
-        // the clone is a fresh draft owned by whoever made it; its tier follows
-        // the target namespace, and fork_of is set only when this is a fork.
+        // the clone is a fresh draft owned by whoever made it, and like every new
+        // pack it is theirs until an admin makes it official; fork_of is set only
+        // when this is a fork.
         cfg.owner = owner;
-        cfg.tier = if to.starts_with("u/") {
-            PackTier::Community
-        } else {
-            PackTier::Official
-        };
+        cfg.tier = PackTier::Community;
         cfg.visibility = Visibility::Draft;
         cfg.fork_of = fork_of;
         if let Some(loader) = loader {

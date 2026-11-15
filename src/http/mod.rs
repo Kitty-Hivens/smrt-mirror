@@ -647,6 +647,94 @@ mod tests {
         );
     }
 
+    // A pack is its maker's until the mirror vouches for it. Making it official
+    // is an admin's decision and moves which listing it is in, never its id; and
+    // an admin's own list is their personal packs, not every pack they curate.
+    #[tokio::test]
+    async fn a_new_pack_is_personal_until_an_admin_makes_it_official() {
+        use crate::domain::{PackTier, Visibility};
+        use axum::http::StatusCode;
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let admin = state
+            .accounts
+            .sign_in_github(1, "operator", Some(crate::accounts::Role::Admin))
+            .unwrap();
+        let member = state.accounts.sign_in_github(42, "member", None).unwrap();
+        let app = router(state.clone());
+        let body = serde_json::to_string(&sample_pack("Fresh", Visibility::Published)).unwrap();
+
+        assert_eq!(
+            call(
+                &app,
+                "PUT",
+                "/v1/authoring/packs/Fresh/config",
+                Some(&admin),
+                Some(&body)
+            )
+            .await,
+            StatusCode::CREATED
+        );
+        let cfg = state.storage.load_pack_config("Fresh").await.unwrap();
+        assert_eq!(cfg.tier, PackTier::Community, "a new pack is personal");
+        assert_eq!(cfg.owner, 1, "and its maker's");
+        assert_eq!(cfg.visibility, Visibility::Draft, "and a draft");
+        let (_, mine) = read(&app, "/v1/me/authoring", Some(&admin)).await;
+        assert!(
+            mine.contains("Fresh"),
+            "it is in its maker's own list: {mine}"
+        );
+
+        // the mirror vouches, not the pack's owner, and not a member
+        assert_eq!(
+            call(
+                &app,
+                "PUT",
+                "/v1/authoring/packs/Fresh/tier",
+                Some(&member),
+                Some(r#"{"tier":"official"}"#)
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(
+                &app,
+                "PUT",
+                "/v1/authoring/packs/Fresh/tier",
+                Some(&admin),
+                Some(r#"{"tier":"official"}"#)
+            )
+            .await,
+            StatusCode::NO_CONTENT
+        );
+        let cfg = state.storage.load_pack_config("Fresh").await.unwrap();
+        assert_eq!(cfg.tier, PackTier::Official);
+        assert_eq!(cfg.pack_id, "Fresh", "the id does not move");
+        let (_, mine) = read(&app, "/v1/me/authoring", Some(&admin)).await;
+        assert!(
+            !mine.contains("Fresh"),
+            "an official pack is curated in its own section, not listed as the admin's: {mine}"
+        );
+
+        // and back
+        assert_eq!(
+            call(
+                &app,
+                "PUT",
+                "/v1/authoring/packs/Fresh/tier",
+                Some(&admin),
+                Some(r#"{"tier":"community"}"#)
+            )
+            .await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            state.storage.load_pack_config("Fresh").await.unwrap().tier,
+            PackTier::Community
+        );
+    }
+
     // A topic is the conversation that is not a bug: a player asking how a pack
     // plays. It goes through the same door as a report, lists beside it, and
     // settles and reopens the way a report does.
