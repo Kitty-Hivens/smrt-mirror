@@ -252,6 +252,7 @@ struct BootstrapParams {
 /// away: what changes is that the API says no rather than doing it.
 async fn bootstrap_pack(
     State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
     Path(pack_id): Path<String>,
     Query(p): Query<BootstrapParams>,
     body: Bytes,
@@ -274,6 +275,7 @@ async fn bootstrap_pack(
         },
         java_major: p.java_major.unwrap_or(8),
         storage: state.storage.root().to_path_buf(),
+        owner: identity.uid,
     };
     let job = state
         .jobs

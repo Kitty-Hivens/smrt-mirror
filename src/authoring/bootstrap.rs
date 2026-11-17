@@ -22,6 +22,9 @@ pub struct BootstrapArgs {
     /// Storage root: extracted mod jars land in `{storage}/cache/`, extras
     /// land in `{storage}/packs/{pack_id}/static/`.
     pub storage: PathBuf,
+    /// Who the new pack belongs to. Like every new pack it is their personal
+    /// draft until an admin makes it official.
+    pub owner: i64,
 }
 
 pub async fn bootstrap(args: BootstrapArgs, archive: Vec<u8>) -> Result<PackConfig> {
@@ -149,9 +152,9 @@ pub async fn bootstrap(args: BootstrapArgs, archive: Vec<u8>) -> Result<PackConf
         mods: declared_mods,
         assets: declared_assets,
         pack_meta: Default::default(),
-        owner: crate::domain::pack::default_owner(),
-        tier: crate::domain::pack::default_tier(),
-        visibility: crate::domain::pack::default_visibility(),
+        owner: args.owner,
+        tier: crate::domain::PackTier::Community,
+        visibility: crate::domain::Visibility::Draft,
         fork_of: None,
     })
 }

@@ -176,7 +176,9 @@
   async function loadAttention() {
     const ids = allPackIds;
     const [threads, audit] = await Promise.all([
-      Promise.allSettled(ids.map((id) => api.threads(id, undefined, false, 5))),
+      // a whole page per pack, so the tile counts what is open rather than
+      // the first few of each
+      Promise.allSettled(ids.map((id) => api.threads(id, undefined, false, 50))),
       api.auditLog(8).catch(() => null),
     ]);
     talk = threads

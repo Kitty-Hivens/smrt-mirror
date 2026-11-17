@@ -8,6 +8,15 @@ version section when a release is tagged.
 
 ### Fixed
 
+- A pack seeded from an instance archive was still made official and
+  published, unlike every other new pack. It is now a personal draft of
+  whoever seeded it.
+- On a pack's page the card down the right edge started 24px lower than its
+  column and jumped up when unfolding the versions grew it: its sticky offset
+  counted from inside the scrolling box's padding, so the padding was added
+  twice. It now starts level with the way back and holds still.
+- The overview's count of open discussions read the first five of each pack
+  and could come out short.
 - A guest's sign-in sat inside the settings gear, and a whole side rail held
   the one section a guest has. A guest's shell now has no rail: the brand leads
   the top bar, and sign in is a button beside the gear, which holds the theme
