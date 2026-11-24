@@ -1571,6 +1571,88 @@ mod tests {
         );
     }
 
+    /// A read that may hold a tag already, with its headers.
+    async fn read_holding(
+        app: &axum::Router,
+        uri: &str,
+        session: Option<&str>,
+        tag: Option<&str>,
+    ) -> axum::response::Response {
+        use axum::body::Body;
+        use axum::http::{Request, header};
+        use tower::ServiceExt;
+        let mut req = Request::builder().uri(uri);
+        if let Some(sid) = session {
+            req = req.header(header::COOKIE, format!("smrt_session={sid}"));
+        }
+        if let Some(tag) = tag {
+            req = req.header(header::IF_NONE_MATCH, tag);
+        }
+        app.clone()
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    fn header_of(resp: &axum::response::Response, name: axum::http::HeaderName) -> String {
+        resp.headers()
+            .get(&name)
+            .unwrap_or_else(|| panic!("no {name} on {:?}", resp.status()))
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    // A pack's picture keeps its address when it is replaced, so a copy of it
+    // is always asked about, and asking costs no body while it has not moved.
+    // Who else may keep the copy follows who may read the pack.
+    #[tokio::test]
+    async fn a_packs_picture_is_kept_and_always_asked_about() {
+        use crate::domain::Visibility;
+        use axum::http::{StatusCode, header};
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let keeper = state
+            .accounts
+            .sign_in_github(1, "keeper", Some(crate::accounts::Role::Admin))
+            .unwrap();
+        let app = router(state.clone());
+
+        for (id, vis, caching) in [
+            ("Open", Visibility::Published, "public, no-cache"),
+            ("ByLink", Visibility::Unlisted, "public, no-cache"),
+            ("Secret", Visibility::Draft, "private, no-cache"),
+        ] {
+            let summary = crate::authoring::make_pack_summary(
+                &sample_pack(id, vis),
+                "0.1.0",
+                "http://localhost",
+                "en",
+            );
+            state.storage.save_pack_summary(&summary).await.unwrap();
+            state
+                .storage
+                .save_pack_static(id, "_nexira/banner.png", b"a picture")
+                .await
+                .unwrap();
+
+            let uri = format!("/v1/packs/{id}/static/_nexira/banner.png");
+            let resp = read_holding(&app, &uri, Some(&keeper), None).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{id}");
+            assert_eq!(header_of(&resp, header::CACHE_CONTROL), caching, "{id}");
+
+            let tag = header_of(&resp, header::ETAG);
+            let resp = read_holding(&app, &uri, Some(&keeper), Some(&tag)).await;
+            assert_eq!(resp.status(), StatusCode::NOT_MODIFIED, "{id}");
+            assert_eq!(header_of(&resp, header::CACHE_CONTROL), caching, "{id}");
+        }
+
+        // knowing a draft's tag is not a way to learn the draft is there
+        let uri = "/v1/packs/Secret/static/_nexira/banner.png";
+        let resp = read_holding(&app, uri, None, Some("*")).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
     /// Ask a one-route service wearing the real compression layer for a body of
     /// `content_type`, and report what it came back encoded as.
     async fn encoding_of(content_type: &'static str) -> Option<String> {
