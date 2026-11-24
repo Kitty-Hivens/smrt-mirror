@@ -8,6 +8,15 @@ version section when a release is tagged.
 
 ### Fixed
 
+- A client holding a file's `ETag` got the whole file again: `If-None-Match`
+  and `If-Match` never reached the code that answers them. A pack's pictures and
+  files and the cache jars now answer `304` to a tag that still holds, and a
+  resumed download can be pinned to the tag it started from.
+- `/v1/packs`, `/v1/servers` and `/v1/cache/inventory` never answered `304`,
+  because the moment they were read is in the body and the tag was taken over
+  it. The moment stays in the answer and no longer counts as a change.
+- An answer that carries a tag of its own was sent without `Cache-Control`. It
+  now asks to be revalidated like every other JSON read.
 - A pack seeded from an instance archive was still made official and
   published, unlike every other new pack. It is now a personal draft of
   whoever seeded it.
@@ -534,6 +543,9 @@ version section when a release is tagged.
 
 ### Changed
 
+- A pack's static files say how long to keep them: `no-cache`, so a copy is kept
+  and asked about before use, `public` for a published or unlisted pack and
+  `private` for a draft.
 - Every new pack, an admin's included, is a personal draft of whoever made it,
   and so is every fork or copy. An admin makes a pack official from the packs
   section (`PUT /v1/authoring/packs/{id}/tier`), or gives it back to its owner,

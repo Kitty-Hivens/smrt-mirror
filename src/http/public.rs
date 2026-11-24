@@ -1,5 +1,6 @@
 use super::ApiError;
 use super::admin::CommitDiff;
+use super::etag::stamped;
 use super::page::{PageQuery, next_link};
 use crate::accounts::{Notification, PackLevel, Thread, ThreadView};
 use crate::authoring::jar_icon;
@@ -201,9 +202,7 @@ pub(crate) async fn health() -> Json<Health> {
     tag = "public",
     responses((status = 200, description = "The launcher catalog: official, published packs", body = PackListing))
 )]
-pub(crate) async fn list_packs(
-    State(state): State<AppState>,
-) -> Result<Json<PackListing>, ApiError> {
+pub(crate) async fn list_packs(State(state): State<AppState>) -> Result<Response, ApiError> {
     // The launcher's catalog is official + published only; drafts, unlisted, and
     // community packs are reached through other surfaces, never this listing.
     let mut packs: Vec<PackSummary> = state
@@ -216,11 +215,15 @@ pub(crate) async fn list_packs(
     for p in &mut packs {
         enrich_latest_build(&state, p).await;
     }
-    Ok(Json(PackListing {
-        schema_version: SCHEMA_VERSION,
-        generated_at: now_rfc3339(),
-        packs,
-    }))
+    Ok(stamped(
+        PackListing {
+            schema_version: SCHEMA_VERSION,
+            generated_at: String::new(),
+            packs,
+        },
+        now_rfc3339(),
+        |listing, now| listing.generated_at = now,
+    ))
 }
 
 /// Stamp `latest_built_at` / `latest_channel` onto a summary from the latest
@@ -492,6 +495,7 @@ pub(crate) async fn get_pack_diff(
     ),
     responses(
         (status = 200, description = "The static file bytes, content type by extension"),
+        (status = 304, description = "The caller already holds these bytes"),
         (status = 404, description = "No such pack or file")
     )
 )]
@@ -501,12 +505,24 @@ pub(crate) async fn get_pack_static(
     headers: HeaderMap,
     Path((pack_id, rel_path)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
-    gate_pack_read(&state, &headers, &pack_id).await?;
+    let summary = gate_pack_read(&state, &headers, &pack_id).await?;
     let path = state.storage.pack_static_path(&pack_id, &rel_path)?;
     if tokio::fs::metadata(&path).await.is_err() {
         return Err(ApiError::NotFound);
     }
-    serve_file(&method, &headers, &path, content_type_for(&rel_path)).await
+    let mut resp = serve_file(&method, &headers, &path, content_type_for(&rel_path)).await?;
+    // Asked about every time rather than trusted for a while: the address does
+    // not change with the content, so a copy kept past a replacement fails the
+    // sha1 the manifest gives for it.
+    let caching = match summary.visibility {
+        Visibility::Draft => "private, no-cache",
+        Visibility::Published | Visibility::Unlisted => "public, no-cache",
+    };
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static(caching),
+    );
+    Ok(resp)
 }
 
 /// Draft packs are private -- readable only by their owner (or an admin), so a
@@ -532,9 +548,10 @@ async fn gate_pack_read(
     state: &AppState,
     headers: &HeaderMap,
     pack_id: &str,
-) -> Result<(), ApiError> {
+) -> Result<PackSummary, ApiError> {
     let summary = state.storage.load_pack_summary(pack_id).await?;
-    gate_summary(state, headers, pack_id, &summary).await
+    gate_summary(state, headers, pack_id, &summary).await?;
+    Ok(summary)
 }
 
 // ── discussions, in the open ────────────────────────────────────────────────
@@ -827,15 +844,17 @@ fn rfc3339(unix: i64) -> String {
     responses((status = 200, description = "Curated server listing", body = ServerListing))
 )]
 #[deprecated = "server entries are read by nothing; a pack ships its servers in servers.dat"]
-pub(crate) async fn list_servers(
-    State(state): State<AppState>,
-) -> Result<Json<ServerListing>, ApiError> {
+pub(crate) async fn list_servers(State(state): State<AppState>) -> Result<Response, ApiError> {
     let servers = state.storage.list_servers().await?;
-    Ok(Json(ServerListing {
-        schema_version: SCHEMA_VERSION,
-        generated_at: now_rfc3339(),
-        servers,
-    }))
+    Ok(stamped(
+        ServerListing {
+            schema_version: SCHEMA_VERSION,
+            generated_at: String::new(),
+            servers,
+        },
+        now_rfc3339(),
+        |listing, now| listing.generated_at = now,
+    ))
 }
 
 #[utoipa::path(
@@ -882,6 +901,7 @@ pub(crate) async fn get_featured(
     ),
     responses(
         (status = 200, description = "The cached jar bytes"),
+        (status = 304, description = "The caller already holds these bytes"),
         (status = 404, description = "Not cached, or taken down")
     )
 )]
@@ -1052,12 +1072,15 @@ pub(crate) async fn get_cache_inventory(
         .await?;
     // the envelope stays the envelope; only the rows in it are a page
     let (entries, next) = page.split(entries, |e| vec![e.sha1.clone()]);
-    let mut resp = Json(CacheInventory {
-        schema_version: SCHEMA_VERSION,
-        generated_at: now_rfc3339(),
-        entries,
-    })
-    .into_response();
+    let mut resp = stamped(
+        CacheInventory {
+            schema_version: SCHEMA_VERSION,
+            generated_at: String::new(),
+            entries,
+        },
+        now_rfc3339(),
+        |listing, now| listing.generated_at = now,
+    );
     if let Some(value) = next_link(&uri, next.as_deref()) {
         resp.headers_mut().insert(header::LINK, value);
     }
@@ -1144,8 +1167,8 @@ pub(crate) async fn get_user_avatar(
 /// `If-Range` is not among the headers passed on, because the file service does
 /// not implement it: forwarding it would read as support for a conditional that
 /// is silently ignored, which is worse than not offering it. A caller resuming
-/// something that can change under them pairs the range with
-/// `If-Unmodified-Since`, which is answered.
+/// something that can change under them pairs the range with `If-Match` or
+/// `If-Unmodified-Since`, which are answered.
 async fn serve_file(
     method: &Method,
     headers: &HeaderMap,
@@ -1157,8 +1180,10 @@ async fn serve_file(
 
     // What the file service needs to answer conditionally; the rest of the
     // request is this handler's business and was already acted on.
-    const CONDITIONAL: [header::HeaderName; 3] = [
+    const CONDITIONAL: [header::HeaderName; 5] = [
         header::RANGE,
+        header::IF_MATCH,
+        header::IF_NONE_MATCH,
         header::IF_MODIFIED_SINCE,
         header::IF_UNMODIFIED_SINCE,
     ];
@@ -1312,6 +1337,82 @@ mod tests {
             StatusCode::PRECONDITION_FAILED,
             "a moved file must not be spliced into a half-finished download"
         );
+    }
+
+    /// Ask for `path` with these conditions on it.
+    async fn read_if(
+        path: &std::path::Path,
+        conditions: &[(header::HeaderName, &str)],
+    ) -> Response {
+        let mut headers = HeaderMap::new();
+        for (name, value) in conditions {
+            headers.insert(name, value.parse().unwrap());
+        }
+        serve_file(&Method::GET, &headers, path, "image/png")
+            .await
+            .expect("the file is there")
+    }
+
+    async fn tag_of(path: &std::path::Path) -> String {
+        read(path, None)
+            .await
+            .headers()
+            .get(header::ETAG)
+            .expect("a served file carries a tag")
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn holding_a_files_tag_costs_no_body() {
+        let (_dir, path) = a_file(b"0123456789");
+        let tag = tag_of(&path).await;
+        let resp = read_if(&path, &[(header::IF_NONE_MATCH, &tag)]).await;
+        assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            resp.headers().get(header::ETAG).unwrap(),
+            &tag,
+            "the caller keeps holding it"
+        );
+        assert!(body_of(resp).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn somebody_elses_tag_gets_the_file() {
+        let (_dir, path) = a_file(b"0123456789");
+        let resp = read_if(&path, &[(header::IF_NONE_MATCH, "\"not-this-one\"")]).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_of(resp).await, b"0123456789");
+    }
+
+    // A client that keeps both sends both, and the tag is the one that decides:
+    // a date older than the file would otherwise fetch what is already held.
+    #[tokio::test]
+    async fn a_tag_outranks_a_date() {
+        let (_dir, path) = a_file(b"0123456789");
+        let tag = tag_of(&path).await;
+        let old = (header::IF_MODIFIED_SINCE, "Fri, 09 Aug 1996 14:21:40 GMT");
+        let resp = read_if(&path, &[(header::IF_NONE_MATCH, &tag), old.clone()]).await;
+        assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+        let resp = read_if(&path, &[old]).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the date alone says fetch it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_range_can_be_made_conditional_on_the_tag() {
+        let (_dir, path) = a_file(b"0123456789");
+        let tag = tag_of(&path).await;
+        let range = (header::RANGE, "bytes=7-");
+        let resp = read_if(&path, &[range.clone(), (header::IF_MATCH, &tag)]).await;
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(body_of(resp).await, b"789");
+        let resp = read_if(&path, &[range, (header::IF_MATCH, "\"moved-on\"")]).await;
+        assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
     }
 
     #[tokio::test]

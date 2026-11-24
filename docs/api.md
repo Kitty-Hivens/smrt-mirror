@@ -157,10 +157,11 @@ asks for the rest instead of starting over. Send `Range: bytes=<got>-` and
 expect `206` with `Content-Range`; a range past the end answers `416`.
 
 Resuming safely: a cache jar is content-addressed, so its bytes cannot change
-under a resume. A static file can, and `If-Range` is **not** honoured -- pair
-the range with `If-Unmodified-Since: <the Last-Modified you started from>` and
-a file that moved answers `412` instead of splicing two versions together.
-Verify the manifest's `sha1` after assembling either way.
+under a resume. A static file can, and `If-Range` is **not** honoured: pair the
+range with `If-Match: <the ETag you started from>`, or with
+`If-Unmodified-Since` and its `Last-Modified`, and a file that moved answers
+`412` instead of splicing two versions together. Verify the manifest's `sha1`
+after assembling either way.
 
 ## Reading cheaply
 
@@ -176,7 +177,17 @@ Three things the whole `/v1` surface does, worth wiring into a client once:
   data, not the encoding it arrived in. Tagged means a `200` whose body was
   built whole; a streamed response, and anything past 8 MiB, is answered
   untagged rather than hashed on every request, so treat a missing `ETag` as
-  "cannot revalidate this one" rather than as an error.
+  "cannot revalidate this one" rather than as an error. The listings that say
+  when they were read (`generated_at` on `/v1/packs`, `/v1/servers` and
+  `/v1/cache/inventory`) leave that moment out of the tag.
+
+  Files answer the same way. A cache jar and anything under
+  `/v1/packs/{id}/static/...` carry an `ETag` and a `Last-Modified`, and either
+  one sent back (`If-None-Match`, `If-Modified-Since`) costs `304` while the
+  file has not moved. When both are sent the tag decides. A file's tag is strong
+  and changes whenever the file is written, even with the same bytes. A static
+  file is served `no-cache`: keep a copy of a banner or an icon, and ask before
+  using it, because its address stays the same when the picture is replaced.
 - **Paging.** Listings that grow without bound accept `?limit=<n>` (capped at
   500): `/v1/cache/inventory`, a pack's discussions and one discussion's
   comments, and the gated `/v1/registry/mods`, `/v1/audit`, a pack's commit log
