@@ -177,7 +177,9 @@ Three things the whole `/v1` surface does, worth wiring into a client once:
   data, not the encoding it arrived in. Tagged means a `200` whose body was
   built whole; a streamed response, and anything past 8 MiB, is answered
   untagged rather than hashed on every request, so treat a missing `ETag` as
-  "cannot revalidate this one" rather than as an error.
+  "cannot revalidate this one" rather than as an error. The listings that say
+  when they were read (`generated_at` on `/v1/packs`, `/v1/servers` and
+  `/v1/cache/inventory`) leave that moment out of the tag.
 
   Files answer the same way. A cache jar and anything under
   `/v1/packs/{id}/static/...` carry an `ETag` and a `Last-Modified`, and either

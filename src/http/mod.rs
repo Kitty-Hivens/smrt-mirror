@@ -1653,6 +1653,54 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
+    // These listings say when they were read, which is different every time and
+    // is not a change in what they list.
+    #[tokio::test]
+    async fn a_listing_revalidates_though_it_says_when_it_was_read() {
+        use crate::domain::Visibility;
+        use axum::http::{StatusCode, header};
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let app = router(state.clone());
+        let publish = async |id: &str| {
+            let summary = crate::authoring::make_pack_summary(
+                &sample_pack(id, Visibility::Published),
+                "0.1.0",
+                "http://localhost",
+                "en",
+            );
+            state.storage.save_pack_summary(&summary).await.unwrap();
+        };
+        publish("Create").await;
+
+        for uri in ["/v1/packs", "/v1/servers", "/v1/cache/inventory"] {
+            let resp = read_holding(&app, uri, None, None).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+            assert_eq!(
+                header_of(&resp, header::CACHE_CONTROL),
+                "private, no-cache",
+                "{uri}"
+            );
+            let tag = header_of(&resp, header::ETAG);
+            assert!(tag.starts_with("W/\""), "{uri}: {tag}");
+            let (_, body) = read(&app, uri, None).await;
+            let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let read_at = body["generated_at"].as_str().unwrap();
+            assert!(read_at.starts_with("20"), "{uri} is still stamped: {body}");
+
+            let resp = read_holding(&app, uri, None, Some(&tag)).await;
+            assert_eq!(resp.status(), StatusCode::NOT_MODIFIED, "{uri}");
+        }
+
+        let tag = header_of(
+            &read_holding(&app, "/v1/packs", None, None).await,
+            header::ETAG,
+        );
+        publish("RPG").await;
+        let resp = read_holding(&app, "/v1/packs", None, Some(&tag)).await;
+        assert_eq!(resp.status(), StatusCode::OK, "a new pack is a change");
+    }
+
     /// Ask a one-route service wearing the real compression layer for a body of
     /// `content_type`, and report what it came back encoded as.
     async fn encoding_of(content_type: &'static str) -> Option<String> {

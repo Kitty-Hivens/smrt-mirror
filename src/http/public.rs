@@ -1,5 +1,6 @@
 use super::ApiError;
 use super::admin::CommitDiff;
+use super::etag::stamped;
 use super::page::{PageQuery, next_link};
 use crate::accounts::{Notification, PackLevel, Thread, ThreadView};
 use crate::authoring::jar_icon;
@@ -201,9 +202,7 @@ pub(crate) async fn health() -> Json<Health> {
     tag = "public",
     responses((status = 200, description = "The launcher catalog: official, published packs", body = PackListing))
 )]
-pub(crate) async fn list_packs(
-    State(state): State<AppState>,
-) -> Result<Json<PackListing>, ApiError> {
+pub(crate) async fn list_packs(State(state): State<AppState>) -> Result<Response, ApiError> {
     // The launcher's catalog is official + published only; drafts, unlisted, and
     // community packs are reached through other surfaces, never this listing.
     let mut packs: Vec<PackSummary> = state
@@ -216,11 +215,15 @@ pub(crate) async fn list_packs(
     for p in &mut packs {
         enrich_latest_build(&state, p).await;
     }
-    Ok(Json(PackListing {
-        schema_version: SCHEMA_VERSION,
-        generated_at: now_rfc3339(),
-        packs,
-    }))
+    Ok(stamped(
+        PackListing {
+            schema_version: SCHEMA_VERSION,
+            generated_at: String::new(),
+            packs,
+        },
+        now_rfc3339(),
+        |listing, now| listing.generated_at = now,
+    ))
 }
 
 /// Stamp `latest_built_at` / `latest_channel` onto a summary from the latest
@@ -841,15 +844,17 @@ fn rfc3339(unix: i64) -> String {
     responses((status = 200, description = "Curated server listing", body = ServerListing))
 )]
 #[deprecated = "server entries are read by nothing; a pack ships its servers in servers.dat"]
-pub(crate) async fn list_servers(
-    State(state): State<AppState>,
-) -> Result<Json<ServerListing>, ApiError> {
+pub(crate) async fn list_servers(State(state): State<AppState>) -> Result<Response, ApiError> {
     let servers = state.storage.list_servers().await?;
-    Ok(Json(ServerListing {
-        schema_version: SCHEMA_VERSION,
-        generated_at: now_rfc3339(),
-        servers,
-    }))
+    Ok(stamped(
+        ServerListing {
+            schema_version: SCHEMA_VERSION,
+            generated_at: String::new(),
+            servers,
+        },
+        now_rfc3339(),
+        |listing, now| listing.generated_at = now,
+    ))
 }
 
 #[utoipa::path(
@@ -1067,12 +1072,15 @@ pub(crate) async fn get_cache_inventory(
         .await?;
     // the envelope stays the envelope; only the rows in it are a page
     let (entries, next) = page.split(entries, |e| vec![e.sha1.clone()]);
-    let mut resp = Json(CacheInventory {
-        schema_version: SCHEMA_VERSION,
-        generated_at: now_rfc3339(),
-        entries,
-    })
-    .into_response();
+    let mut resp = stamped(
+        CacheInventory {
+            schema_version: SCHEMA_VERSION,
+            generated_at: String::new(),
+            entries,
+        },
+        now_rfc3339(),
+        |listing, now| listing.generated_at = now,
+    );
     if let Some(value) = next_link(&uri, next.as_deref()) {
         resp.headers_mut().insert(header::LINK, value);
     }

@@ -17,14 +17,18 @@
 //!
 //! Where a handler already tags its own answer, that tag stands: the pack
 //! config's is the revision a save is checked against, and a content hash in its
-//! place would be a different statement wearing the same header.
+//! place would be a different statement wearing the same header. A listing that
+//! says when it was read tags itself as well ([`stamped`]): the moment differs on
+//! every request, so a hash that included it would never match twice.
 
+use axum::Json;
 use axum::body::HttpBody as _;
 use axum::body::{Body, to_bytes};
 use axum::extract::Request;
-use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
+use serde::Serialize;
 use sha1::{Digest, Sha1};
 
 /// Bodies past this are answered as they are, untagged. Hashing is linear in
@@ -41,7 +45,7 @@ pub async fn tag_json(req: Request, next: Next) -> Response {
     // and "you already have this" is the wrong thing to say about an act.
     let readonly = matches!(*req.method(), Method::GET | Method::HEAD);
     let asked_for = req.headers().get(header::IF_NONE_MATCH).cloned();
-    let resp = next.run(req).await;
+    let mut resp = next.run(req).await;
 
     if !readonly || resp.status() != StatusCode::OK || !is_json(&resp) {
         return resp;
@@ -55,6 +59,7 @@ pub async fn tag_json(req: Request, next: Next) -> Response {
         let Ok(tag) = own.to_str().map(str::to_string) else {
             return resp;
         };
+        ask_to_revalidate(resp.headers_mut());
         if asked_for.is_some_and(|v| holds(&v, &tag)) {
             return not_modified(resp);
         }
@@ -74,27 +79,51 @@ pub async fn tag_json(req: Request, next: Next) -> Response {
         return Response::from_parts(parts, Body::empty());
     };
 
-    let tag = format!("W/\"{}\"", hex::encode(Sha1::digest(&bytes)));
+    let tag = weak_tag(&bytes);
     if let Ok(value) = HeaderValue::from_str(&tag) {
         parts.headers.insert(header::ETAG, value);
     }
-    // Without this a browser has no reason to revalidate, so the tag it was
-    // given never comes back and the 304 path is never taken. `private` because
-    // one middleware covers the public catalog and the session-gated panel
-    // reads alike, and a shared cache holding the latter would hand one
-    // operator's view to the next caller. A handler that has said something
-    // about caching already knows better than this default.
-    if !parts.headers.contains_key(header::CACHE_CONTROL) {
-        parts.headers.insert(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static("private, no-cache"),
-        );
-    }
+    ask_to_revalidate(&mut parts.headers);
 
     if asked_for.is_some_and(|v| holds(&v, &tag)) {
         return not_modified(Response::from_parts(parts, Body::empty()));
     }
     Response::from_parts(parts, Body::from(bytes))
+}
+
+/// Answer a listing that carries the moment it was read, tagged by everything in
+/// it but that moment. `listing` arrives with the stamp blank, and `stamp` fills
+/// it in once the tag is taken.
+pub fn stamped<T: Serialize>(
+    mut listing: T,
+    now: String,
+    stamp: impl FnOnce(&mut T, String),
+) -> Response {
+    let tag = serde_json::to_vec(&listing)
+        .ok()
+        .and_then(|bytes| HeaderValue::from_str(&weak_tag(&bytes)).ok());
+    stamp(&mut listing, now);
+    let mut resp = Json(listing).into_response();
+    if let Some(tag) = tag {
+        resp.headers_mut().insert(header::ETAG, tag);
+    }
+    resp
+}
+
+fn weak_tag(bytes: &[u8]) -> String {
+    format!("W/\"{}\"", hex::encode(Sha1::digest(bytes)))
+}
+
+/// Without this a browser has no reason to revalidate, so the tag it was given
+/// never comes back and the 304 path is never taken. `private` because one
+/// middleware covers the public catalog and the session-gated panel reads alike,
+/// and a shared cache holding the latter would hand one operator's view to the
+/// next caller. A handler that has said something about caching already knows
+/// better than this default.
+fn ask_to_revalidate(headers: &mut HeaderMap) {
+    headers
+        .entry(header::CACHE_CONTROL)
+        .or_insert(HeaderValue::from_static("private, no-cache"));
 }
 
 /// The same answer, reduced to "you already have it": the tag and the caching
@@ -257,6 +286,11 @@ mod tests {
         let resp = fetch("/own", Some("\"rev-7\"")).await;
         assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
         assert_eq!(etag_of(&resp), "\"rev-7\"", "the caller keeps holding it");
+        assert_eq!(
+            resp.headers().get(header::CACHE_CONTROL).unwrap(),
+            "private, no-cache",
+            "its own tag is as much a reason to ask again as a computed one"
+        );
         let resp = fetch("/own", Some("\"rev-6\"")).await;
         assert_eq!(resp.status(), StatusCode::OK);
     }
